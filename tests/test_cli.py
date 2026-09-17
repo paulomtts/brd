@@ -158,6 +158,8 @@ def test_add_with_unknown_blocked_by_errors(initialized_project):
         ["update", "some-id", "--title", "X"],
         ["block", "some-id", "--by", "other-id"],
         ["unblock", "some-id", "--by", "other-id"],
+        ["tree"],
+        ["next"],
     ],
 )
 def test_commands_outside_project_error(tmp_path, monkeypatch, args):
@@ -346,3 +348,84 @@ def test_update_rejects_parent_cycle(initialized_project):
     payload = json.loads(result.stdout)
     assert payload["ok"] is False
     assert payload["error"]["type"] == "CycleError"
+
+
+def test_tree_whole_board(initialized_project):
+    runner.invoke(app, ["add", "--title", "Root card"])
+
+    result = runner.invoke(app, ["tree"])
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is True
+    assert [node["title"] for node in payload["data"]] == ["Root card"]
+    assert payload["data"][0]["children"] == []
+
+
+def test_tree_rooted_at_card(initialized_project):
+    parent = json.loads(runner.invoke(app, ["add", "--title", "Parent"]).stdout)["data"]
+    runner.invoke(app, ["add", "--title", "Child", "--parent", parent["id"]])
+
+    result = runner.invoke(app, ["tree", parent["id"]])
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert len(payload["data"]) == 1
+    node = payload["data"][0]
+    assert node["title"] == "Parent"
+    assert [child["title"] for child in node["children"]] == ["Child"]
+
+
+@pytest.mark.parametrize("flag", ["--pretty", "--human"])
+def test_tree_pretty_renders_indented_text(initialized_project, flag):
+    parent = json.loads(runner.invoke(app, ["add", "--title", "Parent"]).stdout)["data"]
+    child = json.loads(
+        runner.invoke(app, ["add", "--title", "Child", "--parent", parent["id"]]).stdout
+    )["data"]
+
+    result = runner.invoke(app, ["tree", flag])
+    assert result.exit_code == 0
+    with pytest.raises(json.JSONDecodeError):
+        json.loads(result.stdout)
+    assert f"- Parent [todo] ({parent['id']})" in result.stdout
+    assert f"  - Child [todo] ({child['id']})" in result.stdout
+
+
+def test_tree_missing_card_errors(initialized_project):
+    result = runner.invoke(app, ["tree", "nope"])
+    assert result.exit_code != 0
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is False
+    assert payload["error"]["type"] == "CardNotFoundError"
+
+
+def test_next_returns_ready_cards(initialized_project):
+    first = json.loads(runner.invoke(app, ["add", "--title", "First"]).stdout)["data"]
+    second = json.loads(runner.invoke(app, ["add", "--title", "Second"]).stdout)["data"]
+
+    result = runner.invoke(app, ["next"])
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is True
+    assert [item["id"] for item in payload["data"]] == [first["id"], second["id"]]
+    assert payload["data"][0]["status"] == "todo"
+
+
+def test_next_respects_limit(initialized_project):
+    first = json.loads(runner.invoke(app, ["add", "--title", "First"]).stdout)["data"]
+    runner.invoke(app, ["add", "--title", "Second"])
+
+    result = runner.invoke(app, ["next", "--limit", "1"])
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert [item["id"] for item in payload["data"]] == [first["id"]]
+
+
+@pytest.mark.parametrize("flag", ["--pretty", "--human"])
+def test_next_pretty_flag_switches_off_json(initialized_project, flag):
+    card = json.loads(runner.invoke(app, ["add", "--title", "First"]).stdout)["data"]
+
+    result = runner.invoke(app, ["next", flag])
+    assert result.exit_code == 0
+    with pytest.raises(json.JSONDecodeError):
+        json.loads(result.stdout)
+    assert card["id"] in result.stdout
+    assert "First" in result.stdout

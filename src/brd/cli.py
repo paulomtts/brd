@@ -301,5 +301,66 @@ def unblock(
     output.print_result(envelope, pretty)
 
 
+@app.command()
+def tree(
+    card_id: str | None = typer.Argument(
+        None, help="Root the tree at this card id (default: whole board)."
+    ),
+    pretty: bool = typer.Option(
+        False, "--pretty", "--human", help="Human-readable output."
+    ),
+) -> None:
+    """Print the hierarchy and dependency tree."""
+    try:
+        conn, _ = _project_conn()
+    except master.ProjectNotFoundError as exc:
+        output.print_result(
+            output.error_envelope("ProjectNotFoundError", str(exc)), pretty
+        )
+        raise typer.Exit(code=1)
+
+    try:
+        envelope = output.ok_envelope(core.build_tree(conn, root_id=card_id))
+    except core.CardNotFoundError as exc:
+        output.print_result(
+            output.error_envelope("CardNotFoundError", str(exc)), pretty
+        )
+        raise typer.Exit(code=1)
+    finally:
+        conn.close()
+
+    if pretty:
+        print(output.render_tree_text(envelope["data"]))
+    else:
+        output.print_result(envelope, pretty)
+
+
+@app.command(name="next")
+def next_cmd(
+    limit: int | None = typer.Option(
+        None, "--limit", help="Return at most this many cards."
+    ),
+    pretty: bool = typer.Option(
+        False, "--pretty", "--human", help="Human-readable output."
+    ),
+) -> None:
+    """List unblocked todo cards, oldest first."""
+    try:
+        conn, _ = _project_conn()
+    except master.ProjectNotFoundError as exc:
+        output.print_result(
+            output.error_envelope("ProjectNotFoundError", str(exc)), pretty
+        )
+        raise typer.Exit(code=1)
+
+    try:
+        cards = core.next_cards(conn, limit=limit)
+        envelope = output.ok_envelope([_card_detail(conn, card) for card in cards])
+    finally:
+        conn.close()
+
+    output.print_result(envelope, pretty)
+
+
 if __name__ == "__main__":
     app()
