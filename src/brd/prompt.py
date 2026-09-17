@@ -8,6 +8,9 @@ This repo tracks work with `brd`, a local kanban CLI.
 - `brd update <id> --status in_progress|done` — update status as you go
 - `brd tree` — see the whole board's hierarchy/dependencies
 
+No fixed Epic/Story/Task types — any card becomes an "epic" just by
+giving other cards `--parent <its-id>`.
+
 Output is JSON by default; add `--pretty` for human-readable text.
 Use `brd --help` to see all commands.
 """

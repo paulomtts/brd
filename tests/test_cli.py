@@ -32,6 +32,7 @@ def test_prompt_prints_plain_markdown_not_json():
     assert result.exit_code == 0
     assert "## Task tracking with brd" in result.output
     assert "brd next" in result.output
+    assert "--parent" in result.output
     with pytest.raises(json.JSONDecodeError):
         json.loads(result.output)
 
