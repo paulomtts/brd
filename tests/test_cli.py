@@ -155,6 +155,9 @@ def test_add_with_unknown_blocked_by_errors(initialized_project):
         ["add", "--title", "X"],
         ["show", "some-id"],
         ["list"],
+        ["update", "some-id", "--title", "X"],
+        ["block", "some-id", "--by", "other-id"],
+        ["unblock", "some-id", "--by", "other-id"],
     ],
 )
 def test_commands_outside_project_error(tmp_path, monkeypatch, args):
@@ -262,3 +265,84 @@ def test_list_filters_by_status(initialized_project):
     done_result = runner.invoke(app, ["list", "--status", "done"])
     assert done_result.exit_code == 0
     assert json.loads(done_result.stdout)["data"] == []
+
+
+def test_update_changes_title(initialized_project):
+    add_result = runner.invoke(app, ["add", "--title", "Old"])
+    card_id = json.loads(add_result.stdout)["data"]["id"]
+
+    result = runner.invoke(app, ["update", card_id, "--title", "New"])
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is True
+    assert payload["data"]["title"] == "New"
+
+
+def test_update_rejects_blocked_status(initialized_project):
+    add_result = runner.invoke(app, ["add", "--title", "A"])
+    card_id = json.loads(add_result.stdout)["data"]["id"]
+
+    result = runner.invoke(app, ["update", card_id, "--status", "blocked"])
+    assert result.exit_code != 0
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is False
+    assert payload["error"]["type"] == "InvalidStatusError"
+
+
+def test_block_and_unblock(initialized_project):
+    a = json.loads(runner.invoke(app, ["add", "--title", "A"]).stdout)["data"]
+    b = json.loads(runner.invoke(app, ["add", "--title", "B"]).stdout)["data"]
+
+    block_result = runner.invoke(app, ["block", a["id"], "--by", b["id"]])
+    assert block_result.exit_code == 0
+    assert json.loads(block_result.stdout)["data"]["blocked_by"] == [b["id"]]
+    show_result = runner.invoke(app, ["show", a["id"]])
+    assert json.loads(show_result.stdout)["data"]["status"] == "blocked"
+
+    unblock_result = runner.invoke(app, ["unblock", a["id"], "--by", b["id"]])
+    assert unblock_result.exit_code == 0
+    show_result = runner.invoke(app, ["show", a["id"]])
+    assert json.loads(show_result.stdout)["data"]["status"] == "todo"
+
+
+def test_block_rejects_cycle(initialized_project):
+    a = json.loads(runner.invoke(app, ["add", "--title", "A"]).stdout)["data"]
+    b = json.loads(runner.invoke(app, ["add", "--title", "B"]).stdout)["data"]
+    runner.invoke(app, ["block", a["id"], "--by", b["id"]])
+
+    result = runner.invoke(app, ["block", b["id"], "--by", a["id"]])
+    assert result.exit_code != 0
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is False
+    assert payload["error"]["type"] == "CycleError"
+
+
+def test_update_reparents_and_clears_parent(initialized_project):
+    parent = json.loads(runner.invoke(app, ["add", "--title", "P"]).stdout)["data"]
+    child = json.loads(runner.invoke(app, ["add", "--title", "C"]).stdout)["data"]
+
+    reparent = runner.invoke(app, ["update", child["id"], "--parent", parent["id"]])
+    assert reparent.exit_code == 0
+    assert json.loads(reparent.stdout)["data"]["parent_id"] == parent["id"]
+
+    cleared = runner.invoke(app, ["update", child["id"], "--clear-parent"])
+    assert cleared.exit_code == 0
+    assert json.loads(cleared.stdout)["data"]["parent_id"] is None
+
+    both = runner.invoke(
+        app, ["update", child["id"], "--parent", parent["id"], "--clear-parent"]
+    )
+    assert both.exit_code == 0
+    assert json.loads(both.stdout)["data"]["parent_id"] is None
+
+
+def test_update_rejects_parent_cycle(initialized_project):
+    parent = json.loads(runner.invoke(app, ["add", "--title", "P"]).stdout)["data"]
+    child = json.loads(runner.invoke(app, ["add", "--title", "C"]).stdout)["data"]
+    runner.invoke(app, ["update", child["id"], "--parent", parent["id"]])
+
+    result = runner.invoke(app, ["update", parent["id"], "--parent", child["id"]])
+    assert result.exit_code != 0
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is False
+    assert payload["error"]["type"] == "CycleError"

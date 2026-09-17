@@ -184,5 +184,122 @@ def list_cards_cmd(
     output.print_result(envelope, pretty)
 
 
+@app.command()
+def update(
+    card_id: str = typer.Argument(..., help="Id of the card to update."),
+    title: str | None = typer.Option(None, "--title", help="New title."),
+    description: str | None = typer.Option(
+        None, "--description", help="New description."
+    ),
+    status: str | None = typer.Option(
+        None, "--status", help="New stored status (cannot be 'blocked')."
+    ),
+    parent: str | None = typer.Option(None, "--parent", help="New parent card id."),
+    clear_parent: bool = typer.Option(
+        False, "--clear-parent", help="Detach the card from its parent."
+    ),
+    pretty: bool = typer.Option(
+        False, "--pretty", "--human", help="Human-readable output."
+    ),
+) -> None:
+    """Edit a card's fields."""
+    try:
+        conn, _ = _project_conn()
+    except master.ProjectNotFoundError as exc:
+        output.print_result(
+            output.error_envelope("ProjectNotFoundError", str(exc)), pretty
+        )
+        raise typer.Exit(code=1)
+
+    try:
+        parent_arg = core.CLEAR_PARENT if clear_parent else parent
+        card = core.update_card(
+            conn,
+            card_id,
+            title=title,
+            description=description,
+            status=status,
+            parent_id=parent_arg,
+        )
+        envelope = output.ok_envelope(_card_detail(conn, card))
+    except (core.CardNotFoundError, core.CycleError, core.InvalidStatusError) as exc:
+        output.print_result(
+            output.error_envelope(type(exc).__name__, str(exc)), pretty
+        )
+        raise typer.Exit(code=1)
+    finally:
+        conn.close()
+
+    output.print_result(envelope, pretty)
+
+
+@app.command()
+def block(
+    card_id: str = typer.Argument(..., help="Id of the card to block."),
+    by: str = typer.Option(..., "--by", help="Id of the card blocking it."),
+    pretty: bool = typer.Option(
+        False, "--pretty", "--human", help="Human-readable output."
+    ),
+) -> None:
+    """Mark a card as blocked by another card."""
+    try:
+        conn, _ = _project_conn()
+    except master.ProjectNotFoundError as exc:
+        output.print_result(
+            output.error_envelope("ProjectNotFoundError", str(exc)), pretty
+        )
+        raise typer.Exit(code=1)
+
+    try:
+        core.block_card(conn, card_id, by)
+        card = db.get_card(conn, card_id)
+        if card is None:
+            raise core.CardNotFoundError(f"no card with id {card_id}")
+        envelope = output.ok_envelope(_card_detail(conn, card))
+    except (core.CardNotFoundError, core.CycleError) as exc:
+        output.print_result(
+            output.error_envelope(type(exc).__name__, str(exc)), pretty
+        )
+        raise typer.Exit(code=1)
+    finally:
+        conn.close()
+
+    output.print_result(envelope, pretty)
+
+
+@app.command()
+def unblock(
+    card_id: str = typer.Argument(..., help="Id of the card to unblock."),
+    by: str = typer.Option(..., "--by", help="Id of the blocker to remove."),
+    pretty: bool = typer.Option(
+        False, "--pretty", "--human", help="Human-readable output."
+    ),
+) -> None:
+    """Remove a blocked-by relationship."""
+    try:
+        conn, _ = _project_conn()
+    except master.ProjectNotFoundError as exc:
+        output.print_result(
+            output.error_envelope("ProjectNotFoundError", str(exc)), pretty
+        )
+        raise typer.Exit(code=1)
+
+    try:
+        core.unblock_card(conn, card_id, by)
+        card = db.get_card(conn, card_id)
+        if card is None:
+            raise core.CardNotFoundError(f"no card with id {card_id}")
+        envelope = output.ok_envelope(_card_detail(conn, card))
+    except core.CardNotFoundError as exc:
+        output.print_result(
+            output.error_envelope("CardNotFoundError", str(exc)), pretty
+        )
+        raise typer.Exit(code=1)
+    finally:
+        conn.close()
+
+    output.print_result(envelope, pretty)
+
+
 if __name__ == "__main__":
     app()
