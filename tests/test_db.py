@@ -3,7 +3,7 @@ import sqlite3
 import pytest
 
 from brd import db
-from brd.models import Project
+from brd.models import Card, Project
 
 
 @pytest.fixture
@@ -200,3 +200,164 @@ def test_insert_project_rejects_duplicate_name(conn):
     db.insert_project(conn, _sample_project("p1", "brd"))
     with pytest.raises(sqlite3.IntegrityError):
         db.insert_project(conn, _sample_project("p2", "brd"))
+
+
+@pytest.fixture
+def project_conn(tmp_path):
+    connection = db.connect(tmp_path / "project.db")
+    db.init_project_schema(connection)
+    yield connection
+    connection.close()
+
+
+def _sample_card(
+    id_="c1",
+    title="Card",
+    status="todo",
+    parent_id=None,
+    created_at="2026-09-17T00:00:00",
+):
+    return Card(
+        id=id_,
+        title=title,
+        description="desc",
+        status=status,
+        parent_id=parent_id,
+        created_at=created_at,
+        updated_at="2026-09-17T00:00:00",
+    )
+
+
+def test_insert_and_get_card(project_conn):
+    db.insert_card(project_conn, _sample_card())
+    result = db.get_card(project_conn, "c1")
+    assert result == _sample_card()
+
+
+def test_get_card_returns_none_when_missing(project_conn):
+    assert db.get_card(project_conn, "nope") is None
+
+
+def test_update_card_fields(project_conn):
+    db.insert_card(project_conn, _sample_card())
+    db.update_card_fields(project_conn, "c1", title="New title", updated_at="later")
+    result = db.get_card(project_conn, "c1")
+    assert result.title == "New title"
+    assert result.updated_at == "later"
+    assert result.description == "desc"  # untouched fields survive
+
+
+def test_list_cards_no_filter_returns_all(project_conn):
+    db.insert_card(project_conn, _sample_card("c1"))
+    db.insert_card(project_conn, _sample_card("c2"))
+    results = db.list_cards(project_conn)
+    assert {c.id for c in results} == {"c1", "c2"}
+
+
+def test_list_cards_filters_by_status(project_conn):
+    db.insert_card(project_conn, _sample_card("c1", status="todo"))
+    db.insert_card(project_conn, _sample_card("c2", status="done"))
+    results = db.list_cards(project_conn, status="done")
+    assert [c.id for c in results] == ["c2"]
+
+
+def test_list_cards_filters_by_parent_id(project_conn):
+    db.insert_card(project_conn, _sample_card("parent"))
+    db.insert_card(project_conn, _sample_card("child", parent_id="parent"))
+    results = db.list_cards(project_conn, parent_id="parent")
+    assert [c.id for c in results] == ["child"]
+
+
+def test_list_cards_filters_by_explicit_none_parent(project_conn):
+    db.insert_card(project_conn, _sample_card("top"))
+    db.insert_card(project_conn, _sample_card("parent2"))
+    db.insert_card(project_conn, _sample_card("child", parent_id="parent2"))
+    results = db.list_cards(project_conn, parent_id=None)
+    assert {c.id for c in results} == {"top", "parent2"}
+
+
+def test_add_and_list_blockers_of(project_conn):
+    db.insert_card(project_conn, _sample_card("c1"))
+    db.insert_card(project_conn, _sample_card("c2"))
+    db.add_blocked_by_edge(project_conn, "c1", "c2")
+    assert db.list_blockers_of(project_conn, "c1") == ["c2"]
+
+
+def test_remove_blocked_by_edge(project_conn):
+    db.insert_card(project_conn, _sample_card("c1"))
+    db.insert_card(project_conn, _sample_card("c2"))
+    db.add_blocked_by_edge(project_conn, "c1", "c2")
+    db.remove_blocked_by_edge(project_conn, "c1", "c2")
+    assert db.list_blockers_of(project_conn, "c1") == []
+
+
+def test_list_children(project_conn):
+    db.insert_card(project_conn, _sample_card("parent"))
+    db.insert_card(project_conn, _sample_card("child1", parent_id="parent"))
+    db.insert_card(project_conn, _sample_card("child2", parent_id="parent"))
+    results = db.list_children(project_conn, "parent")
+    assert {c.id for c in results} == {"child1", "child2"}
+
+
+def test_list_cards_orders_by_created_at(project_conn):
+    db.insert_card(project_conn, _sample_card("c1", created_at="2026-09-17T12:00:00"))
+    db.insert_card(project_conn, _sample_card("c2", created_at="2026-09-16T08:00:00"))
+    assert [c.id for c in db.list_cards(project_conn)] == ["c2", "c1"]
+
+
+def test_list_children_orders_by_created_at(project_conn):
+    db.insert_card(project_conn, _sample_card("parent"))
+    db.insert_card(
+        project_conn,
+        _sample_card("child1", parent_id="parent", created_at="2026-09-17T12:00:00"),
+    )
+    db.insert_card(
+        project_conn,
+        _sample_card("child2", parent_id="parent", created_at="2026-09-16T08:00:00"),
+    )
+    results = db.list_children(project_conn, "parent")
+    assert [c.id for c in results] == ["child2", "child1"]
+
+
+def test_insert_card_commits_so_another_connection_sees_it(tmp_path):
+    db_path = tmp_path / "project.db"
+    writer = db.connect(db_path)
+    db.init_project_schema(writer)
+    db.insert_card(writer, _sample_card())
+    reader = db.connect(db_path)
+    try:
+        assert db.get_card(reader, "c1") == _sample_card()
+    finally:
+        reader.close()
+        writer.close()
+
+
+def test_update_card_fields_commits_so_another_connection_sees_it(tmp_path):
+    db_path = tmp_path / "project.db"
+    writer = db.connect(db_path)
+    db.init_project_schema(writer)
+    db.insert_card(writer, _sample_card())
+    db.update_card_fields(writer, "c1", title="New title")
+    reader = db.connect(db_path)
+    try:
+        assert db.get_card(reader, "c1").title == "New title"
+    finally:
+        reader.close()
+        writer.close()
+
+
+def test_blocked_by_edge_writes_commit_so_another_connection_sees_them(tmp_path):
+    db_path = tmp_path / "project.db"
+    writer = db.connect(db_path)
+    db.init_project_schema(writer)
+    db.insert_card(writer, _sample_card("c1"))
+    db.insert_card(writer, _sample_card("c2"))
+    db.add_blocked_by_edge(writer, "c1", "c2")
+    reader = db.connect(db_path)
+    try:
+        assert db.list_blockers_of(reader, "c1") == ["c2"]
+        db.remove_blocked_by_edge(writer, "c1", "c2")
+        assert db.list_blockers_of(reader, "c1") == []
+    finally:
+        reader.close()
+        writer.close()
