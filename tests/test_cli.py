@@ -429,3 +429,46 @@ def test_next_pretty_flag_switches_off_json(initialized_project, flag):
         json.loads(result.stdout)
     assert card["id"] in result.stdout
     assert "First" in result.stdout
+
+
+def test_end_to_end_workflow(isolated_env):
+    assert runner.invoke(app, ["init"]).exit_code == 0
+
+    story = json.loads(
+        runner.invoke(app, ["add", "--title", "Story: ship feature"]).stdout
+    )["data"]
+    blocker = json.loads(
+        runner.invoke(app, ["add", "--title", "Subtask: write migration"]).stdout
+    )["data"]
+    subtask = json.loads(
+        runner.invoke(
+            app,
+            [
+                "add",
+                "--title",
+                "Subtask: write endpoint",
+                "--parent",
+                story["id"],
+                "--blocked-by",
+                blocker["id"],
+            ],
+        ).stdout
+    )["data"]
+
+    next_payload = json.loads(runner.invoke(app, ["next"]).stdout)
+    ready_ids = {c["id"] for c in next_payload["data"]}
+    assert story["id"] in ready_ids
+    assert blocker["id"] in ready_ids
+    assert subtask["id"] not in ready_ids  # blocked
+
+    runner.invoke(app, ["update", blocker["id"], "--status", "done"])
+
+    next_payload = json.loads(runner.invoke(app, ["next"]).stdout)
+    ready_ids = {c["id"] for c in next_payload["data"]}
+    assert subtask["id"] in ready_ids  # unblocked now
+
+    tree_payload = json.loads(runner.invoke(app, ["tree", story["id"]]).stdout)
+    assert tree_payload["data"][0]["children"][0]["id"] == subtask["id"]
+
+    projects_payload = json.loads(runner.invoke(app, ["projects"]).stdout)
+    assert projects_payload["data"][0]["name"] == "myrepo"
