@@ -259,3 +259,79 @@ def test_block_card_rejects_unknown_blocker(conn):
 def test_unblock_card_rejects_unknown_card(conn):
     with pytest.raises(core.CardNotFoundError):
         core.unblock_card(conn, "nope", "also-nope")
+
+
+def test_next_cards_returns_unblocked_todo_oldest_first(conn):
+    a = core.create_card(conn, title="A")
+    b = core.create_card(conn, title="B")
+    blocker = core.create_card(conn, title="Blocker")
+    core.block_card(conn, b.id, blocker.id)
+
+    result = core.next_cards(conn)
+    assert [c.id for c in result] == [a.id, blocker.id]
+
+
+def test_next_cards_excludes_in_progress_and_done(conn):
+    a = core.create_card(conn, title="A")
+    core.update_card(conn, a.id, status="in_progress")
+    b = core.create_card(conn, title="B")
+    core.update_card(conn, b.id, status="done")
+    c = core.create_card(conn, title="C")
+
+    result = core.next_cards(conn)
+    assert [card.id for card in result] == [c.id]
+
+
+def test_next_cards_respects_limit(conn):
+    core.create_card(conn, title="A")
+    core.create_card(conn, title="B")
+    core.create_card(conn, title="C")
+
+    result = core.next_cards(conn, limit=2)
+    assert len(result) == 2
+
+
+def test_build_tree_single_root_with_children_and_blockers(conn):
+    parent = core.create_card(conn, title="Parent")
+    blocker = core.create_card(conn, title="Blocker")
+    child = core.create_card(
+        conn, title="Child", parent_id=parent.id, blocked_by=[blocker.id]
+    )
+
+    tree = core.build_tree(conn, root_id=parent.id)
+    assert len(tree) == 1
+    root_node = tree[0]
+    assert root_node["id"] == parent.id
+    assert root_node["title"] == "Parent"
+    assert root_node["status"] == "todo"
+    assert len(root_node["children"]) == 1
+    child_node = root_node["children"][0]
+    assert child_node["id"] == child.id
+    assert child_node["title"] == "Child"
+    assert child_node["status"] == "blocked"
+    assert child_node["blocked_by"] == [blocker.id]
+    assert child_node["children"] == []
+
+
+def test_build_tree_whole_board_returns_all_top_level_roots(conn):
+    root1 = core.create_card(conn, title="Root1")
+    root2 = core.create_card(conn, title="Root2")
+    parent = core.create_card(conn, title="Root3")
+    nested = core.create_card(conn, title="Nested", parent_id=parent.id)
+
+    tree = core.build_tree(conn)
+    assert [node["id"] for node in tree] == [root1.id, root2.id, parent.id]
+    assert [node["id"] for node in tree[2]["children"]] == [nested.id]
+    assert [node["title"] for node in tree] == ["Root1", "Root2", "Root3"]
+
+
+def test_build_tree_rejects_unknown_root_id(conn):
+    with pytest.raises(core.CardNotFoundError):
+        core.build_tree(conn, root_id="nope")
+
+
+def test_next_cards_limit_zero_returns_empty(conn):
+    core.create_card(conn, title="A")
+    core.create_card(conn, title="B")
+
+    assert core.next_cards(conn, limit=0) == []

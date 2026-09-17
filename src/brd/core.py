@@ -158,3 +158,30 @@ def block_card(conn: sqlite3.Connection, card_id: str, blocker_id: str) -> None:
 def unblock_card(conn: sqlite3.Connection, card_id: str, blocker_id: str) -> None:
     _require_card(conn, card_id)
     db.remove_blocked_by_edge(conn, card_id, blocker_id)
+
+
+def next_cards(conn: sqlite3.Connection, limit: int | None = None) -> list[Card]:
+    todo_cards = db.list_cards(conn, status="todo")
+    ready = [card for card in todo_cards if resolve_status(conn, card) == "todo"]
+    return ready[:limit] if limit is not None else ready
+
+
+def _build_node(conn: sqlite3.Connection, card: Card) -> dict:
+    return {
+        "id": card.id,
+        "title": card.title,
+        "status": resolve_status(conn, card),
+        "blocked_by": db.list_blockers_of(conn, card.id),
+        "children": [
+            _build_node(conn, child) for child in db.list_children(conn, card.id)
+        ],
+    }
+
+
+def build_tree(conn: sqlite3.Connection, root_id: str | None = None) -> list[dict]:
+    if root_id is not None:
+        card = _require_card(conn, root_id)
+        return [_build_node(conn, card)]
+
+    top_level = db.list_cards(conn, parent_id=None)
+    return [_build_node(conn, card) for card in top_level]
