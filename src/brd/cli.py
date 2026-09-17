@@ -4,7 +4,7 @@ from pathlib import Path
 
 import typer
 
-from brd import core, db, master, output
+from brd import core, db, master, output, prompt
 from brd.models import Card
 
 app = typer.Typer(
@@ -17,6 +17,12 @@ app = typer.Typer(
 @app.callback()
 def main() -> None:
     pass
+
+
+@app.command(name="prompt")
+def prompt_cmd() -> None:
+    """Print a short CLAUDE.md snippet explaining how to use brd."""
+    print(prompt.render(), end="")
 
 
 @app.command()

@@ -28,5 +28,13 @@ brd projects                              # list all registered projects
 All commands output JSON by default (for agent consumption); pass
 `--pretty` for human-readable output.
 
+## For agents
+
+Add a short usage primer to a project's `CLAUDE.md`:
+
+```bash
+brd prompt >> CLAUDE.md
+```
+
 See `docs/superpowers/specs/2026-09-17-brd-cli-design.md` for the full
 design.

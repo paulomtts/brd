@@ -27,6 +27,15 @@ def test_no_args_prints_help_instead_of_missing_command_error():
     assert "Missing command" not in result.output
 
 
+def test_prompt_prints_plain_markdown_not_json():
+    result = runner.invoke(app, ["prompt"])
+    assert result.exit_code == 0
+    assert "## Task tracking with brd" in result.output
+    assert "brd next" in result.output
+    with pytest.raises(json.JSONDecodeError):
+        json.loads(result.output)
+
+
 @pytest.fixture
 def isolated_env(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
