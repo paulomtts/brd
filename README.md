@@ -28,6 +28,12 @@ brd projects                              # list all registered projects
 All commands output JSON by default (for agent consumption); pass
 `--pretty` for human-readable output.
 
+## Storage
+
+`brd init` creates `.brd/board.db` in the project root. This file is
+meant to be committed to git (not gitignored) so the board travels
+with clones instead of living in a separate per-machine store.
+
 ## For agents
 
 Add a short usage primer to a project's `CLAUDE.md`:

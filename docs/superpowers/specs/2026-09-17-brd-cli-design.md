@@ -2,6 +2,16 @@
 
 Date: 2026-09-17
 
+> **Amendment (2026-09-17, later):** The "Storage layout" and "Project
+> resolution" sections below describe the original central-store design
+> (per-project DBs under the XDG data dir, keyed by a master DB with UUIDs).
+> This was superseded: the per-project DB now lives at
+> `<repo-root>/.brd/board.db`, is committed to git (not gitignored) so it
+> travels with clones, and is resolved by walking up the filesystem — no
+> master DB lookup involved. The master DB survives only as a local,
+> best-effort cache for `brd projects`, keyed by `root_path`. See
+> `src/brd/master.py` for the current behavior.
+
 ## Purpose
 
 `brd` is a CLI tool for storing and managing cards on a board, representing

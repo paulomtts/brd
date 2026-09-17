@@ -52,16 +52,21 @@ def test_init_registers_project(isolated_env):
     payload = json.loads(result.stdout)
     assert payload["ok"] is True
     assert payload["data"]["name"] == "myrepo"
-    assert (isolated_env / ".brd").exists()
+    assert (isolated_env / ".brd" / "board.db").is_file()
 
 
-def test_init_twice_fails_second_time(isolated_env):
+def test_init_twice_succeeds_and_preserves_cards(isolated_env):
     runner.invoke(app, ["init"])
+    add_result = runner.invoke(app, ["add", "--title", "Existing card"])
+    card_id = json.loads(add_result.stdout)["data"]["id"]
+
     result = runner.invoke(app, ["init"])
-    assert result.exit_code == 1
+    assert result.exit_code == 0
     payload = json.loads(result.stdout)
-    assert payload["ok"] is False
-    assert payload["error"]["type"] == "ProjectAlreadyExistsError"
+    assert payload["ok"] is True
+
+    show_result = runner.invoke(app, ["show", card_id])
+    assert json.loads(show_result.stdout)["data"]["id"] == card_id
 
 
 def test_init_name_option_overrides_project_name(isolated_env):

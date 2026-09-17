@@ -1,15 +1,11 @@
-import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
 from brd import db, paths
 from brd.models import Project
 
-MARKER_FILENAME = ".brd"
-
-
-class ProjectAlreadyExistsError(Exception):
-    pass
+MARKER_DIRNAME = ".brd"
+DB_FILENAME = "board.db"
 
 
 class ProjectNotFoundError(Exception):
@@ -28,53 +24,38 @@ def _master_conn():
 
 def init_project(root_path: Path, name: str | None = None) -> Project:
     project_name = name or root_path.name
+    brd_dir = root_path / MARKER_DIRNAME
+    brd_dir.mkdir(exist_ok=True)
+    db_path = brd_dir / DB_FILENAME
+
+    project_conn = db.connect(db_path)
+    try:
+        db.init_project_schema(project_conn)
+    finally:
+        project_conn.close()
+
+    nested_gitignore = brd_dir / ".gitignore"
+    if not nested_gitignore.exists():
+        nested_gitignore.write_text(f"{DB_FILENAME}-journal\n")
+
+    project = Project(
+        root_path=str(root_path),
+        name=project_name,
+        created_at=_now(),
+    )
     conn = _master_conn()
     try:
-        if db.get_project_by_name(conn, project_name) is not None:
-            raise ProjectAlreadyExistsError(
-                f"a project named '{project_name}' is already registered"
-            )
-
-        project_id = str(uuid.uuid4())
-        project_db_path = paths.project_db_path(project_id)
-
-        project_conn = db.connect(project_db_path)
-        try:
-            db.init_project_schema(project_conn)
-        finally:
-            project_conn.close()
-
-        project = Project(
-            id=project_id,
-            name=project_name,
-            root_path=str(root_path),
-            db_path=str(project_db_path),
-            created_at=_now(),
-        )
-        db.insert_project(conn, project)
-
-        marker = root_path / MARKER_FILENAME
-        marker.write_text(project_id + "\n")
-
-        gitignore = root_path / ".gitignore"
-        existing_lines = (
-            gitignore.read_text().splitlines() if gitignore.exists() else []
-        )
-        if MARKER_FILENAME not in existing_lines:
-            with gitignore.open("a") as f:
-                if existing_lines and existing_lines[-1] != "":
-                    f.write("\n")
-                f.write(f"{MARKER_FILENAME}\n")
-
-        return project
+        db.upsert_project(conn, project)
     finally:
         conn.close()
 
+    return project
 
-def find_marker(start: Path) -> Path | None:
+
+def find_project_db(start: Path) -> Path | None:
     current = start.resolve()
     while True:
-        candidate = current / MARKER_FILENAME
+        candidate = current / MARKER_DIRNAME / DB_FILENAME
         if candidate.is_file():
             return candidate
         if current.parent == current:
@@ -82,23 +63,13 @@ def find_marker(start: Path) -> Path | None:
         current = current.parent
 
 
-def resolve_current_project(start: Path) -> Project:
-    marker = find_marker(start)
-    if marker is None:
-        raise ProjectNotFoundError(f"no {MARKER_FILENAME} marker found above {start}")
-
-    project_id = marker.read_text().strip()
-    conn = _master_conn()
-    try:
-        project = db.get_project_by_id(conn, project_id)
-    finally:
-        conn.close()
-
-    if project is None:
+def resolve_project_db(start: Path) -> Path:
+    db_path = find_project_db(start)
+    if db_path is None:
         raise ProjectNotFoundError(
-            f"marker at {marker} references unknown project id {project_id}"
+            f"no {MARKER_DIRNAME}/{DB_FILENAME} found above {start}"
         )
-    return project
+    return db_path
 
 
 def list_all_projects() -> list[Project]:

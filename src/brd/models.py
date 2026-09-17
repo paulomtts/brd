@@ -3,10 +3,8 @@ from dataclasses import dataclass
 
 @dataclass
 class Project:
-    id: str
-    name: str
     root_path: str
-    db_path: str
+    name: str
     created_at: str
 
 

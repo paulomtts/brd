@@ -13,9 +13,11 @@ def conn(tmp_path):
     connection.close()
 
 
-def test_connect_enables_wal_and_foreign_keys(conn):
+def test_connect_enables_foreign_keys_without_wal(conn):
+    # Not WAL: the per-project DB is meant to be committed to git as a single
+    # file, and WAL can leave recent writes in a separate -wal sidecar file.
     mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
-    assert mode.lower() == "wal"
+    assert mode.lower() != "wal"
     fk = conn.execute("PRAGMA foreign_keys").fetchone()[0]
     assert fk == 1
 
@@ -27,7 +29,7 @@ def test_connect_sets_row_factory(conn):
 def test_init_master_schema_creates_projects_table(conn):
     db.init_master_schema(conn)
     columns = {row[1] for row in conn.execute("PRAGMA table_info(projects)")}
-    assert columns == {"id", "name", "root_path", "db_path", "created_at"}
+    assert columns == {"root_path", "name", "created_at"}
 
 
 def test_init_master_schema_is_idempotent(conn):
@@ -66,18 +68,16 @@ def test_cards_status_check_constraint_rejects_blocked(conn):
         )
 
 
-def test_projects_name_is_unique(conn):
+def test_projects_root_path_is_primary_key(conn):
     db.init_master_schema(conn)
     conn.execute(
-        "INSERT INTO projects (id, name, root_path, db_path, created_at) "
-        "VALUES (?, ?, ?, ?, ?)",
-        ("p1", "dup", "/r", "/d", "now"),
+        "INSERT INTO projects (root_path, name, created_at) VALUES (?, ?, ?)",
+        ("/r", "dup", "now"),
     )
     with pytest.raises(sqlite3.IntegrityError):
         conn.execute(
-            "INSERT INTO projects (id, name, root_path, db_path, created_at) "
-            "VALUES (?, ?, ?, ?, ?)",
-            ("p2", "dup", "/r", "/d", "now"),
+            "INSERT INTO projects (root_path, name, created_at) VALUES (?, ?, ?)",
+            ("/r", "other", "now"),
         )
 
 
@@ -124,82 +124,66 @@ def test_blocked_by_rejects_duplicate_edge(conn):
         )
 
 
-def _sample_project(id_="p1", name="brd"):
+def _sample_project(root_path="/repo", name="brd"):
     return Project(
-        id=id_,
+        root_path=root_path,
         name=name,
-        root_path="/repo",
-        db_path="/data/p1.db",
         created_at="2026-09-17T00:00:00",
     )
 
 
-def test_insert_and_get_project_by_id(conn):
+def test_upsert_project_inserts_new(conn):
     db.init_master_schema(conn)
-    db.insert_project(conn, _sample_project())
-    result = db.get_project_by_id(conn, "p1")
-    assert result == _sample_project()
+    db.upsert_project(conn, _sample_project())
+    results = db.list_projects(conn)
+    assert results == [_sample_project()]
 
 
-def test_get_project_by_id_returns_none_when_missing(conn):
+def test_upsert_project_updates_name_on_existing_root_path(conn):
     db.init_master_schema(conn)
-    assert db.get_project_by_id(conn, "nope") is None
-
-
-def test_get_project_by_name(conn):
-    db.init_master_schema(conn)
-    db.insert_project(conn, _sample_project())
-    result = db.get_project_by_name(conn, "brd")
-    assert result == _sample_project()
+    db.upsert_project(conn, _sample_project(name="brd"))
+    db.upsert_project(conn, _sample_project(name="renamed"))
+    results = db.list_projects(conn)
+    assert [p.name for p in results] == ["renamed"]
+    assert len(results) == 1
 
 
 def test_list_projects_returns_all(conn):
     db.init_master_schema(conn)
-    db.insert_project(conn, _sample_project("p1", "brd"))
-    db.insert_project(conn, _sample_project("p2", "other"))
+    db.upsert_project(conn, _sample_project("/repo1", "brd"))
+    db.upsert_project(conn, _sample_project("/repo2", "other"))
     results = db.list_projects(conn)
-    assert {p.id for p in results} == {"p1", "p2"}
+    assert {p.root_path for p in results} == {"/repo1", "/repo2"}
 
 
 def test_list_projects_orders_by_created_at(conn):
     db.init_master_schema(conn)
     later = Project(
-        id="p1",
+        root_path="/repo1",
         name="brd",
-        root_path="/repo",
-        db_path="/data/p1.db",
         created_at="2026-09-17T12:00:00",
     )
     earlier = Project(
-        id="p2",
+        root_path="/repo2",
         name="other",
-        root_path="/repo",
-        db_path="/data/p2.db",
         created_at="2026-09-16T08:00:00",
     )
-    db.insert_project(conn, later)
-    db.insert_project(conn, earlier)
-    assert [p.id for p in db.list_projects(conn)] == ["p2", "p1"]
+    db.upsert_project(conn, later)
+    db.upsert_project(conn, earlier)
+    assert [p.root_path for p in db.list_projects(conn)] == ["/repo2", "/repo1"]
 
 
-def test_insert_project_commits_so_another_connection_sees_it(tmp_path):
+def test_upsert_project_commits_so_another_connection_sees_it(tmp_path):
     db_path = tmp_path / "master.db"
     writer = db.connect(db_path)
     db.init_master_schema(writer)
-    db.insert_project(writer, _sample_project())
+    db.upsert_project(writer, _sample_project())
     reader = db.connect(db_path)
     try:
-        assert db.get_project_by_id(reader, "p1") == _sample_project()
+        assert db.list_projects(reader) == [_sample_project()]
     finally:
         reader.close()
         writer.close()
-
-
-def test_insert_project_rejects_duplicate_name(conn):
-    db.init_master_schema(conn)
-    db.insert_project(conn, _sample_project("p1", "brd"))
-    with pytest.raises(sqlite3.IntegrityError):
-        db.insert_project(conn, _sample_project("p2", "brd"))
 
 
 @pytest.fixture

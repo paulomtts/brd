@@ -12,6 +12,9 @@ No fixed Epic/Story/Task types — any card becomes an "epic" just by
 giving other cards `--parent <its-id>`. A card with children is a
 container, not work: `brd next` skips it and only surfaces its leaves.
 
+Board data lives in `.brd/board.db` in this repo, and is meant to be
+committed to git so it travels with clones — don't gitignore it.
+
 Output is JSON by default; add `--pretty` for human-readable text.
 Use `brd --help` to see all commands.
 """

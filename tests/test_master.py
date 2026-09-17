@@ -1,84 +1,102 @@
 import pytest
 
-from brd import master
+from brd import db, master
 
 
-def test_init_project_creates_marker_and_gitignore_entry(tmp_path, monkeypatch):
+def test_init_project_creates_board_db_and_nested_gitignore(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
     repo = tmp_path / "myrepo"
     repo.mkdir()
 
     project = master.init_project(repo)
 
-    marker = repo / ".brd"
-    assert marker.exists()
-    assert marker.read_text().strip() == project.id
-
-    gitignore = repo / ".gitignore"
-    assert gitignore.exists()
-    assert ".brd" in gitignore.read_text().splitlines()
+    board_db = repo / ".brd" / "board.db"
+    assert board_db.is_file()
     assert project.name == "myrepo"
+    assert project.root_path == str(repo)
+
+    nested_gitignore = repo / ".brd" / ".gitignore"
+    assert nested_gitignore.exists()
+    assert "board.db-journal" in nested_gitignore.read_text()
+
+    # The repo's own .gitignore is untouched: board.db is meant to be tracked.
+    assert not (repo / ".gitignore").exists()
 
 
-def test_init_project_appends_to_existing_gitignore_once(tmp_path, monkeypatch):
+def test_init_project_twice_preserves_existing_cards(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
     repo = tmp_path / "myrepo"
     repo.mkdir()
-    (repo / ".gitignore").write_text("__pycache__/\n")
-
     master.init_project(repo)
 
-    lines = (repo / ".gitignore").read_text().splitlines()
-    assert lines.count(".brd") == 1
-    assert "__pycache__/" in lines
+    board_db = repo / ".brd" / "board.db"
+    conn = db.connect(board_db)
+    try:
+        conn.execute(
+            "INSERT INTO cards (id, title, description, status, parent_id, "
+            "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ("c1", "Existing card", None, "todo", None, "now", "now"),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    master.init_project(repo)  # simulates re-running init on a cloned repo
+
+    conn = db.connect(board_db)
+    try:
+        row = conn.execute("SELECT * FROM cards WHERE id = 'c1'").fetchone()
+    finally:
+        conn.close()
+    assert row is not None
 
 
-def test_init_project_rejects_duplicate_name(tmp_path, monkeypatch):
+def test_init_project_upserts_name_on_rerun(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
-    repo1 = tmp_path / "repo1"
-    repo1.mkdir()
-    repo2 = tmp_path / "repo2"
-    repo2.mkdir()
+    repo = tmp_path / "myrepo"
+    repo.mkdir()
 
-    master.init_project(repo1, name="shared")
-    with pytest.raises(master.ProjectAlreadyExistsError):
-        master.init_project(repo2, name="shared")
+    master.init_project(repo, name="first-name")
+    project = master.init_project(repo, name="second-name")
+
+    assert project.name == "second-name"
+    all_projects = master.list_all_projects()
+    assert [p.name for p in all_projects] == ["second-name"]
 
 
-def test_find_marker_walks_up_from_nested_dir(tmp_path, monkeypatch):
+def test_find_project_db_walks_up_from_nested_dir(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
     repo = tmp_path / "myrepo"
     nested = repo / "a" / "b"
     nested.mkdir(parents=True)
     master.init_project(repo)
 
-    found = master.find_marker(nested)
-    assert found == repo / ".brd"
+    found = master.find_project_db(nested)
+    assert found == repo / ".brd" / "board.db"
 
 
-def test_find_marker_returns_none_when_absent(tmp_path):
+def test_find_project_db_returns_none_when_absent(tmp_path):
     somewhere = tmp_path / "nowhere"
     somewhere.mkdir()
-    assert master.find_marker(somewhere) is None
+    assert master.find_project_db(somewhere) is None
 
 
-def test_resolve_current_project_from_nested_dir(tmp_path, monkeypatch):
+def test_resolve_project_db_from_nested_dir(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
     repo = tmp_path / "myrepo"
     nested = repo / "a"
     nested.mkdir(parents=True)
-    created = master.init_project(repo)
+    master.init_project(repo)
 
-    resolved = master.resolve_current_project(nested)
-    assert resolved == created
+    resolved = master.resolve_project_db(nested)
+    assert resolved == repo / ".brd" / "board.db"
 
 
-def test_resolve_current_project_raises_when_no_marker(tmp_path, monkeypatch):
-    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+def test_resolve_project_db_raises_when_no_project(tmp_path):
     somewhere = tmp_path / "nowhere"
     somewhere.mkdir()
     with pytest.raises(master.ProjectNotFoundError):
-        master.resolve_current_project(somewhere)
+        master.resolve_project_db(somewhere)
 
 
 def test_list_all_projects(tmp_path, monkeypatch):
@@ -94,54 +112,18 @@ def test_list_all_projects(tmp_path, monkeypatch):
     assert {p.name for p in results} == {"repo1", "repo2"}
 
 
-def test_init_project_preserves_gitignore_without_trailing_newline(
+def test_init_project_does_not_overwrite_existing_nested_gitignore(
     tmp_path, monkeypatch
 ):
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
     repo = tmp_path / "myrepo"
     repo.mkdir()
-    (repo / ".gitignore").write_text("__pycache__/\n*.egg-info")
+    (repo / ".brd").mkdir()
+    (repo / ".brd" / ".gitignore").write_text("custom-rule\n")
 
     master.init_project(repo)
 
-    lines = (repo / ".gitignore").read_text().splitlines()
-    assert "*.egg-info" in lines
-    assert lines.count(".brd") == 1
-
-
-def test_init_project_duplicate_name_leaves_no_trace(tmp_path, monkeypatch):
-    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
-    repo1 = tmp_path / "repo1"
-    repo1.mkdir()
-    repo2 = tmp_path / "repo2"
-    repo2.mkdir()
-
-    master.init_project(repo1, name="shared")
-    with pytest.raises(master.ProjectAlreadyExistsError):
-        master.init_project(repo2, name="shared")
-
-    assert not (repo2 / ".brd").exists()
-    assert not (repo2 / ".gitignore").exists()
-    assert len(master.list_all_projects()) == 1
-
-
-def test_resolve_current_project_raises_when_marker_id_unregistered(
-    tmp_path, monkeypatch
-):
-    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
-    repo = tmp_path / "myrepo"
-    repo.mkdir()
-    (repo / ".brd").write_text("00000000-0000-4000-8000-000000000000\n")
-
-    with pytest.raises(master.ProjectNotFoundError):
-        master.resolve_current_project(repo)
-
-
-def test_find_marker_ignores_marker_directory(tmp_path):
-    somewhere = tmp_path / "nowhere"
-    (somewhere / ".brd").mkdir(parents=True)
-
-    assert master.find_marker(somewhere) is None
+    assert (repo / ".brd" / ".gitignore").read_text() == "custom-rule\n"
 
 
 def test_list_all_projects_is_empty_before_any_registration(tmp_path, monkeypatch):

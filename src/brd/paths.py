@@ -12,9 +12,3 @@ def data_dir() -> Path:
 
 def master_db_path() -> Path:
     return data_dir() / "master.db"
-
-
-def project_db_path(project_id: str) -> Path:
-    projects_dir = data_dir() / "projects"
-    projects_dir.mkdir(parents=True, exist_ok=True)
-    return projects_dir / f"{project_id}.db"

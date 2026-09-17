@@ -35,14 +35,7 @@ def init(
     ),
 ) -> None:
     """Register the current directory as a brd project."""
-    try:
-        project = master.init_project(Path.cwd(), name=name)
-    except master.ProjectAlreadyExistsError as exc:
-        output.print_result(
-            output.error_envelope("ProjectAlreadyExistsError", str(exc)), pretty
-        )
-        raise typer.Exit(code=1)
-
+    project = master.init_project(Path.cwd(), name=name)
     output.print_result(output.ok_envelope(dataclasses.asdict(project)), pretty)
 
 
@@ -58,10 +51,9 @@ def projects(
     output.print_result(envelope, pretty)
 
 
-def _project_conn() -> tuple[sqlite3.Connection, master.Project]:
-    project = master.resolve_current_project(Path.cwd())
-    conn = db.connect(Path(project.db_path))
-    return conn, project
+def _project_conn() -> sqlite3.Connection:
+    db_path = master.resolve_project_db(Path.cwd())
+    return db.connect(db_path)
 
 
 def _card_detail(conn: sqlite3.Connection, card: Card) -> dict:
@@ -94,7 +86,7 @@ def add(
 ) -> None:
     """Create a card."""
     try:
-        conn, _ = _project_conn()
+        conn = _project_conn()
     except master.ProjectNotFoundError as exc:
         output.print_result(
             output.error_envelope("ProjectNotFoundError", str(exc)), pretty
@@ -130,7 +122,7 @@ def show(
 ) -> None:
     """Show a single card's full detail."""
     try:
-        conn, _ = _project_conn()
+        conn = _project_conn()
     except master.ProjectNotFoundError as exc:
         output.print_result(
             output.error_envelope("ProjectNotFoundError", str(exc)), pretty
@@ -167,7 +159,7 @@ def list_cards_cmd(
 ) -> None:
     """List cards, optionally filtered."""
     try:
-        conn, _ = _project_conn()
+        conn = _project_conn()
     except master.ProjectNotFoundError as exc:
         output.print_result(
             output.error_envelope("ProjectNotFoundError", str(exc)), pretty
@@ -210,7 +202,7 @@ def update(
 ) -> None:
     """Edit a card's fields."""
     try:
-        conn, _ = _project_conn()
+        conn = _project_conn()
     except master.ProjectNotFoundError as exc:
         output.print_result(
             output.error_envelope("ProjectNotFoundError", str(exc)), pretty
@@ -249,7 +241,7 @@ def block(
 ) -> None:
     """Mark a card as blocked by another card."""
     try:
-        conn, _ = _project_conn()
+        conn = _project_conn()
     except master.ProjectNotFoundError as exc:
         output.print_result(
             output.error_envelope("ProjectNotFoundError", str(exc)), pretty
@@ -283,7 +275,7 @@ def unblock(
 ) -> None:
     """Remove a blocked-by relationship."""
     try:
-        conn, _ = _project_conn()
+        conn = _project_conn()
     except master.ProjectNotFoundError as exc:
         output.print_result(
             output.error_envelope("ProjectNotFoundError", str(exc)), pretty
@@ -318,7 +310,7 @@ def tree(
 ) -> None:
     """Print the hierarchy and dependency tree."""
     try:
-        conn, _ = _project_conn()
+        conn = _project_conn()
     except master.ProjectNotFoundError as exc:
         output.print_result(
             output.error_envelope("ProjectNotFoundError", str(exc)), pretty
@@ -352,7 +344,7 @@ def next_cmd(
 ) -> None:
     """List unblocked todo cards, oldest first."""
     try:
-        conn, _ = _project_conn()
+        conn = _project_conn()
     except master.ProjectNotFoundError as exc:
         output.print_result(
             output.error_envelope("ProjectNotFoundError", str(exc)), pretty
