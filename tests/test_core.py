@@ -134,3 +134,128 @@ def test_would_create_block_cycle_terminates_on_persisted_blocking_cycle(conn):
     db.add_blocked_by_edge(conn, "b", "c")
     db.add_blocked_by_edge(conn, "c", "b")
     assert core.would_create_block_cycle(conn, "a", "b") is False
+
+
+def test_create_card_defaults_to_todo(conn):
+    card = core.create_card(conn, title="New card")
+    assert card.status == "todo"
+    assert card.title == "New card"
+    assert db.get_card(conn, card.id) == card
+
+
+def test_create_card_with_parent_and_blocked_by(conn):
+    parent = core.create_card(conn, title="Parent")
+    blocker = core.create_card(conn, title="Blocker")
+    child = core.create_card(
+        conn, title="Child", parent_id=parent.id, blocked_by=[blocker.id]
+    )
+    assert child.parent_id == parent.id
+    assert db.list_blockers_of(conn, child.id) == [blocker.id]
+
+
+def test_create_card_rejects_unknown_parent(conn):
+    with pytest.raises(core.CardNotFoundError):
+        core.create_card(conn, title="Orphan", parent_id="nope")
+
+
+def test_create_card_rejects_unknown_blocker(conn):
+    with pytest.raises(core.CardNotFoundError):
+        core.create_card(conn, title="Card", blocked_by=["nope"])
+
+
+def test_update_card_changes_only_given_fields(conn):
+    card = core.create_card(conn, title="Original", description="d")
+    updated = core.update_card(conn, card.id, title="Updated")
+    assert updated.title == "Updated"
+    assert updated.description == "d"
+
+
+def test_update_card_rejects_blocked_status(conn):
+    card = core.create_card(conn, title="Card")
+    with pytest.raises(core.InvalidStatusError):
+        core.update_card(conn, card.id, status="blocked")
+
+
+def test_update_card_rejects_parent_cycle(conn):
+    a = core.create_card(conn, title="A")
+    b = core.create_card(conn, title="B", parent_id=a.id)
+    with pytest.raises(core.CycleError):
+        core.update_card(conn, a.id, parent_id=b.id)
+
+
+def test_update_card_can_clear_parent(conn):
+    a = core.create_card(conn, title="A")
+    b = core.create_card(conn, title="B", parent_id=a.id)
+    updated = core.update_card(conn, b.id, parent_id=core.CLEAR_PARENT)
+    assert updated.parent_id is None
+
+
+def test_block_card_adds_edge(conn):
+    a = core.create_card(conn, title="A")
+    b = core.create_card(conn, title="B")
+    core.block_card(conn, a.id, b.id)
+    assert db.list_blockers_of(conn, a.id) == [b.id]
+
+
+def test_block_card_rejects_cycle(conn):
+    a = core.create_card(conn, title="A")
+    b = core.create_card(conn, title="B")
+    core.block_card(conn, a.id, b.id)
+    with pytest.raises(core.CycleError):
+        core.block_card(conn, b.id, a.id)
+
+
+def test_unblock_card_removes_edge(conn):
+    a = core.create_card(conn, title="A")
+    b = core.create_card(conn, title="B")
+    core.block_card(conn, a.id, b.id)
+    core.unblock_card(conn, a.id, b.id)
+    assert db.list_blockers_of(conn, a.id) == []
+
+
+def test_update_card_rejects_unknown_card(conn):
+    with pytest.raises(core.CardNotFoundError):
+        core.update_card(conn, "nope", title="Updated")
+
+
+def test_update_card_rejects_unknown_parent(conn):
+    card = core.create_card(conn, title="Card")
+    with pytest.raises(core.CardNotFoundError):
+        core.update_card(conn, card.id, parent_id="nope")
+
+
+def test_update_card_bumps_updated_at_and_leaves_created_at(conn, monkeypatch):
+    card = core.create_card(conn, title="Card")
+    monkeypatch.setattr(core, "_now", lambda: "2099-01-01T00:00:00+00:00")
+    updated = core.update_card(conn, card.id, title="Updated")
+    assert updated.updated_at == "2099-01-01T00:00:00+00:00"
+    assert updated.created_at == card.created_at
+
+
+def test_update_card_without_fields_does_not_touch_updated_at(conn, monkeypatch):
+    card = core.create_card(conn, title="Card")
+    monkeypatch.setattr(core, "_now", lambda: "2099-01-01T00:00:00+00:00")
+    unchanged = core.update_card(conn, card.id)
+    assert unchanged == card
+
+
+def test_create_card_stamps_equal_created_and_updated_at(conn):
+    card = core.create_card(conn, title="Card")
+    assert card.created_at == card.updated_at
+
+
+def test_block_card_rejects_unknown_card(conn):
+    blocker = core.create_card(conn, title="Blocker")
+    with pytest.raises(core.CardNotFoundError):
+        core.block_card(conn, "nope", blocker.id)
+
+
+def test_block_card_rejects_unknown_blocker(conn):
+    card = core.create_card(conn, title="Card")
+    with pytest.raises(core.CardNotFoundError):
+        core.block_card(conn, card.id, "nope")
+
+
+def test_unblock_card_rejects_unknown_card(conn):
+    with pytest.raises(core.CardNotFoundError):
+        core.unblock_card(conn, "nope", "also-nope")
