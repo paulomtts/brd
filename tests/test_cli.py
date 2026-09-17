@@ -95,3 +95,170 @@ def test_projects_pretty_flag_switches_off_json(isolated_env, flag):
     with pytest.raises(json.JSONDecodeError):
         json.loads(result.stdout)
     assert "myrepo" in result.stdout
+
+
+@pytest.fixture
+def initialized_project(isolated_env):
+    runner.invoke(app, ["init"])
+    return isolated_env
+
+
+def test_add_creates_card(initialized_project):
+    result = runner.invoke(app, ["add", "--title", "My card"])
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is True
+    assert payload["data"]["title"] == "My card"
+    assert payload["data"]["status"] == "todo"
+
+
+def test_add_with_unknown_parent_errors(initialized_project):
+    result = runner.invoke(app, ["add", "--title", "Child", "--parent", "nope"])
+    assert result.exit_code != 0
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is False
+    assert payload["error"]["type"] == "CardNotFoundError"
+
+
+def test_add_stores_description(initialized_project):
+    result = runner.invoke(
+        app, ["add", "--title", "My card", "--description", "the details"]
+    )
+    assert result.exit_code == 0
+    assert json.loads(result.stdout)["data"]["description"] == "the details"
+
+
+def test_add_with_blocked_by_records_edge_and_blocks_card(initialized_project):
+    blocker_result = runner.invoke(app, ["add", "--title", "Blocker"])
+    blocker_id = json.loads(blocker_result.stdout)["data"]["id"]
+
+    result = runner.invoke(
+        app, ["add", "--title", "Blocked", "--blocked-by", blocker_id]
+    )
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["data"]["blocked_by"] == [blocker_id]
+    assert payload["data"]["status"] == "blocked"
+
+
+def test_add_with_unknown_blocked_by_errors(initialized_project):
+    result = runner.invoke(app, ["add", "--title", "X", "--blocked-by", "nope"])
+    assert result.exit_code != 0
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is False
+    assert payload["error"]["type"] == "CardNotFoundError"
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["add", "--title", "X"],
+        ["show", "some-id"],
+        ["list"],
+    ],
+)
+def test_commands_outside_project_error(tmp_path, monkeypatch, args):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    monkeypatch.chdir(outside)
+
+    result = runner.invoke(app, args)
+    assert result.exit_code != 0
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is False
+    assert payload["error"]["type"] == "ProjectNotFoundError"
+
+
+def test_show_returns_card_detail(initialized_project):
+    add_result = runner.invoke(app, ["add", "--title", "My card"])
+    card_id = json.loads(add_result.stdout)["data"]["id"]
+
+    result = runner.invoke(app, ["show", card_id])
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is True
+    assert payload["data"]["id"] == card_id
+    assert payload["data"]["status"] == "todo"
+    assert payload["data"]["children"] == []
+    assert payload["data"]["blocked_by"] == []
+
+
+def test_show_reports_children_and_blockers(initialized_project):
+    parent_result = runner.invoke(app, ["add", "--title", "Parent"])
+    parent_id = json.loads(parent_result.stdout)["data"]["id"]
+    blocker_result = runner.invoke(app, ["add", "--title", "Blocker"])
+    blocker_id = json.loads(blocker_result.stdout)["data"]["id"]
+    child_result = runner.invoke(
+        app,
+        ["add", "--title", "Child", "--parent", parent_id, "--blocked-by", blocker_id],
+    )
+    child_id = json.loads(child_result.stdout)["data"]["id"]
+
+    parent_payload = json.loads(runner.invoke(app, ["show", parent_id]).stdout)
+    assert parent_payload["data"]["children"] == [child_id]
+    assert parent_payload["data"]["blocked_by"] == []
+
+    child_payload = json.loads(runner.invoke(app, ["show", child_id]).stdout)
+    assert child_payload["data"]["parent_id"] == parent_id
+    assert child_payload["data"]["children"] == []
+    assert child_payload["data"]["blocked_by"] == [blocker_id]
+    assert child_payload["data"]["status"] == "blocked"
+
+
+def test_show_unknown_card_errors(initialized_project):
+    result = runner.invoke(app, ["show", "nope"])
+    assert result.exit_code != 0
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is False
+    assert payload["error"]["type"] == "CardNotFoundError"
+
+
+def test_list_returns_all_cards(initialized_project):
+    runner.invoke(app, ["add", "--title", "A"])
+    runner.invoke(app, ["add", "--title", "B"])
+    result = runner.invoke(app, ["list"])
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is True
+    assert len(payload["data"]) == 2
+
+
+def test_list_with_no_parent_filter_includes_child_cards(initialized_project):
+    parent_result = runner.invoke(app, ["add", "--title", "Parent"])
+    parent_id = json.loads(parent_result.stdout)["data"]["id"]
+    runner.invoke(app, ["add", "--title", "Child", "--parent", parent_id])
+
+    result = runner.invoke(app, ["list"])
+    payload = json.loads(result.stdout)
+    assert {item["title"] for item in payload["data"]} == {"Parent", "Child"}
+
+
+def test_list_filters_by_parent(initialized_project):
+    parent_result = runner.invoke(app, ["add", "--title", "Parent"])
+    parent_id = json.loads(parent_result.stdout)["data"]["id"]
+    runner.invoke(app, ["add", "--title", "Child", "--parent", parent_id])
+
+    result = runner.invoke(app, ["list", "--parent", parent_id])
+    payload = json.loads(result.stdout)
+    assert [item["title"] for item in payload["data"]] == ["Child"]
+
+
+def test_list_filters_by_status(initialized_project):
+    # Only `add` exists at this point, so every stored status is "todo";
+    # `brd update` (issue #15) is what lets a card reach "done". The filter
+    # itself is still fully exercised: a matching status returns the cards, a
+    # non-matching one returns none.
+    runner.invoke(app, ["add", "--title", "A"])
+    runner.invoke(app, ["add", "--title", "B"])
+
+    todo_result = runner.invoke(app, ["list", "--status", "todo"])
+    assert todo_result.exit_code == 0
+    assert {item["title"] for item in json.loads(todo_result.stdout)["data"]} == {
+        "A",
+        "B",
+    }
+
+    done_result = runner.invoke(app, ["list", "--status", "done"])
+    assert done_result.exit_code == 0
+    assert json.loads(done_result.stdout)["data"] == []
