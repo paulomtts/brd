@@ -335,3 +335,11 @@ def test_next_cards_limit_zero_returns_empty(conn):
     core.create_card(conn, title="B")
 
     assert core.next_cards(conn, limit=0) == []
+
+
+def test_next_cards_excludes_cards_with_children(conn):
+    epic = core.create_card(conn, title="Epic")
+    child = core.create_card(conn, title="Child", parent_id=epic.id)
+
+    result = core.next_cards(conn)
+    assert [c.id for c in result] == [child.id]

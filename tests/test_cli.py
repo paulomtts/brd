@@ -467,7 +467,7 @@ def test_end_to_end_workflow(isolated_env):
 
     next_payload = json.loads(runner.invoke(app, ["next"]).stdout)
     ready_ids = {c["id"] for c in next_payload["data"]}
-    assert story["id"] in ready_ids
+    assert story["id"] not in ready_ids  # has a child, so it's a container, not work
     assert blocker["id"] in ready_ids
     assert subtask["id"] not in ready_ids  # blocked
 

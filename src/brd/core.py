@@ -162,7 +162,11 @@ def unblock_card(conn: sqlite3.Connection, card_id: str, blocker_id: str) -> Non
 
 def next_cards(conn: sqlite3.Connection, limit: int | None = None) -> list[Card]:
     todo_cards = db.list_cards(conn, status="todo")
-    ready = [card for card in todo_cards if resolve_status(conn, card) == "todo"]
+    ready = [
+        card
+        for card in todo_cards
+        if resolve_status(conn, card) == "todo" and not db.list_children(conn, card.id)
+    ]
     return ready[:limit] if limit is not None else ready
 
 
