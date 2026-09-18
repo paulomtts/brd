@@ -434,6 +434,51 @@ def test_next_respects_limit(initialized_project):
     assert [item["id"] for item in payload["data"]] == [first["id"]]
 
 
+def test_next_child_of_blocked_parent_is_excluded(initialized_project):
+    story = json.loads(runner.invoke(app, ["add", "--title", "Story"]).stdout)["data"]
+    blocker = json.loads(runner.invoke(app, ["add", "--title", "Blocker"]).stdout)["data"]
+    runner.invoke(app, ["block", story["id"], "--by", blocker["id"]])
+    subtask = json.loads(
+        runner.invoke(
+            app, ["add", "--title", "Subtask", "--parent", story["id"]]
+        ).stdout
+    )["data"]
+
+    result = runner.invoke(app, ["next"])
+    ready_ids = {item["id"] for item in json.loads(result.stdout)["data"]}
+    assert subtask["id"] not in ready_ids
+    assert blocker["id"] in ready_ids
+
+
+def test_next_with_parent_returns_ready_direct_children(initialized_project):
+    milestone = json.loads(
+        runner.invoke(app, ["add", "--title", "Milestone"]).stdout
+    )["data"]
+    story_a = json.loads(
+        runner.invoke(
+            app, ["add", "--title", "Story A", "--parent", milestone["id"]]
+        ).stdout
+    )["data"]
+    story_b = json.loads(
+        runner.invoke(
+            app, ["add", "--title", "Story B", "--parent", milestone["id"]]
+        ).stdout
+    )["data"]
+    runner.invoke(app, ["block", story_b["id"], "--by", story_a["id"]])
+
+    result = runner.invoke(app, ["next", "--parent", milestone["id"]])
+    assert result.exit_code == 0
+    ready_ids = {item["id"] for item in json.loads(result.stdout)["data"]}
+    assert ready_ids == {story_a["id"]}
+
+
+def test_next_with_unknown_parent_errors(initialized_project):
+    result = runner.invoke(app, ["next", "--parent", "nope"])
+    assert result.exit_code != 0
+    payload = json.loads(result.stdout)
+    assert payload["error"]["type"] == "CardNotFoundError"
+
+
 @pytest.mark.parametrize("flag", ["--pretty", "--human"])
 def test_next_pretty_flag_switches_off_json(initialized_project, flag):
     card = json.loads(runner.invoke(app, ["add", "--title", "First"]).stdout)["data"]

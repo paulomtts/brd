@@ -64,6 +64,53 @@ def test_resolve_status_in_progress_is_unaffected_by_blockers(conn):
     assert core.resolve_status(conn, card) == "in_progress"
 
 
+def test_resolve_status_todo_child_of_blocked_parent_is_blocked(conn):
+    db.insert_card(conn, _card("parent"))
+    db.insert_card(conn, _card("parent_blocker"))
+    db.add_blocked_by_edge(conn, "parent", "parent_blocker")
+    db.insert_card(conn, _card("child", parent_id="parent"))
+
+    card = db.get_card(conn, "child")
+    assert core.resolve_status(conn, card) == "blocked"
+
+
+def test_resolve_status_grandchild_of_blocked_grandparent_is_blocked(conn):
+    db.insert_card(conn, _card("grandparent"))
+    db.insert_card(conn, _card("blocker"))
+    db.add_blocked_by_edge(conn, "grandparent", "blocker")
+    db.insert_card(conn, _card("parent", parent_id="grandparent"))
+    db.insert_card(conn, _card("child", parent_id="parent"))
+
+    card = db.get_card(conn, "child")
+    assert core.resolve_status(conn, card) == "blocked"
+
+
+def test_resolve_status_child_of_unblocked_parent_is_todo(conn):
+    db.insert_card(conn, _card("parent"))
+    db.insert_card(conn, _card("child", parent_id="parent"))
+
+    card = db.get_card(conn, "child")
+    assert core.resolve_status(conn, card) == "todo"
+
+
+def test_resolve_status_child_of_in_progress_parent_is_unaffected(conn):
+    db.insert_card(conn, _card("parent", status="in_progress"))
+    db.insert_card(conn, _card("child", parent_id="parent"))
+
+    card = db.get_card(conn, "child")
+    assert core.resolve_status(conn, card) == "todo"
+
+
+def test_resolve_status_in_progress_child_of_blocked_parent_is_unaffected(conn):
+    db.insert_card(conn, _card("parent"))
+    db.insert_card(conn, _card("blocker"))
+    db.add_blocked_by_edge(conn, "parent", "blocker")
+    db.insert_card(conn, _card("child", status="in_progress", parent_id="parent"))
+
+    card = db.get_card(conn, "child")
+    assert core.resolve_status(conn, card) == "in_progress"
+
+
 def test_would_create_parent_cycle_direct(conn):
     db.insert_card(conn, _card("a"))
     db.insert_card(conn, _card("b", parent_id="a"))
@@ -343,3 +390,37 @@ def test_next_cards_excludes_cards_with_children(conn):
 
     result = core.next_cards(conn)
     assert [c.id for c in result] == [child.id]
+
+
+def test_next_cards_with_parent_returns_ready_direct_children(conn):
+    milestone = core.create_card(conn, title="Milestone")
+    story_a = core.create_card(conn, title="Story A", parent_id=milestone.id)
+    story_b = core.create_card(conn, title="Story B", parent_id=milestone.id)
+    core.block_card(conn, story_b.id, story_a.id)
+    core.create_card(conn, title="A.1", parent_id=story_a.id)  # unrelated leaf
+
+    result = core.next_cards(conn, parent_id=milestone.id)
+    assert [c.id for c in result] == [story_a.id]
+
+
+def test_next_cards_with_parent_includes_ready_children_even_with_grandchildren(conn):
+    story = core.create_card(conn, title="Story")
+    subtask = core.create_card(conn, title="Subtask", parent_id=story.id)
+    core.create_card(conn, title="Sub-subtask", parent_id=subtask.id)
+
+    result = core.next_cards(conn, parent_id=story.id)
+    assert [c.id for c in result] == [subtask.id]
+
+
+def test_next_cards_with_parent_excludes_blocked_children(conn):
+    story = core.create_card(conn, title="Story")
+    blocker = core.create_card(conn, title="Blocker")
+    core.create_card(conn, title="Subtask", parent_id=story.id, blocked_by=[blocker.id])
+
+    result = core.next_cards(conn, parent_id=story.id)
+    assert result == []
+
+
+def test_next_cards_with_unknown_parent_raises(conn):
+    with pytest.raises(core.CardNotFoundError):
+        core.next_cards(conn, parent_id="nope")

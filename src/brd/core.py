@@ -28,6 +28,11 @@ def resolve_status(conn: sqlite3.Connection, card: Card, _seen: set[str] | None 
         if resolve_status(conn, blocker, seen) != "done":
             return "blocked"
 
+    if card.parent_id is not None:
+        parent = db.get_card(conn, card.parent_id)
+        if parent is not None and resolve_status(conn, parent, seen) == "blocked":
+            return "blocked"
+
     return "todo"
 
 
@@ -160,13 +165,21 @@ def unblock_card(conn: sqlite3.Connection, card_id: str, blocker_id: str) -> Non
     db.remove_blocked_by_edge(conn, card_id, blocker_id)
 
 
-def next_cards(conn: sqlite3.Connection, limit: int | None = None) -> list[Card]:
-    todo_cards = db.list_cards(conn, status="todo")
-    ready = [
-        card
-        for card in todo_cards
-        if resolve_status(conn, card) == "todo" and not db.list_children(conn, card.id)
-    ]
+def next_cards(
+    conn: sqlite3.Connection, limit: int | None = None, parent_id: str | None = None
+) -> list[Card]:
+    if parent_id is not None:
+        _require_card(conn, parent_id)
+        candidates = db.list_children(conn, parent_id)
+        ready = [card for card in candidates if resolve_status(conn, card) == "todo"]
+    else:
+        todo_cards = db.list_cards(conn, status="todo")
+        ready = [
+            card
+            for card in todo_cards
+            if resolve_status(conn, card) == "todo"
+            and not db.list_children(conn, card.id)
+        ]
     return ready[:limit] if limit is not None else ready
 
 

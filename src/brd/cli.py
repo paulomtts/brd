@@ -338,6 +338,12 @@ def next_cmd(
     limit: int | None = typer.Option(
         None, "--limit", help="Return at most this many cards."
     ),
+    parent: str | None = typer.Option(
+        None,
+        "--parent",
+        help="Ready direct children of this card id, instead of leaf cards "
+        "across the whole board.",
+    ),
     pretty: bool = typer.Option(
         False, "--pretty", "--human", help="Human-readable output."
     ),
@@ -352,8 +358,13 @@ def next_cmd(
         raise typer.Exit(code=1)
 
     try:
-        cards = core.next_cards(conn, limit=limit)
+        cards = core.next_cards(conn, limit=limit, parent_id=parent)
         envelope = output.ok_envelope([_card_detail(conn, card) for card in cards])
+    except core.CardNotFoundError as exc:
+        output.print_result(
+            output.error_envelope("CardNotFoundError", str(exc)), pretty
+        )
+        raise typer.Exit(code=1)
     finally:
         conn.close()
 
