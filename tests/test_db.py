@@ -13,11 +13,9 @@ def conn(tmp_path):
     connection.close()
 
 
-def test_connect_enables_foreign_keys_without_wal(conn):
-    # Not WAL: the per-project DB is meant to be committed to git as a single
-    # file, and WAL can leave recent writes in a separate -wal sidecar file.
+def test_connect_enables_wal_and_foreign_keys(conn):
     mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
-    assert mode.lower() != "wal"
+    assert mode.lower() == "wal"
     fk = conn.execute("PRAGMA foreign_keys").fetchone()[0]
     assert fk == 1
 

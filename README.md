@@ -30,9 +30,11 @@ All commands output JSON by default (for agent consumption); pass
 
 ## Storage
 
-`brd init` creates `.brd/board.db` in the project root. This file is
-meant to be committed to git (not gitignored) so the board travels
-with clones instead of living in a separate per-machine store.
+`brd init` creates a gitignored `.brd` marker file in the project root
+and stores the actual board in a per-project SQLite file under
+`~/.local/share/brd/` (or `$XDG_DATA_HOME/brd`), keyed by the project's
+absolute path. Nothing project-specific is committed to git; a board
+doesn't currently travel with a clone to another machine.
 
 ## For agents
 

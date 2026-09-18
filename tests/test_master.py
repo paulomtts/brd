@@ -1,26 +1,41 @@
 import pytest
 
-from brd import db, master
+from brd import db, master, paths
 
 
-def test_init_project_creates_board_db_and_nested_gitignore(tmp_path, monkeypatch):
+def test_init_project_creates_central_db_and_gitignored_marker(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
     repo = tmp_path / "myrepo"
     repo.mkdir()
 
     project = master.init_project(repo)
 
-    board_db = repo / ".brd" / "board.db"
-    assert board_db.is_file()
+    marker = repo / ".brd"
+    assert marker.is_file()
+    assert marker.read_text() == ""
     assert project.name == "myrepo"
     assert project.root_path == str(repo)
 
-    nested_gitignore = repo / ".brd" / ".gitignore"
-    assert nested_gitignore.exists()
-    assert "board.db-journal" in nested_gitignore.read_text()
+    db_path = paths.project_db_path(repo)
+    assert db_path.is_file()
+    assert str(db_path).startswith(str(tmp_path / "data"))
 
-    # The repo's own .gitignore is untouched: board.db is meant to be tracked.
-    assert not (repo / ".gitignore").exists()
+    gitignore = repo / ".gitignore"
+    assert gitignore.exists()
+    assert ".brd" in gitignore.read_text().splitlines()
+
+
+def test_init_project_appends_to_existing_gitignore_once(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    repo = tmp_path / "myrepo"
+    repo.mkdir()
+    (repo / ".gitignore").write_text("__pycache__/\n")
+
+    master.init_project(repo)
+
+    lines = (repo / ".gitignore").read_text().splitlines()
+    assert lines.count(".brd") == 1
+    assert "__pycache__/" in lines
 
 
 def test_init_project_twice_preserves_existing_cards(tmp_path, monkeypatch):
@@ -29,8 +44,8 @@ def test_init_project_twice_preserves_existing_cards(tmp_path, monkeypatch):
     repo.mkdir()
     master.init_project(repo)
 
-    board_db = repo / ".brd" / "board.db"
-    conn = db.connect(board_db)
+    db_path = paths.project_db_path(repo)
+    conn = db.connect(db_path)
     try:
         conn.execute(
             "INSERT INTO cards (id, title, description, status, parent_id, "
@@ -41,9 +56,9 @@ def test_init_project_twice_preserves_existing_cards(tmp_path, monkeypatch):
     finally:
         conn.close()
 
-    master.init_project(repo)  # simulates re-running init on a cloned repo
+    master.init_project(repo)
 
-    conn = db.connect(board_db)
+    conn = db.connect(db_path)
     try:
         row = conn.execute("SELECT * FROM cards WHERE id = 'c1'").fetchone()
     finally:
@@ -64,20 +79,15 @@ def test_init_project_upserts_name_on_rerun(tmp_path, monkeypatch):
     assert [p.name for p in all_projects] == ["second-name"]
 
 
-def test_init_project_migrates_legacy_marker_file_preserving_cards(
+def test_init_project_migrates_legacy_uuid_marker_preserving_cards(
     tmp_path, monkeypatch
 ):
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
     repo = tmp_path / "myrepo"
     repo.mkdir()
 
-    # Simulate a repo initialized under the old design: a plain .brd marker
-    # file holding a UUID, real cards in the old central per-project store,
-    # and a root .gitignore that hides ".brd" (which would now wrongly hide
-    # the tracked board.db too).
     legacy_id = "07a7d240-444a-4b71-b585-b5bc7b50fdf3"
     (repo / ".brd").write_text(f"{legacy_id}\n")
-    (repo / ".gitignore").write_text("__pycache__/\n.brd\n")
 
     old_projects_dir = tmp_path / "data" / "brd" / "projects"
     old_projects_dir.mkdir(parents=True)
@@ -94,48 +104,68 @@ def test_init_project_migrates_legacy_marker_file_preserving_cards(
 
     master.init_project(repo)
 
-    board_db = repo / ".brd" / "board.db"
-    assert board_db.is_file()
-    conn = db.connect(board_db)
+    new_db_path = paths.project_db_path(repo)
+    conn = db.connect(new_db_path)
     try:
         row = conn.execute("SELECT * FROM cards WHERE id = 'c1'").fetchone()
     finally:
         conn.close()
     assert row is not None
     assert row["title"] == "Old card"
-
-    gitignore_lines = (repo / ".gitignore").read_text().splitlines()
-    assert ".brd" not in gitignore_lines
-    assert "__pycache__/" in gitignore_lines
+    assert (repo / ".brd").read_text() == ""
 
 
-def test_init_project_handles_legacy_marker_with_no_old_data(tmp_path, monkeypatch):
+def test_init_project_migrates_in_repo_format_preserving_cards(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
     repo = tmp_path / "myrepo"
     repo.mkdir()
-    (repo / ".brd").write_text("00000000-0000-4000-8000-000000000000\n")
 
-    project = master.init_project(repo)
+    # Simulate a repo committed under the in-repo storage design: .brd/ is a
+    # directory holding board.db, and it's absent from .gitignore.
+    brd_dir = repo / ".brd"
+    brd_dir.mkdir()
+    old_db_path = brd_dir / "board.db"
+    old_conn = db.connect(old_db_path)
+    db.init_project_schema(old_conn)
+    old_conn.execute(
+        "INSERT INTO cards (id, title, description, status, parent_id, "
+        "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        ("c1", "In-repo card", None, "todo", None, "now", "now"),
+    )
+    old_conn.commit()
+    old_conn.close()
 
-    assert (repo / ".brd" / "board.db").is_file()
-    assert project.name == "myrepo"
+    master.init_project(repo)
+
+    assert brd_dir.is_file()  # the directory is gone; .brd is a marker file again
+    new_db_path = paths.project_db_path(repo)
+    conn = db.connect(new_db_path)
+    try:
+        row = conn.execute("SELECT * FROM cards WHERE id = 'c1'").fetchone()
+    finally:
+        conn.close()
+    assert row is not None
+    assert row["title"] == "In-repo card"
+
+    gitignore_lines = (repo / ".gitignore").read_text().splitlines()
+    assert ".brd" in gitignore_lines
 
 
-def test_find_project_db_walks_up_from_nested_dir(tmp_path, monkeypatch):
+def test_find_marker_walks_up_from_nested_dir(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
     repo = tmp_path / "myrepo"
     nested = repo / "a" / "b"
     nested.mkdir(parents=True)
     master.init_project(repo)
 
-    found = master.find_project_db(nested)
-    assert found == repo / ".brd" / "board.db"
+    found = master.find_marker(nested)
+    assert found == repo / ".brd"
 
 
-def test_find_project_db_returns_none_when_absent(tmp_path):
+def test_find_marker_returns_none_when_absent(tmp_path):
     somewhere = tmp_path / "nowhere"
     somewhere.mkdir()
-    assert master.find_project_db(somewhere) is None
+    assert master.find_marker(somewhere) is None
 
 
 def test_resolve_project_db_from_nested_dir(tmp_path, monkeypatch):
@@ -146,7 +176,7 @@ def test_resolve_project_db_from_nested_dir(tmp_path, monkeypatch):
     master.init_project(repo)
 
     resolved = master.resolve_project_db(nested)
-    assert resolved == repo / ".brd" / "board.db"
+    assert resolved == paths.project_db_path(repo)
 
 
 def test_resolve_project_db_raises_when_no_project(tmp_path):
@@ -167,20 +197,6 @@ def test_list_all_projects(tmp_path, monkeypatch):
 
     results = master.list_all_projects()
     assert {p.name for p in results} == {"repo1", "repo2"}
-
-
-def test_init_project_does_not_overwrite_existing_nested_gitignore(
-    tmp_path, monkeypatch
-):
-    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
-    repo = tmp_path / "myrepo"
-    repo.mkdir()
-    (repo / ".brd").mkdir()
-    (repo / ".brd" / ".gitignore").write_text("custom-rule\n")
-
-    master.init_project(repo)
-
-    assert (repo / ".brd" / ".gitignore").read_text() == "custom-rule\n"
 
 
 def test_list_all_projects_is_empty_before_any_registration(tmp_path, monkeypatch):

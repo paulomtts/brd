@@ -2,15 +2,18 @@
 
 Date: 2026-09-17
 
-> **Amendment (2026-09-17, later):** The "Storage layout" and "Project
-> resolution" sections below describe the original central-store design
-> (per-project DBs under the XDG data dir, keyed by a master DB with UUIDs).
-> This was superseded: the per-project DB now lives at
-> `<repo-root>/.brd/board.db`, is committed to git (not gitignored) so it
-> travels with clones, and is resolved by walking up the filesystem — no
-> master DB lookup involved. The master DB survives only as a local,
-> best-effort cache for `brd projects`, keyed by `root_path`. See
-> `src/brd/master.py` for the current behavior.
+> **Amendment (2026-09-17, later):** The design below (central store under
+> the XDG data dir, keyed by a master DB with UUIDs) was briefly replaced
+> by an in-repo `<repo-root>/.brd/board.db` committed to git, to make the
+> board travel with clones. That was reverted (multi-device sync was judged
+> not worth the tradeoffs it introduced — binary-diff PRs, migration
+> complexity). The current design is close to this original one, but
+> simpler: the per-project DB path is a deterministic hash of the project's
+> resolved root path (`paths.project_db_path`), not a stored UUID, so
+> resolving it needs no master DB lookup at all — only a filesystem walk-up
+> for the `.brd` marker file (now just an empty gitignored sentinel). The
+> master DB survives only as a local, best-effort cache for `brd projects`,
+> keyed by `root_path`. See `src/brd/master.py` for the current behavior.
 
 ## Purpose
 

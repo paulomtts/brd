@@ -29,3 +29,24 @@ def test_data_dir_treats_empty_xdg_data_home_as_unset(monkeypatch, tmp_path):
     result = paths.data_dir()
     assert result == tmp_path / ".local" / "share" / "brd"
     assert result.is_dir()
+
+
+def test_project_db_path_is_deterministic_per_root(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    project_root = tmp_path / "repo"
+    project_root.mkdir()
+
+    result = paths.project_db_path(project_root)
+    assert result == paths.project_db_path(project_root)
+    assert result.parent == tmp_path / "data" / "brd" / "projects"
+    assert result.parent.is_dir()
+
+
+def test_project_db_path_differs_per_root(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    repo1 = tmp_path / "repo1"
+    repo1.mkdir()
+    repo2 = tmp_path / "repo2"
+    repo2.mkdir()
+
+    assert paths.project_db_path(repo1) != paths.project_db_path(repo2)

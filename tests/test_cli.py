@@ -3,6 +3,7 @@ import json
 import pytest
 from typer.testing import CliRunner
 
+from brd import paths
 from brd.cli import app
 
 runner = CliRunner()
@@ -52,7 +53,8 @@ def test_init_registers_project(isolated_env):
     payload = json.loads(result.stdout)
     assert payload["ok"] is True
     assert payload["data"]["name"] == "myrepo"
-    assert (isolated_env / ".brd" / "board.db").is_file()
+    assert (isolated_env / ".brd").is_file()
+    assert paths.project_db_path(isolated_env).is_file()
 
 
 def test_init_twice_succeeds_and_preserves_cards(isolated_env):
