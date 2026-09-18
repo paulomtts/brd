@@ -414,6 +414,51 @@ def test_tree_missing_card_errors(initialized_project):
     assert payload["error"]["type"] == "CardNotFoundError"
 
 
+def test_import_round_trips_a_board_into_a_fresh_project(isolated_env, monkeypatch):
+    runner.invoke(app, ["init"])
+    parent = json.loads(runner.invoke(app, ["add", "--title", "Parent"]).stdout)["data"]
+    runner.invoke(app, ["add", "--title", "Child", "--parent", parent["id"]])
+
+    tree_result = runner.invoke(app, ["tree"])
+    snapshot_file = isolated_env.parent / "snapshot.json"
+    snapshot_file.write_text(tree_result.stdout)
+
+    other_repo = isolated_env.parent / "other-repo"
+    other_repo.mkdir()
+    monkeypatch.chdir(other_repo)
+    runner.invoke(app, ["init"])
+
+    result = runner.invoke(app, ["import", str(snapshot_file)])
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is True
+    assert payload["data"]["imported"] == 2
+
+    tree_after = json.loads(runner.invoke(app, ["tree"]).stdout)
+    assert tree_after["data"][0]["id"] == parent["id"]
+    assert tree_after["data"][0]["children"][0]["id"] != ""
+
+
+def test_import_rejects_colliding_ids(isolated_env):
+    runner.invoke(app, ["init"])
+    runner.invoke(app, ["add", "--title", "Card"])
+    snapshot_file = isolated_env.parent / "snapshot.json"
+    snapshot_file.write_text(runner.invoke(app, ["tree"]).stdout)
+
+    result = runner.invoke(app, ["import", str(snapshot_file)])
+    assert result.exit_code != 0
+    payload = json.loads(result.stdout)
+    assert payload["error"]["type"] == "CardAlreadyExistsError"
+
+
+def test_import_missing_file_errors(isolated_env):
+    runner.invoke(app, ["init"])
+    result = runner.invoke(app, ["import", str(isolated_env / "nope.json")])
+    assert result.exit_code != 0
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is False
+
+
 def test_next_returns_ready_cards(initialized_project):
     first = json.loads(runner.invoke(app, ["add", "--title", "First"]).stdout)["data"]
     second = json.loads(runner.invoke(app, ["add", "--title", "Second"]).stdout)["data"]

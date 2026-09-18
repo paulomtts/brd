@@ -1,4 +1,5 @@
 import dataclasses
+import json
 import sqlite3
 from pathlib import Path
 
@@ -331,6 +332,50 @@ def tree(
         print(output.render_tree_text(envelope["data"]))
     else:
         output.print_result(envelope, pretty)
+
+
+@app.command(name="import")
+def import_cmd(
+    file: Path = typer.Argument(
+        ..., help="Path to a JSON file in `brd tree`'s output shape."
+    ),
+    pretty: bool = typer.Option(
+        False, "--pretty", "--human", help="Human-readable output."
+    ),
+) -> None:
+    """Restore cards from a brd tree JSON snapshot."""
+    try:
+        conn = _project_conn()
+    except master.ProjectNotFoundError as exc:
+        output.print_result(
+            output.error_envelope("ProjectNotFoundError", str(exc)), pretty
+        )
+        raise typer.Exit(code=1)
+
+    try:
+        try:
+            raw = json.loads(file.read_text())
+        except (OSError, json.JSONDecodeError) as exc:
+            output.print_result(
+                output.error_envelope(
+                    "ImportReadError", f"could not read a JSON snapshot from {file}: {exc}"
+                ),
+                pretty,
+            )
+            raise typer.Exit(code=1)
+
+        nodes = raw["data"] if isinstance(raw, dict) and "data" in raw else raw
+        count = core.import_tree(conn, nodes)
+        envelope = output.ok_envelope({"imported": count})
+    except core.CardAlreadyExistsError as exc:
+        output.print_result(
+            output.error_envelope(type(exc).__name__, str(exc)), pretty
+        )
+        raise typer.Exit(code=1)
+    finally:
+        conn.close()
+
+    output.print_result(envelope, pretty)
 
 
 @app.command(name="next")

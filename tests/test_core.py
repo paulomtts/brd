@@ -360,6 +360,16 @@ def test_build_tree_single_root_with_children_and_blockers(conn):
     assert child_node["children"] == []
 
 
+def test_build_tree_node_includes_description_and_timestamps(conn):
+    card = core.create_card(conn, title="Card", description="details")
+
+    tree = core.build_tree(conn, root_id=card.id)
+    node = tree[0]
+    assert node["description"] == "details"
+    assert node["created_at"] == card.created_at
+    assert node["updated_at"] == card.updated_at
+
+
 def test_build_tree_whole_board_returns_all_top_level_roots(conn):
     root1 = core.create_card(conn, title="Root1")
     root2 = core.create_card(conn, title="Root2")
@@ -424,3 +434,75 @@ def test_next_cards_with_parent_excludes_blocked_children(conn):
 def test_next_cards_with_unknown_parent_raises(conn):
     with pytest.raises(core.CardNotFoundError):
         core.next_cards(conn, parent_id="nope")
+
+
+def test_import_tree_round_trips_a_whole_board(conn):
+    parent = core.create_card(conn, title="Parent", description="p desc")
+    blocker = core.create_card(conn, title="Blocker")
+    core.create_card(
+        conn,
+        title="Child",
+        description="c desc",
+        parent_id=parent.id,
+        blocked_by=[blocker.id],
+    )
+    original_tree = core.build_tree(conn)
+
+    fresh_conn = db.connect(":memory:")
+    db.init_project_schema(fresh_conn)
+    count = core.import_tree(fresh_conn, original_tree)
+
+    assert count == 3
+    assert core.build_tree(fresh_conn) == original_tree
+
+
+def test_import_tree_maps_derived_blocked_status_back_to_todo(conn):
+    blocker = core.create_card(conn, title="Blocker")
+    blocked = core.create_card(conn, title="Blocked", blocked_by=[blocker.id])
+    tree = core.build_tree(conn)
+
+    fresh_conn = db.connect(":memory:")
+    db.init_project_schema(fresh_conn)
+    core.import_tree(fresh_conn, tree)
+
+    stored = db.get_card(fresh_conn, blocked.id)
+    assert stored.status == "todo"  # not "blocked" -- that's derived, not stored
+    assert core.resolve_status(fresh_conn, stored) == "blocked"
+
+
+def test_import_tree_preserves_in_progress_and_done_status(conn):
+    a = core.create_card(conn, title="A")
+    core.update_card(conn, a.id, status="in_progress")
+    b = core.create_card(conn, title="B")
+    core.update_card(conn, b.id, status="done")
+    tree = core.build_tree(conn)
+
+    fresh_conn = db.connect(":memory:")
+    db.init_project_schema(fresh_conn)
+    core.import_tree(fresh_conn, tree)
+
+    assert db.get_card(fresh_conn, a.id).status == "in_progress"
+    assert db.get_card(fresh_conn, b.id).status == "done"
+
+
+def test_import_tree_rejects_colliding_id_without_partial_import(conn):
+    existing = core.create_card(conn, title="Existing")
+    other = core.create_card(conn, title="Other")
+    tree = [
+        {
+            "id": existing.id,
+            "title": "Existing",
+            "description": None,
+            "status": "todo",
+            "blocked_by": [],
+            "created_at": existing.created_at,
+            "updated_at": existing.updated_at,
+            "children": [],
+        }
+    ]
+
+    with pytest.raises(core.CardAlreadyExistsError):
+        core.import_tree(conn, tree)
+
+    # nothing else got touched
+    assert db.get_card(conn, other.id) is not None

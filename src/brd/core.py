@@ -68,6 +68,10 @@ class InvalidStatusError(Exception):
     pass
 
 
+class CardAlreadyExistsError(Exception):
+    pass
+
+
 CLEAR_PARENT = object()  # sentinel: "explicitly set parent_id to None"
 
 
@@ -187,8 +191,11 @@ def _build_node(conn: sqlite3.Connection, card: Card) -> dict:
     return {
         "id": card.id,
         "title": card.title,
+        "description": card.description,
         "status": resolve_status(conn, card),
         "blocked_by": db.list_blockers_of(conn, card.id),
+        "created_at": card.created_at,
+        "updated_at": card.updated_at,
         "children": [
             _build_node(conn, child) for child in db.list_children(conn, card.id)
         ],
@@ -202,3 +209,48 @@ def build_tree(conn: sqlite3.Connection, root_id: str | None = None) -> list[dic
 
     top_level = db.list_cards(conn, parent_id=None)
     return [_build_node(conn, card) for card in top_level]
+
+
+def _flatten_tree(
+    nodes: list[dict], parent_id: str | None = None
+) -> list[tuple[dict, str | None]]:
+    flattened: list[tuple[dict, str | None]] = []
+    for node in nodes:
+        flattened.append((node, parent_id))
+        flattened.extend(_flatten_tree(node.get("children", []), node["id"]))
+    return flattened
+
+
+def import_tree(conn: sqlite3.Connection, nodes: list[dict]) -> int:
+    """Restore cards from a brd tree JSON snapshot (build_tree's own output
+    shape). Preserves original ids, descriptions, and timestamps. Fails
+    before creating anything if any id already exists in this board."""
+    flattened = _flatten_tree(nodes)
+
+    for node, _ in flattened:
+        if db.get_card(conn, node["id"]) is not None:
+            raise CardAlreadyExistsError(
+                f"card {node['id']} already exists in this board"
+            )
+
+    for node, parent_id in flattened:
+        status = node["status"]
+        stored_status = "todo" if status == "blocked" else status
+        db.insert_card(
+            conn,
+            Card(
+                id=node["id"],
+                title=node["title"],
+                description=node.get("description"),
+                status=stored_status,
+                parent_id=parent_id,
+                created_at=node["created_at"],
+                updated_at=node["updated_at"],
+            ),
+        )
+
+    for node, _ in flattened:
+        for blocker_id in node.get("blocked_by", []):
+            db.add_blocked_by_edge(conn, node["id"], blocker_id)
+
+    return len(flattened)

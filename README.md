@@ -34,7 +34,19 @@ All commands output JSON by default (for agent consumption); pass
 and stores the actual board in a per-project SQLite file under
 `~/.local/share/brd/` (or `$XDG_DATA_HOME/brd`), keyed by the project's
 absolute path. Nothing project-specific is committed to git; a board
-doesn't currently travel with a clone to another machine.
+doesn't automatically travel with a clone to another machine.
+
+To keep a durable, diffable record in git and move a board between
+machines, commit a snapshot and restore from it:
+
+```bash
+brd tree > docs/board/snapshot.json   # commit this
+brd import docs/board/snapshot.json   # on another machine/clone, after brd init
+```
+
+`import` preserves the original ids, descriptions, and timestamps, and
+refuses to run (touching nothing) if any id in the snapshot already
+exists in the target board.
 
 ## For agents
 

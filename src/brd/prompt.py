@@ -14,7 +14,9 @@ container, not work: `brd next` skips it and only surfaces its leaves.
 
 Board data lives outside this repo (in `~/.local/share/brd/`), keyed to
 this project's path — the `.brd` marker file is gitignored and doesn't
-carry any board data itself.
+carry any board data itself. `brd tree > docs/board/snapshot.json` gives
+you a committable, human-readable record; `brd import <file>` restores
+it (same ids, descriptions, timestamps) on another machine or clone.
 
 Output is JSON by default; add `--pretty` for human-readable text.
 Use `brd --help` to see all commands.
