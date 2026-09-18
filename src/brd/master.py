@@ -22,9 +22,58 @@ def _master_conn():
     return conn
 
 
+def _migrate_legacy_marker(root_path: Path, marker_file: Path) -> None:
+    """Migrate a repo initialized under the old design: `.brd` was a plain
+    marker file holding a project UUID, and cards lived in a per-project DB
+    under the central data dir, keyed by that UUID."""
+    project_id = marker_file.read_text().strip()
+    old_db_path = paths.data_dir() / "projects" / f"{project_id}.db"
+    marker_file.unlink()
+
+    brd_dir = root_path / MARKER_DIRNAME
+    brd_dir.mkdir(exist_ok=True)
+
+    if old_db_path.is_file():
+        new_db_path = brd_dir / DB_FILENAME
+        old_conn = db.connect(old_db_path)
+        new_conn = db.connect(new_db_path)
+        try:
+            db.init_project_schema(new_conn)
+            for row in old_conn.execute("SELECT * FROM cards"):
+                new_conn.execute(
+                    "INSERT INTO cards (id, title, description, status, "
+                    "parent_id, created_at, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    tuple(row),
+                )
+            for row in old_conn.execute("SELECT * FROM blocked_by"):
+                new_conn.execute(
+                    "INSERT INTO blocked_by (card_id, blocks_on_id) VALUES (?, ?)",
+                    tuple(row),
+                )
+            new_conn.commit()
+        finally:
+            old_conn.close()
+            new_conn.close()
+
+    # A bare ".brd" line (from the old design, which gitignored the marker)
+    # would now wrongly hide the tracked board.db too.
+    gitignore = root_path / ".gitignore"
+    if gitignore.exists():
+        lines = gitignore.read_text().splitlines()
+        if MARKER_DIRNAME in lines:
+            lines = [line for line in lines if line != MARKER_DIRNAME]
+            text = "\n".join(lines)
+            gitignore.write_text(f"{text}\n" if text else "")
+
+
 def init_project(root_path: Path, name: str | None = None) -> Project:
     project_name = name or root_path.name
     brd_dir = root_path / MARKER_DIRNAME
+
+    if brd_dir.is_file():
+        _migrate_legacy_marker(root_path, brd_dir)
+
     brd_dir.mkdir(exist_ok=True)
     db_path = brd_dir / DB_FILENAME
 

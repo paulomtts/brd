@@ -12,15 +12,39 @@ def connect(db_path: Path) -> sqlite3.Connection:
 
 
 def init_master_schema(conn: sqlite3.Connection) -> None:
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS projects (
-            root_path TEXT PRIMARY KEY,
-            name TEXT NOT NULL,
-            created_at TEXT NOT NULL
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(projects)")}
+    if "id" in columns:
+        # Legacy schema (id PK, unique name, db_path): migrate in place,
+        # preserving what still applies (root_path, name, created_at).
+        old_rows = conn.execute(
+            "SELECT name, root_path, created_at FROM projects"
+        ).fetchall()
+        conn.execute("DROP TABLE projects")
+        conn.execute(
+            """
+            CREATE TABLE projects (
+                root_path TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """
         )
-        """
-    )
+        for row in old_rows:
+            conn.execute(
+                "INSERT OR REPLACE INTO projects (root_path, name, created_at) "
+                "VALUES (?, ?, ?)",
+                (row["root_path"], row["name"], row["created_at"]),
+            )
+    else:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS projects (
+                root_path TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
     conn.commit()
 
 

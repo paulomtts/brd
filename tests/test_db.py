@@ -37,6 +37,53 @@ def test_init_master_schema_is_idempotent(conn):
     db.init_master_schema(conn)  # must not raise
 
 
+def test_init_master_schema_migrates_legacy_schema_preserving_rows(conn):
+    conn.execute(
+        """
+        CREATE TABLE projects (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL UNIQUE,
+            root_path TEXT NOT NULL,
+            db_path TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        "INSERT INTO projects (id, name, root_path, db_path, created_at) "
+        "VALUES (?, ?, ?, ?, ?)",
+        ("old-id", "legacy-project", "/repo", "/old/db/path.db", "2026-01-01T00:00:00"),
+    )
+    conn.commit()
+
+    db.init_master_schema(conn)
+
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(projects)")}
+    assert columns == {"root_path", "name", "created_at"}
+    row = conn.execute("SELECT * FROM projects").fetchone()
+    assert row["root_path"] == "/repo"
+    assert row["name"] == "legacy-project"
+    assert row["created_at"] == "2026-01-01T00:00:00"
+
+
+def test_init_master_schema_migration_is_idempotent(conn):
+    conn.execute(
+        """
+        CREATE TABLE projects (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL UNIQUE,
+            root_path TEXT NOT NULL,
+            db_path TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.commit()
+
+    db.init_master_schema(conn)
+    db.init_master_schema(conn)  # must not raise on the already-migrated table
+
+
 def test_init_project_schema_creates_cards_and_blocked_by_tables(conn):
     db.init_project_schema(conn)
     card_columns = {row[1] for row in conn.execute("PRAGMA table_info(cards)")}
