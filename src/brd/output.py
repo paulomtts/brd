@@ -16,13 +16,16 @@ def _json_default(obj):
     raise TypeError(f"object of type {type(obj)} is not JSON serializable")
 
 
-def render_tree_text(nodes: list[dict], indent: int = 0) -> str:
+def render_tree_text(nodes: list[dict], _prefix: str = "") -> str:
     lines = []
-    prefix = "  " * indent
-    for node in nodes:
-        lines.append(f"{prefix}- {node['title']} [{node['status']}] ({node['id']})")
+    for index, node in enumerate(nodes):
+        is_last = index == len(nodes) - 1
+        connector = "└── " if is_last else "├── "
+        branch = "" if _prefix == "" else _prefix
+        lines.append(f"{branch}{connector}{node['title']} [{node['status']}] ({node['id']})")
         if node["children"]:
-            lines.append(render_tree_text(node["children"], indent + 1))
+            child_prefix = _prefix + ("    " if is_last else "│   ")
+            lines.append(render_tree_text(node["children"], child_prefix))
     return "\n".join(lines)
 
 

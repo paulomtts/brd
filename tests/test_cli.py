@@ -402,8 +402,8 @@ def test_tree_pretty_renders_indented_text(initialized_project, flag):
     assert result.exit_code == 0
     with pytest.raises(json.JSONDecodeError):
         json.loads(result.stdout)
-    assert f"- Parent [todo] ({parent['id']})" in result.stdout
-    assert f"  - Child [todo] ({child['id']})" in result.stdout
+    assert f"└── Parent [todo] ({parent['id']})" in result.stdout
+    assert f"    └── Child [todo] ({child['id']})" in result.stdout
 
 
 def test_tree_missing_card_errors(initialized_project):

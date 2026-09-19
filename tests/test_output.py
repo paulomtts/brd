@@ -94,5 +94,5 @@ def test_render_tree_text_nests_children():
     ]
     text = output.render_tree_text(nodes)
     lines = text.splitlines()
-    assert lines[0] == "- Parent [todo] (p1)"
-    assert lines[1] == "  - Child [blocked] (c1)"
+    assert lines[0] == "└── Parent [todo] (p1)"
+    assert lines[1] == "    └── Child [blocked] (c1)"
