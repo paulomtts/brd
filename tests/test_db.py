@@ -228,6 +228,46 @@ def test_upsert_project_commits_so_another_connection_sees_it(tmp_path):
         assert db.list_projects(reader) == [_sample_project()]
     finally:
         reader.close()
+
+
+def test_get_project_returns_matching_project(conn):
+    db.init_master_schema(conn)
+    db.upsert_project(conn, _sample_project("/repo1", "brd"))
+    db.upsert_project(conn, _sample_project("/repo2", "other"))
+    assert db.get_project(conn, "/repo2") == _sample_project("/repo2", "other")
+
+
+def test_get_project_returns_none_when_absent(conn):
+    db.init_master_schema(conn)
+    assert db.get_project(conn, "/nope") is None
+
+
+def test_delete_project_removes_matching_row(conn):
+    db.init_master_schema(conn)
+    db.upsert_project(conn, _sample_project("/repo1", "brd"))
+    db.upsert_project(conn, _sample_project("/repo2", "other"))
+    db.delete_project(conn, "/repo1")
+    assert [p.root_path for p in db.list_projects(conn)] == ["/repo2"]
+
+
+def test_delete_project_is_a_noop_when_absent(conn):
+    db.init_master_schema(conn)
+    db.upsert_project(conn, _sample_project())
+    db.delete_project(conn, "/nope")
+    assert [p.root_path for p in db.list_projects(conn)] == ["/repo"]
+
+
+def test_delete_project_commits_so_another_connection_sees_it(tmp_path):
+    db_path = tmp_path / "master.db"
+    writer = db.connect(db_path)
+    db.init_master_schema(writer)
+    db.upsert_project(writer, _sample_project())
+    db.delete_project(writer, "/repo")
+    reader = db.connect(db_path)
+    try:
+        assert db.list_projects(reader) == []
+    finally:
+        reader.close()
         writer.close()
 
 

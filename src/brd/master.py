@@ -127,3 +127,34 @@ def list_all_projects() -> list[Project]:
         return db.list_projects(conn)
     finally:
         conn.close()
+
+
+def forget_project(root_path: Path) -> Project:
+    conn = _master_conn()
+    try:
+        project = db.get_project(conn, str(root_path))
+        if project is None:
+            raise ProjectNotFoundError(f"no registered project at {root_path}")
+        db.delete_project(conn, str(root_path))
+    finally:
+        conn.close()
+
+    db_path = paths.project_db_path(root_path)
+    if db_path.is_file():
+        db_path.unlink()
+
+    marker = root_path / MARKER_FILENAME
+    if marker.is_file():
+        marker.unlink()
+
+    return project
+
+
+def purge_all() -> int:
+    conn = _master_conn()
+    try:
+        count = len(db.list_projects(conn))
+    finally:
+        conn.close()
+    shutil.rmtree(paths.data_dir())
+    return count

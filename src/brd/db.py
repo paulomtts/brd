@@ -97,6 +97,18 @@ def list_projects(conn: sqlite3.Connection) -> list[Project]:
     return [_row_to_project(row) for row in rows]
 
 
+def get_project(conn: sqlite3.Connection, root_path: str) -> Project | None:
+    row = conn.execute(
+        "SELECT * FROM projects WHERE root_path = ?", (root_path,)
+    ).fetchone()
+    return _row_to_project(row) if row else None
+
+
+def delete_project(conn: sqlite3.Connection, root_path: str) -> None:
+    conn.execute("DELETE FROM projects WHERE root_path = ?", (root_path,))
+    conn.commit()
+
+
 def _row_to_card(row: sqlite3.Row) -> Card:
     return Card(
         id=row["id"],

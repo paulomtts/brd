@@ -114,6 +114,87 @@ def test_projects_pretty_flag_switches_off_json(isolated_env, flag):
     assert "myrepo" in result.stdout
 
 
+def test_forget_removes_current_project(isolated_env):
+    runner.invoke(app, ["init"])
+    result = runner.invoke(app, ["forget"])
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is True
+    assert payload["data"]["name"] == "myrepo"
+    assert not (isolated_env / ".brd").exists()
+    assert not paths.project_db_path(isolated_env).is_file()
+
+    projects_result = runner.invoke(app, ["projects"])
+    assert json.loads(projects_result.stdout)["data"] == []
+
+
+def test_forget_accepts_explicit_path_argument(isolated_env, tmp_path, monkeypatch):
+    runner.invoke(app, ["init"])
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["forget", str(isolated_env)])
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is True
+    assert payload["data"]["name"] == "myrepo"
+
+
+def test_forget_errors_when_not_registered(isolated_env):
+    result = runner.invoke(app, ["forget"])
+    assert result.exit_code != 0
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is False
+    assert payload["error"]["type"] == "ProjectNotFoundError"
+
+
+@pytest.mark.parametrize("flag", ["--pretty", "--human"])
+def test_forget_pretty_flag_switches_off_json(isolated_env, flag):
+    runner.invoke(app, ["init"])
+    result = runner.invoke(app, ["forget", flag])
+    assert result.exit_code == 0
+    with pytest.raises(json.JSONDecodeError):
+        json.loads(result.stdout)
+    assert "myrepo" in result.stdout
+
+
+def _last_json_line(output: str) -> dict:
+    return json.loads(output.strip().splitlines()[-1])
+
+
+def test_purge_requires_confirmation_and_aborts_on_decline(isolated_env):
+    runner.invoke(app, ["init"])
+    result = runner.invoke(app, ["purge"], input="n\n")
+    assert result.exit_code != 0
+    payload = _last_json_line(result.stdout)
+    assert payload["ok"] is False
+    assert payload["error"]["type"] == "Aborted"
+
+    projects_result = runner.invoke(app, ["projects"])
+    assert json.loads(projects_result.stdout)["data"] != []
+
+
+def test_purge_deletes_everything_on_confirmation(isolated_env):
+    runner.invoke(app, ["init"])
+    data_dir = paths.data_dir()
+    result = runner.invoke(app, ["purge"], input="y\n")
+    assert result.exit_code == 0
+    payload = _last_json_line(result.stdout)
+    assert payload["ok"] is True
+    assert payload["data"]["projects_removed"] == 1
+    assert not data_dir.exists()
+
+
+def test_purge_yes_flag_skips_confirmation(isolated_env):
+    runner.invoke(app, ["init"])
+    data_dir = paths.data_dir()
+    result = runner.invoke(app, ["purge", "--yes"])
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is True
+    assert payload["data"]["projects_removed"] == 1
+    assert not data_dir.exists()
+
+
 @pytest.fixture
 def initialized_project(isolated_env):
     runner.invoke(app, ["init"])

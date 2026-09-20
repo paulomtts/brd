@@ -52,6 +52,55 @@ def projects(
     output.print_result(envelope, pretty)
 
 
+@app.command()
+def forget(
+    path: Path | None = typer.Argument(
+        None,
+        help="Root path of the project to forget (defaults to the current "
+        "directory).",
+    ),
+    pretty: bool = typer.Option(
+        False, "--pretty", "--human", help="Human-readable output."
+    ),
+) -> None:
+    """Un-register a project and delete its stored data."""
+    root_path = path if path is not None else Path.cwd()
+    try:
+        project = master.forget_project(root_path)
+    except master.ProjectNotFoundError as exc:
+        output.print_result(
+            output.error_envelope("ProjectNotFoundError", str(exc)), pretty
+        )
+        raise typer.Exit(code=1)
+    output.print_result(output.ok_envelope(dataclasses.asdict(project)), pretty)
+
+
+@app.command()
+def purge(
+    yes: bool = typer.Option(
+        False, "--yes", help="Skip the confirmation prompt."
+    ),
+    pretty: bool = typer.Option(
+        False, "--pretty", "--human", help="Human-readable output."
+    ),
+) -> None:
+    """Delete ALL brd data for every project. Cannot be undone."""
+    all_projects = master.list_all_projects()
+    if not yes:
+        confirmed = typer.confirm(
+            f"Delete all brd data for {len(all_projects)} project(s)? "
+            "This cannot be undone."
+        )
+        if not confirmed:
+            output.print_result(
+                output.error_envelope("Aborted", "Purge cancelled."), pretty
+            )
+            raise typer.Exit(code=1)
+
+    removed = master.purge_all()
+    output.print_result(output.ok_envelope({"projects_removed": removed}), pretty)
+
+
 def _project_conn() -> sqlite3.Connection:
     db_path = master.resolve_project_db(Path.cwd())
     return db.connect(db_path)
