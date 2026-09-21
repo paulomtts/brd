@@ -72,6 +72,10 @@ class CardAlreadyExistsError(Exception):
     pass
 
 
+class CardHasChildrenError(Exception):
+    pass
+
+
 CLEAR_PARENT = object()  # sentinel: "explicitly set parent_id to None"
 
 
@@ -167,6 +171,24 @@ def block_card(conn: sqlite3.Connection, card_id: str, blocker_id: str) -> None:
 def unblock_card(conn: sqlite3.Connection, card_id: str, blocker_id: str) -> None:
     _require_card(conn, card_id)
     db.remove_blocked_by_edge(conn, card_id, blocker_id)
+
+
+def delete_card(conn: sqlite3.Connection, card_id: str, cascade: bool = False) -> list[str]:
+    _require_card(conn, card_id)
+
+    children = db.list_children(conn, card_id)
+    if children and not cascade:
+        raise CardHasChildrenError(
+            f"card {card_id} has children; use --cascade to delete them too"
+        )
+
+    deleted: list[str] = []
+    for child in children:
+        deleted.extend(delete_card(conn, child.id, cascade=True))
+
+    db.delete_card(conn, card_id)
+    deleted.append(card_id)
+    return deleted
 
 
 def next_cards(

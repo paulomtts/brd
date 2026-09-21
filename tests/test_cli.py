@@ -389,6 +389,53 @@ def test_update_rejects_blocked_status(initialized_project):
     assert payload["error"]["type"] == "InvalidStatusError"
 
 
+def test_delete_removes_card(initialized_project):
+    a = json.loads(runner.invoke(app, ["add", "--title", "A"]).stdout)["data"]
+
+    result = runner.invoke(app, ["delete", a["id"]])
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is True
+    assert payload["data"]["deleted"] == [a["id"]]
+
+    show_result = runner.invoke(app, ["show", a["id"]])
+    assert json.loads(show_result.stdout)["error"]["type"] == "CardNotFoundError"
+
+
+def test_delete_missing_card(initialized_project):
+    result = runner.invoke(app, ["delete", "nope"])
+    assert result.exit_code != 0
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is False
+    assert payload["error"]["type"] == "CardNotFoundError"
+
+
+def test_delete_with_children_requires_cascade(initialized_project):
+    parent = json.loads(runner.invoke(app, ["add", "--title", "P"]).stdout)["data"]
+    runner.invoke(app, ["add", "--title", "C", "--parent", parent["id"]])
+
+    result = runner.invoke(app, ["delete", parent["id"]])
+    assert result.exit_code != 0
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is False
+    assert payload["error"]["type"] == "CardHasChildrenError"
+
+
+def test_delete_cascade_removes_children(initialized_project):
+    parent = json.loads(runner.invoke(app, ["add", "--title", "P"]).stdout)["data"]
+    child = json.loads(
+        runner.invoke(app, ["add", "--title", "C", "--parent", parent["id"]]).stdout
+    )["data"]
+
+    result = runner.invoke(app, ["delete", parent["id"], "--cascade"])
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert set(payload["data"]["deleted"]) == {parent["id"], child["id"]}
+
+    show_result = runner.invoke(app, ["show", child["id"]])
+    assert json.loads(show_result.stdout)["error"]["type"] == "CardNotFoundError"
+
+
 def test_block_and_unblock(initialized_project):
     a = json.loads(runner.invoke(app, ["add", "--title", "A"]).stdout)["data"]
     b = json.loads(runner.invoke(app, ["add", "--title", "B"]).stdout)["data"]

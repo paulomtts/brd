@@ -282,6 +282,39 @@ def update(
 
 
 @app.command()
+def delete(
+    card_id: str = typer.Argument(..., help="Id of the card to delete."),
+    cascade: bool = typer.Option(
+        False, "--cascade", help="Also delete all descendant cards."
+    ),
+    pretty: bool = typer.Option(
+        False, "--pretty", "--human", help="Human-readable output."
+    ),
+) -> None:
+    """Delete a card."""
+    try:
+        conn = _project_conn()
+    except master.ProjectNotFoundError as exc:
+        output.print_result(
+            output.error_envelope("ProjectNotFoundError", str(exc)), pretty
+        )
+        raise typer.Exit(code=1)
+
+    try:
+        deleted = core.delete_card(conn, card_id, cascade=cascade)
+        envelope = output.ok_envelope({"deleted": deleted})
+    except (core.CardNotFoundError, core.CardHasChildrenError) as exc:
+        output.print_result(
+            output.error_envelope(type(exc).__name__, str(exc)), pretty
+        )
+        raise typer.Exit(code=1)
+    finally:
+        conn.close()
+
+    output.print_result(envelope, pretty)
+
+
+@app.command()
 def block(
     card_id: str = typer.Argument(..., help="Id of the card to block."),
     by: str = typer.Option(..., "--by", help="Id of the card blocking it."),

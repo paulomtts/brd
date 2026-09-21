@@ -206,3 +206,12 @@ def list_children(conn: sqlite3.Connection, parent_id: str) -> list[Card]:
         "SELECT * FROM cards WHERE parent_id = ? ORDER BY created_at", (parent_id,)
     ).fetchall()
     return [_row_to_card(row) for row in rows]
+
+
+def delete_card(conn: sqlite3.Connection, card_id: str) -> None:
+    conn.execute(
+        "DELETE FROM blocked_by WHERE card_id = ? OR blocks_on_id = ?",
+        (card_id, card_id),
+    )
+    conn.execute("DELETE FROM cards WHERE id = ?", (card_id,))
+    conn.commit()

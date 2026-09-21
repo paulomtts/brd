@@ -265,6 +265,49 @@ def test_update_card_rejects_unknown_card(conn):
         core.update_card(conn, "nope", title="Updated")
 
 
+def test_delete_card_removes_leaf_card(conn):
+    card = core.create_card(conn, title="A")
+    deleted = core.delete_card(conn, card.id)
+    assert deleted == [card.id]
+    assert db.get_card(conn, card.id) is None
+
+
+def test_delete_card_rejects_unknown_card(conn):
+    with pytest.raises(core.CardNotFoundError):
+        core.delete_card(conn, "nope")
+
+
+def test_delete_card_with_children_without_cascade_raises(conn):
+    parent = core.create_card(conn, title="P")
+    core.create_card(conn, title="C", parent_id=parent.id)
+    with pytest.raises(core.CardHasChildrenError):
+        core.delete_card(conn, parent.id)
+    assert db.get_card(conn, parent.id) is not None
+
+
+def test_delete_card_with_cascade_removes_subtree(conn):
+    parent = core.create_card(conn, title="P")
+    child = core.create_card(conn, title="C", parent_id=parent.id)
+    grandchild = core.create_card(conn, title="GC", parent_id=child.id)
+
+    deleted = core.delete_card(conn, parent.id, cascade=True)
+
+    assert set(deleted) == {parent.id, child.id, grandchild.id}
+    assert db.get_card(conn, parent.id) is None
+    assert db.get_card(conn, child.id) is None
+    assert db.get_card(conn, grandchild.id) is None
+
+
+def test_delete_card_removes_blocked_by_edges(conn):
+    a = core.create_card(conn, title="A")
+    b = core.create_card(conn, title="B")
+    core.block_card(conn, a.id, b.id)
+
+    core.delete_card(conn, b.id)
+
+    assert db.list_blockers_of(conn, a.id) == []
+
+
 def test_update_card_rejects_unknown_parent(conn):
     card = core.create_card(conn, title="Card")
     with pytest.raises(core.CardNotFoundError):

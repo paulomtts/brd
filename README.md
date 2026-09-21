@@ -22,6 +22,7 @@ brd next                                  # fetch ready-to-work card(s)
 brd tree                                  # view the whole board as a tree
 brd show <card-id>                        # view one card's full detail
 brd update <card-id> --status done        # move a card forward
+brd delete <card-id>                      # delete a card (--cascade for cards with children)
 brd projects                              # list all registered projects
 ```
 

@@ -388,6 +388,25 @@ def test_list_children_orders_by_created_at(project_conn):
     assert [c.id for c in results] == ["child2", "child1"]
 
 
+def test_delete_card_removes_row(project_conn):
+    db.insert_card(project_conn, _sample_card("c1"))
+    db.delete_card(project_conn, "c1")
+    assert db.get_card(project_conn, "c1") is None
+
+
+def test_delete_card_removes_blocked_by_edges_in_both_directions(project_conn):
+    db.insert_card(project_conn, _sample_card("c1"))
+    db.insert_card(project_conn, _sample_card("c2"))
+    db.insert_card(project_conn, _sample_card("c3"))
+    db.add_blocked_by_edge(project_conn, "c1", "c2")
+    db.add_blocked_by_edge(project_conn, "c3", "c1")
+
+    db.delete_card(project_conn, "c1")
+
+    assert db.list_blockers_of(project_conn, "c3") == []
+    assert db.get_card(project_conn, "c2") is not None
+
+
 def test_insert_card_commits_so_another_connection_sees_it(tmp_path):
     db_path = tmp_path / "project.db"
     writer = db.connect(db_path)

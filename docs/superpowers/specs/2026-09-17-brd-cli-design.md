@@ -161,6 +161,7 @@ walk-up, except `init` and `projects`.
 | `brd update <id> [--title] [--description] [--status] [--parent]` | Edit fields. Rejects `--status blocked` (computed-only) and `parent_id` cycles. |
 | `brd block <id> --by <blocker-id>` | Add a `blocked_by` edge. Rejects cycles. |
 | `brd unblock <id> --by <blocker-id>` | Remove a `blocked_by` edge. |
+| `brd delete <id> [--cascade]` | Delete a card. Rejects cards with children unless `--cascade`, which also deletes descendants. Cleans up any `blocked_by` edges referencing the card. |
 | `brd tree [<id>]` | Print dependency + hierarchy tree; rooted at `<id>` if given, else the whole board. |
 | `brd next [--limit N]` | Return all unblocked `todo` cards, oldest-created first (or top N with `--limit`). No special-casing for parent vs. leaf cards. |
 | `brd projects` | List registered projects from master DB (name, root_path, card counts). |
