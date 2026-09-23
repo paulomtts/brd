@@ -7,8 +7,10 @@ tasks without relying on Jira or GitHub Projects.
 ## Install
 
 ```bash
-uv sync
+uv tool install brd     # or: pipx install brd
 ```
+
+To work on brd itself, clone the repository and run `uv sync`.
 
 ## Usage
 

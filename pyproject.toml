@@ -1,8 +1,21 @@
 [project]
 name = "brd"
 version = "0.1.0"
-description = "Add your description here"
+description = "A local-first kanban board CLI for tracking work, designed for AI agents."
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Paulo Mattos" }]
+keywords = ["kanban", "cli", "task-tracking", "ai-agents"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Bug Tracking",
+]
 requires-python = ">=3.12"
 dependencies = [
     "typer>=0.27.2",
@@ -13,12 +26,21 @@ dev = [
     "pytest>=9.1.1",
 ]
 
+[project.urls]
+Homepage = "https://github.com/paulomtts/brd"
+Repository = "https://github.com/paulomtts/brd"
+Issues = "https://github.com/paulomtts/brd/issues"
+Author = "https://github.com/paulomtts"
+
 [project.scripts]
 brd = "brd.cli:app"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.sdist]
+exclude = ["/docs", "/.claude", "/.python-version"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/brd"]
