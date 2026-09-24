@@ -18,9 +18,10 @@ container, not work: `brd next` skips it and only surfaces its leaves.
 with `brd block <card> --by <issue>`; closing the issue unblocks it.
 
 **Documents:** registered `.md` files (`brd doc list`) are tracked by brd,
-which keeps a backup. Whenever you edit a registered document, run `brd doc update <id>`
-right after. If you move or rename one, run `brd doc update <id> --path <new>`. Register
-new ones with `brd doc add <path> [--tag t]`.
+which keeps a backup.
+**Whenever you edit a registered document, run `brd doc update <id>` right after.**
+If you move or rename one, run `brd doc update <id> --path <new>`.
+Register new ones with `brd doc add <path> [--tag t]`.
 
 **Links:** write `[[doc-stem]]` or `[[<id>]]` in card descriptions, issue
 bodies, and comments to link things; `brd show` lists refs and backlinks.
