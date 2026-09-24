@@ -26,7 +26,7 @@
 ### Deliberate deviations from the spec (decided while planning)
 
 1. Entity rows are registered by `BEFORE INSERT` triggers on `cards`/`issues`/`documents`, not an `entities.py` helper — so existing tests and `master._copy_cards` that insert raw card rows keep working.
-2. `brd show`/`brd delete` on an unknown id raise `CardNotFoundError` (existing tests and agents depend on that type). New commands use `EntityNotFoundError`.
+2. `brd show`/`brd delete` on an unknown id raise `CardNotFoundError` (existing tests and agents depend on that type), and so does a missing blocker (`brd add --blocked-by`, `brd block --by`), where spec §4 says `EntityNotFoundError`. New commands use `EntityNotFoundError`.
 3. Blocking keeps the existing flag: `brd block <card> --by <card-or-issue>`.
 4. SQL for issues/documents/comments/tags/refs lives in those modules (not `db.py`); pretty renderers live in `brd/pretty.py`; `import_tree` stays in `core.py`; a new `snapshot.py` owns export and the v2 import.
 5. There is no `brd doc show`; `brd show <doc-id>` covers it.
