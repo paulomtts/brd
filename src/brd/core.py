@@ -2,13 +2,14 @@ import sqlite3
 import uuid
 from datetime import datetime, timezone
 
-from brd import db, refs
+from brd import db, entities, refs
 from brd.models import Card
 from brd.errors import (  # noqa: F401  (re-exported for existing callers)
     CardAlreadyExistsError,
     CardHasChildrenError,
     CardNotFoundError,
     CycleError,
+    InvalidBlockerError,
     InvalidStatusError,
 )
 
@@ -27,6 +28,12 @@ def resolve_status(conn: sqlite3.Connection, card: Card, _seen: set[str] | None 
     for blocker_id in db.list_blockers_of(conn, card.id):
         blocker = db.get_card(conn, blocker_id)
         if blocker is None:
+            # Issues block while open, whatever reason they are later closed with.
+            issue = conn.execute(
+                "SELECT status FROM issues WHERE id = ?", (blocker_id,)
+            ).fetchone()
+            if issue is not None and issue["status"] == "open":
+                return "blocked"
             continue
         if resolve_status(conn, blocker, seen) != "done":
             return "blocked"
@@ -77,6 +84,14 @@ def _require_card(conn: sqlite3.Connection, card_id: str) -> Card:
     return card
 
 
+def _require_blocker(conn: sqlite3.Connection, blocker_id: str) -> None:
+    kind = entities.kind_of(conn, blocker_id)
+    if kind is None:
+        raise CardNotFoundError(f"no card or issue with id {blocker_id}")
+    if kind not in entities.BLOCKERS:
+        raise InvalidBlockerError(f"a {kind} can't block a card; only cards and issues can")
+
+
 def create_card(
     conn: sqlite3.Connection,
     title: str,
@@ -89,7 +104,7 @@ def create_card(
 
     blocked_by = blocked_by or []
     for blocker_id in blocked_by:
-        _require_card(conn, blocker_id)
+        _require_blocker(conn, blocker_id)
 
     now = _now()
     card = Card(
@@ -154,7 +169,7 @@ def update_card(
 
 def block_card(conn: sqlite3.Connection, card_id: str, blocker_id: str) -> None:
     _require_card(conn, card_id)
-    _require_card(conn, blocker_id)
+    _require_blocker(conn, blocker_id)
     if would_create_block_cycle(conn, card_id, blocker_id):
         raise CycleError(f"blocking {card_id} on {blocker_id} would create a cycle")
     db.add_blocked_by_edge(conn, card_id, blocker_id)
