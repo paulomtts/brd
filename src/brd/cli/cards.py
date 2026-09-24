@@ -1,12 +1,10 @@
-import json
 import sqlite3
-from pathlib import Path
 
 import typer
 
 from brd import core, db, documents, entities, output, views
 from brd.cli._app import app, pretty_option, run
-from brd.errors import CardNotFoundError, ImportReadError
+from brd.errors import CardNotFoundError
 from brd.models import Card
 
 
@@ -175,28 +173,6 @@ def tree(
         lambda ctx: core.build_tree(ctx.conn, root_id=card_id),
         render=lambda ctx, data: output.render_tree_text(data),
     )
-
-
-@app.command(name="import")
-def import_cmd(
-    file: Path = typer.Argument(
-        ..., help="Path to a JSON file in `brd tree`'s output shape."
-    ),
-    pretty: bool = pretty_option(),
-) -> None:
-    """Restore cards from a brd tree JSON snapshot."""
-
-    def action(ctx):
-        try:
-            raw = json.loads(file.read_text())
-        except (OSError, json.JSONDecodeError) as exc:
-            raise ImportReadError(
-                f"could not read a JSON snapshot from {file}: {exc}"
-            ) from exc
-        nodes = raw["data"] if isinstance(raw, dict) and "data" in raw else raw
-        return {"imported": core.import_tree(ctx.conn, nodes)}
-
-    run(pretty, action)
 
 
 @app.command(name="next")

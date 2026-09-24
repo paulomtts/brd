@@ -257,7 +257,7 @@ def import_tree(conn: sqlite3.Connection, nodes: list[dict]) -> int:
     flattened = _flatten_tree(nodes)
 
     for node, _ in flattened:
-        if db.get_card(conn, node["id"]) is not None:
+        if entities.kind_of(conn, node["id"]) is not None:
             raise CardAlreadyExistsError(
                 f"card {node['id']} already exists in this board"
             )
@@ -281,5 +281,8 @@ def import_tree(conn: sqlite3.Connection, nodes: list[dict]) -> int:
     for node, _ in flattened:
         for blocker_id in node.get("blocked_by", []):
             db.add_blocked_by_edge(conn, node["id"], blocker_id)
+
+    for node, _ in flattened:
+        refs.reindex(conn, node["id"])
 
     return len(flattened)
