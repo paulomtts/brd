@@ -1,0 +1,208 @@
+import json
+import sqlite3
+from pathlib import Path
+
+import typer
+
+from brd import core, db, output, views
+from brd.cli._app import app, pretty_option, run
+from brd.errors import CardNotFoundError, ImportReadError
+from brd.models import Card
+
+
+def _require_card(conn: sqlite3.Connection, card_id: str) -> Card:
+    card = db.get_card(conn, card_id)
+    if card is None:
+        raise CardNotFoundError(f"no card with id {card_id}")
+    return card
+
+
+@app.command()
+def add(
+    title: str = typer.Option(..., "--title", help="Card title."),
+    description: str | None = typer.Option(
+        None, "--description", help="Card description."
+    ),
+    parent: str | None = typer.Option(None, "--parent", help="Parent card id."),
+    blocked_by: list[str] = typer.Option(
+        [], "--blocked-by", help="Id of a card this one is blocked by (repeatable)."
+    ),
+    pretty: bool = pretty_option(),
+) -> None:
+    """Create a card."""
+
+    def action(ctx):
+        card = core.create_card(
+            ctx.conn,
+            title=title,
+            description=description,
+            parent_id=parent,
+            blocked_by=list(blocked_by),
+        )
+        return views.card_detail(ctx.conn, card)
+
+    run(pretty, action)
+
+
+@app.command()
+def show(
+    card_id: str = typer.Argument(..., help="Id of the card to show."),
+    pretty: bool = pretty_option(),
+) -> None:
+    """Show a single card's full detail."""
+    run(pretty, lambda ctx: views.card_detail(ctx.conn, _require_card(ctx.conn, card_id)))
+
+
+@app.command(name="list")
+def list_cards_cmd(
+    status: str | None = typer.Option(None, "--status", help="Filter by stored status."),
+    parent: str | None = typer.Option(
+        None, "--parent", help="Only cards whose parent is this card id."
+    ),
+    pretty: bool = pretty_option(),
+) -> None:
+    """List cards, optionally filtered."""
+
+    def action(ctx):
+        # db.list_cards uses an _UNSET sentinel for parent_id, so only pass the
+        # kwarg when --parent was given; passing None means "parent IS NULL".
+        kwargs: dict = {"status": status}
+        if parent is not None:
+            kwargs["parent_id"] = parent
+        return [views.card_detail(ctx.conn, card) for card in db.list_cards(ctx.conn, **kwargs)]
+
+    run(pretty, action)
+
+
+@app.command()
+def update(
+    card_id: str = typer.Argument(..., help="Id of the card to update."),
+    title: str | None = typer.Option(None, "--title", help="New title."),
+    description: str | None = typer.Option(
+        None, "--description", help="New description."
+    ),
+    status: str | None = typer.Option(
+        None, "--status", help="New stored status (cannot be 'blocked')."
+    ),
+    parent: str | None = typer.Option(None, "--parent", help="New parent card id."),
+    clear_parent: bool = typer.Option(
+        False, "--clear-parent", help="Detach the card from its parent."
+    ),
+    pretty: bool = pretty_option(),
+) -> None:
+    """Edit a card's fields."""
+
+    def action(ctx):
+        parent_arg = core.CLEAR_PARENT if clear_parent else parent
+        card = core.update_card(
+            ctx.conn,
+            card_id,
+            title=title,
+            description=description,
+            status=status,
+            parent_id=parent_arg,
+        )
+        return views.card_detail(ctx.conn, card)
+
+    run(pretty, action)
+
+
+@app.command()
+def delete(
+    card_id: str = typer.Argument(..., help="Id of the card to delete."),
+    cascade: bool = typer.Option(
+        False, "--cascade", help="Also delete all descendant cards."
+    ),
+    pretty: bool = pretty_option(),
+) -> None:
+    """Delete a card."""
+    run(pretty, lambda ctx: {"deleted": core.delete_card(ctx.conn, card_id, cascade=cascade)})
+
+
+@app.command()
+def block(
+    card_id: str = typer.Argument(..., help="Id of the card to block."),
+    by: str = typer.Option(..., "--by", help="Id of the card blocking it."),
+    pretty: bool = pretty_option(),
+) -> None:
+    """Mark a card as blocked by another card."""
+
+    def action(ctx):
+        core.block_card(ctx.conn, card_id, by)
+        return views.card_detail(ctx.conn, _require_card(ctx.conn, card_id))
+
+    run(pretty, action)
+
+
+@app.command()
+def unblock(
+    card_id: str = typer.Argument(..., help="Id of the card to unblock."),
+    by: str = typer.Option(..., "--by", help="Id of the blocker to remove."),
+    pretty: bool = pretty_option(),
+) -> None:
+    """Remove a blocked-by relationship."""
+
+    def action(ctx):
+        core.unblock_card(ctx.conn, card_id, by)
+        return views.card_detail(ctx.conn, _require_card(ctx.conn, card_id))
+
+    run(pretty, action)
+
+
+@app.command()
+def tree(
+    card_id: str | None = typer.Argument(
+        None, help="Root the tree at this card id (default: whole board)."
+    ),
+    pretty: bool = pretty_option(),
+) -> None:
+    """Print the hierarchy and dependency tree."""
+    run(
+        pretty,
+        lambda ctx: core.build_tree(ctx.conn, root_id=card_id),
+        render=lambda ctx, data: output.render_tree_text(data),
+    )
+
+
+@app.command(name="import")
+def import_cmd(
+    file: Path = typer.Argument(
+        ..., help="Path to a JSON file in `brd tree`'s output shape."
+    ),
+    pretty: bool = pretty_option(),
+) -> None:
+    """Restore cards from a brd tree JSON snapshot."""
+
+    def action(ctx):
+        try:
+            raw = json.loads(file.read_text())
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ImportReadError(
+                f"could not read a JSON snapshot from {file}: {exc}"
+            ) from exc
+        nodes = raw["data"] if isinstance(raw, dict) and "data" in raw else raw
+        return {"imported": core.import_tree(ctx.conn, nodes)}
+
+    run(pretty, action)
+
+
+@app.command(name="next")
+def next_cmd(
+    limit: int | None = typer.Option(
+        None, "--limit", help="Return at most this many cards."
+    ),
+    parent: str | None = typer.Option(
+        None,
+        "--parent",
+        help="Ready direct children of this card id, instead of leaf cards "
+        "across the whole board.",
+    ),
+    pretty: bool = pretty_option(),
+) -> None:
+    """List unblocked todo cards, oldest first."""
+
+    def action(ctx):
+        cards = core.next_cards(ctx.conn, limit=limit, parent_id=parent)
+        return [views.card_detail(ctx.conn, card) for card in cards]
+
+    run(pretty, action)

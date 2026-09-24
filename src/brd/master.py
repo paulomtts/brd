@@ -111,11 +111,15 @@ def find_marker(start: Path) -> Path | None:
         current = current.parent
 
 
-def resolve_project_db(start: Path) -> Path:
+def resolve_project_root(start: Path) -> Path:
     marker = find_marker(start)
     if marker is None:
         raise ProjectNotFoundError(f"no {MARKER_FILENAME} marker found above {start}")
-    return paths.project_db_path(marker.parent)
+    return marker.parent
+
+
+def resolve_project_db(start: Path) -> Path:
+    return paths.project_db_path(resolve_project_root(start))
 
 
 def list_all_projects() -> list[Project]:
