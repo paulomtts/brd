@@ -134,3 +134,37 @@ def test_project_docs_dir_matches_db_path(tmp_path, monkeypatch):
     repo = tmp_path / "repo"
     repo.mkdir()
     assert paths.project_docs_dir(repo) == paths.project_db_path(repo).with_suffix(".docs")
+
+
+def test_concurrent_first_run_migrations_all_succeed(tmp_path):
+    import threading
+
+    for attempt in range(5):
+        path = tmp_path / f"race{attempt}.db"
+        _make_v0(path, cards=[("p", None), ("c", "p")], edges=[])
+        # Boards made by v0 brd were already WAL (journal mode persists).
+        legacy = sqlite3.connect(path)
+        legacy.execute("PRAGMA journal_mode=WAL")
+        legacy.close()
+        barrier = threading.Barrier(4, timeout=20)
+        errors = []
+
+        def migrate():
+            try:
+                conn = db.connect(path)
+                barrier.wait()
+                db.migrate_project(conn)
+                conn.close()
+            except Exception as exc:  # noqa: BLE001 — collected and asserted below
+                errors.append(exc)
+
+        threads = [threading.Thread(target=migrate) for _ in range(4)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        assert errors == []
+        conn = db.connect(path)
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 1
+        assert [r[0] for r in conn.execute("SELECT id FROM entities ORDER BY id")] == ["c", "p"]
+        conn.close()

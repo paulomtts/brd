@@ -6,7 +6,9 @@ from brd.models import Card, Project
 
 
 def connect(db_path: Path) -> sqlite3.Connection:
-    conn = sqlite3.connect(db_path)
+    # Wait for concurrent writers (e.g. parallel first-run migrations)
+    # instead of failing immediately with "database is locked".
+    conn = sqlite3.connect(db_path, timeout=10)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
@@ -183,7 +185,13 @@ def migrate_project(conn: sqlite3.Connection) -> None:
     # Must be issued outside a transaction; SQLite ignores it inside one.
     conn.execute("PRAGMA foreign_keys=OFF")
     try:
-        conn.execute("BEGIN")
+        # IMMEDIATE takes the write lock up front, so concurrent migrators
+        # queue on the busy timeout instead of failing to upgrade a read.
+        conn.execute("BEGIN IMMEDIATE")
+        # Another process may have migrated while we waited for the lock.
+        if conn.execute("PRAGMA user_version").fetchone()[0] >= SCHEMA_VERSION:
+            conn.rollback()
+            return
         _migrate_to_v1(conn)
         violations = conn.execute("PRAGMA foreign_key_check").fetchall()
         if violations:
