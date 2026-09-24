@@ -4,10 +4,13 @@ from datetime import datetime, timezone
 
 from brd import db
 from brd.models import Card
-
-
-class CycleError(Exception):
-    pass
+from brd.errors import (  # noqa: F401  (re-exported for existing callers)
+    CardAlreadyExistsError,
+    CardHasChildrenError,
+    CardNotFoundError,
+    CycleError,
+    InvalidStatusError,
+)
 
 
 def resolve_status(conn: sqlite3.Connection, card: Card, _seen: set[str] | None = None) -> str:
@@ -58,22 +61,6 @@ def would_create_block_cycle(conn: sqlite3.Connection, card_id: str, new_blocker
         visited.add(current)
         stack.extend(db.list_blockers_of(conn, current))
     return False
-
-
-class CardNotFoundError(Exception):
-    pass
-
-
-class InvalidStatusError(Exception):
-    pass
-
-
-class CardAlreadyExistsError(Exception):
-    pass
-
-
-class CardHasChildrenError(Exception):
-    pass
 
 
 CLEAR_PARENT = object()  # sentinel: "explicitly set parent_id to None"

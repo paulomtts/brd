@@ -103,7 +103,9 @@ def purge(
 
 def _project_conn() -> sqlite3.Connection:
     db_path = master.resolve_project_db(Path.cwd())
-    return db.connect(db_path)
+    conn = db.connect(db_path)
+    db.migrate_project(conn)
+    return conn
 
 
 def _card_detail(conn: sqlite3.Connection, card: Card) -> dict:

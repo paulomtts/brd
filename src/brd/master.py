@@ -4,12 +4,9 @@ from pathlib import Path
 
 from brd import db, paths
 from brd.models import Project
+from brd.errors import ProjectNotFoundError  # noqa: F401  (re-exported)
 
 MARKER_FILENAME = ".brd"
-
-
-class ProjectNotFoundError(Exception):
-    pass
 
 
 def _now() -> str:
