@@ -1,5 +1,7 @@
 import sqlite3
 
+import pytest
+
 from brd import db, paths
 from brd.cli import _app
 from tests.cli_helpers import err, ok
@@ -40,3 +42,25 @@ def test_missing_project_is_an_envelope(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
     monkeypatch.chdir(tmp_path)
     assert err("list") == "ProjectNotFoundError"
+
+
+def test_open_project_closes_connection_when_migration_fails(project, monkeypatch):
+    from brd.errors import MigrationError
+
+    opened = []
+    real_connect = db.connect
+
+    def tracking_connect(path):
+        conn = real_connect(path)
+        opened.append(conn)
+        return conn
+
+    def failing_migrate(conn):
+        raise MigrationError("boom")
+
+    monkeypatch.setattr(db, "connect", tracking_connect)
+    monkeypatch.setattr(db, "migrate_project", failing_migrate)
+    assert err("list") == "MigrationError"
+    assert len(opened) == 1
+    with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+        opened[0].execute("SELECT 1")

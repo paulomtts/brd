@@ -39,7 +39,11 @@ def fail(exc: BrdError, pretty: bool) -> NoReturn:
 def open_project() -> Ctx:
     root = master.resolve_project_root(Path.cwd())
     conn = db.connect(paths.project_db_path(root))
-    db.migrate_project(conn)
+    try:
+        db.migrate_project(conn)
+    except BaseException:
+        conn.close()
+        raise
     return Ctx(conn=conn, root=root)
 
 
