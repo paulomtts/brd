@@ -9,6 +9,7 @@ from brd.errors import (  # noqa: F401  (re-exported for existing callers)
     CardHasChildrenError,
     CardNotFoundError,
     CycleError,
+    ImportFormatError,
     InvalidBlockerError,
     InvalidStatusError,
 )
@@ -262,25 +263,27 @@ def import_tree(conn: sqlite3.Connection, nodes: list[dict]) -> int:
                 f"card {node['id']} already exists in this board"
             )
 
-    for node, parent_id in flattened:
-        status = node["status"]
-        stored_status = "todo" if status == "blocked" else status
-        db.insert_card(
-            conn,
-            Card(
-                id=node["id"],
-                title=node["title"],
-                description=node.get("description"),
-                status=stored_status,
-                parent_id=parent_id,
-                created_at=node["created_at"],
-                updated_at=node["updated_at"],
-            ),
-        )
-
-    for node, _ in flattened:
-        for blocker_id in node.get("blocked_by", []):
-            db.add_blocked_by_edge(conn, node["id"], blocker_id)
+    try:
+        with conn:  # one transaction: all cards and edges, or nothing
+            for node, parent_id in flattened:
+                status = "todo" if node["status"] == "blocked" else node["status"]
+                conn.execute(
+                    "INSERT INTO cards (id, title, description, status, parent_id, "
+                    "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (node["id"], node["title"], node.get("description"), status,
+                     parent_id, node["created_at"], node["updated_at"]),
+                )
+            for node, _ in flattened:
+                for blocker_id in node.get("blocked_by", []):
+                    conn.execute(
+                        "INSERT INTO blocked_by (card_id, blocks_on_id) VALUES (?, ?)",
+                        (node["id"], blocker_id),
+                    )
+    except sqlite3.IntegrityError as exc:
+        raise ImportFormatError(
+            "snapshot references a blocker or parent id that isn't in the snapshot, "
+            f"or is otherwise inconsistent: {exc}"
+        ) from exc
 
     for node, _ in flattened:
         refs.reindex(conn, node["id"])

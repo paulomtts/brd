@@ -153,11 +153,22 @@ def add(
     return doc
 
 
+def _source(root: Path, doc: Document) -> Path:
+    """The document's source file, refusing any path that escapes the root."""
+    resolved_root = root.resolve()
+    source = resolved_root / doc.source_path
+    if not source.resolve().is_relative_to(resolved_root):
+        raise PathOutsideProjectError(
+            f"{doc.source_path} is outside the project root {resolved_root}"
+        )
+    return source
+
+
 def sync(conn: sqlite3.Connection, root: Path, doc: Document) -> SyncResult:
     """Bring the backup up to date with the source file. A differing hash
     always means the source advanced: the backup only changes by copying
     from the source."""
-    source = root.resolve() / doc.source_path
+    source = _source(root, doc)
     backup = backup_path(conn, doc.id)
     if not source.is_file():
         if backup.is_file():
@@ -219,7 +230,7 @@ def restore(conn: sqlite3.Connection, root: Path, doc_id: str, force: bool = Fal
     backup = backup_path(conn, doc.id)
     if not backup.is_file():
         raise DocumentContentLostError(f"no backup exists for document {doc_id}")
-    source = root.resolve() / doc.source_path
+    source = _source(root, doc)
     if source.is_file():
         if _hash(source.read_bytes()) == doc.content_hash:
             return doc

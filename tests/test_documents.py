@@ -229,3 +229,18 @@ def test_delete_removes_backup_keeps_source(pconn, root):
     assert documents.get(pconn, doc.id) is None
     assert not documents.backup_path(pconn, doc.id).exists()
     assert path.read_text() == "v1"
+
+
+@pytest.mark.parametrize("escape", ["../outside.md", "docs/../../outside.md"])
+def test_restore_and_sync_refuse_a_source_path_outside_root(pconn, root, escape):
+    doc = documents.add(pconn, root, write(root, "docs/a.md", "backup"))
+    pconn.execute("UPDATE documents SET source_path = ? WHERE id = ?", (escape, doc.id))
+    pconn.commit()
+    outside = root.parent / "outside.md"
+    outside.write_text("secret")
+    with pytest.raises(PathOutsideProjectError):
+        documents.restore(pconn, root, doc.id, force=True)
+    assert outside.read_text() == "secret"
+    with pytest.raises(PathOutsideProjectError):
+        documents.sync(pconn, root, documents.require(pconn, doc.id))
+    assert documents.backup_path(pconn, doc.id).read_text() == "backup"

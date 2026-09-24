@@ -48,6 +48,15 @@ def export(conn: sqlite3.Connection, root: Path) -> dict:
 
 
 def load(conn: sqlite3.Connection, root: Path, raw) -> dict:
+    try:
+        return _load(conn, raw)
+    except (KeyError, TypeError, AttributeError, sqlite3.ProgrammingError) as exc:
+        # Missing keys or wrong value types in the snapshot. Any backups the
+        # import wrote were already cleaned up by the time this is caught.
+        raise ImportFormatError(f"malformed snapshot: {type(exc).__name__}: {exc}") from exc
+
+
+def _load(conn: sqlite3.Connection, raw) -> dict:
     # `brd export > file` writes the whole envelope; accept it unwrapped too.
     if isinstance(raw, dict) and isinstance(raw.get("data"), dict):
         raw = raw["data"]
@@ -59,6 +68,19 @@ def load(conn: sqlite3.Connection, root: Path, raw) -> dict:
     if not isinstance(nodes, list):
         raise ImportFormatError("expected a `brd export` object or a `brd tree` snapshot list")
     return {"imported": core.import_tree(conn, nodes)}
+
+
+def _check_source_path(source_path) -> None:
+    """A snapshot's source_path must stay inside the project: `doc restore`
+    writes to it and sync/export read from it."""
+    if not isinstance(source_path, str):
+        raise ImportFormatError(f"document source_path must be a string, got {source_path!r}")
+    path = PurePosixPath(source_path)
+    if path.is_absolute() or ".." in path.parts or path.suffix.lower() != ".md":
+        raise ImportFormatError(
+            f"document source_path {source_path!r} must be a relative .md path "
+            "inside the project"
+        )
 
 
 def _load_export(conn: sqlite3.Connection, snap: dict) -> dict:
@@ -80,6 +102,8 @@ def _load_export(conn: sqlite3.Connection, snap: dict) -> dict:
     for comment in comment_rows:
         if conn.execute("SELECT 1 FROM comments WHERE id = ?", (comment["id"],)).fetchone():
             raise EntityAlreadyExistsError(f"comment {comment['id']} already exists in this board")
+    for doc in doc_rows:
+        _check_source_path(doc["source_path"])
     for doc in doc_rows:
         documents._check_unique(conn, doc["source_path"], PurePosixPath(doc["source_path"]).stem)
 

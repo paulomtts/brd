@@ -139,3 +139,55 @@ def test_import_stem_collision_touches_nothing(populated, tmp_path, monkeypatch)
     ok("doc", "add", "docs/notes.md")
     assert err("import", snapshot) == "DuplicatePathError"
     assert ok("list") == [] and ok("issue", "list") == []
+
+
+def _import_into_fresh(tmp_path, monkeypatch, data):
+    snapshot = tmp_path / "snapshot.json"
+    snapshot.write_text(json.dumps(data))
+    other = tmp_path / "other"
+    other.mkdir()
+    monkeypatch.chdir(other)
+    ok("init")
+    return other, err("import", snapshot)
+
+
+@pytest.mark.parametrize(
+    "source_path", ["/tmp/evil.md", "../evil.md", "docs/../../evil.md", "docs/notes.txt"]
+)
+def test_import_rejects_unsafe_document_source_path(populated, tmp_path, monkeypatch, source_path):
+    data = ok("export")
+    data["documents"][0]["source_path"] = source_path
+    other, error = _import_into_fresh(tmp_path, monkeypatch, data)
+    assert error == "ImportFormatError"
+    assert ok("list") == [] and ok("issue", "list") == [] and ok("doc", "list") == []
+    docs_dir = paths.project_docs_dir(other)
+    assert not docs_dir.exists() or list(docs_dir.iterdir()) == []
+
+
+def test_old_tree_snapshot_with_unknown_blocker_imports_nothing(project, tmp_path, monkeypatch):
+    a = ok("add", "--title", "A")
+    issue = ok("issue", "open", "--title", "Q", "--blocks", a["id"])
+    ok("add", "--title", "B")
+    tree = ok("tree")
+    assert issue["id"] in tree[0]["blocked_by"]
+    other, error = _import_into_fresh(tmp_path, monkeypatch, tree)
+    assert error == "ImportFormatError"
+    assert ok("list") == []
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        {"brd_export": 1, "issues": [{"id": "0b6f4c1e-1111-4222-8333-444455556666"}]},
+        {"brd_export": 1, "cards": 5},
+        {"brd_export": 1, "documents": [{"id": "d", "source_path": "a.md", "content": 3}]},
+        {"brd_export": 1, "cards": [{"id": "c", "title": {"x": 1}, "status": "todo",
+                                     "created_at": "t", "updated_at": "t"}]},
+        [{"id": "c"}],
+        ["not a node"],
+    ],
+)
+def test_malformed_snapshot_is_an_envelope(project, tmp_path, monkeypatch, raw):
+    other, error = _import_into_fresh(tmp_path, monkeypatch, raw)
+    assert error == "ImportFormatError"
+    assert ok("list") == [] and ok("issue", "list") == [] and ok("doc", "list") == []
