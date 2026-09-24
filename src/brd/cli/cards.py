@@ -4,7 +4,7 @@ from pathlib import Path
 
 import typer
 
-from brd import core, db, entities, output, views
+from brd import core, db, documents, entities, output, views
 from brd.cli._app import app, pretty_option, run
 from brd.errors import CardNotFoundError, ImportReadError
 from brd.models import Card
@@ -113,6 +113,9 @@ def delete_entity(conn: sqlite3.Connection, entity_id: str, cascade: bool) -> li
         raise CardNotFoundError(f"no card, issue, or document with id {entity_id}")
     if kind == "card":
         return core.delete_card(conn, entity_id, cascade=cascade)
+    if kind == "document":
+        documents.delete(conn, entity_id)
+        return [entity_id]
     entities.delete(conn, entity_id)
     return [entity_id]
 
