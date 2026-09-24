@@ -2,7 +2,7 @@ import sqlite3
 import uuid
 from datetime import datetime, timezone
 
-from brd import db
+from brd import db, refs
 from brd.models import Card
 from brd.errors import (  # noqa: F401  (re-exported for existing callers)
     CardAlreadyExistsError,
@@ -108,6 +108,9 @@ def create_card(
             raise CycleError(f"blocking {card.id} on {blocker_id} would create a cycle")
         db.add_blocked_by_edge(conn, card.id, blocker_id)
 
+    if description:
+        refs.reindex(conn, card.id)
+
     return card
 
 
@@ -143,6 +146,8 @@ def update_card(
     if fields:
         fields["updated_at"] = _now()
         db.update_card_fields(conn, card_id, **fields)
+        if description is not None:
+            refs.reindex(conn, card_id)
 
     return _require_card(conn, card_id)
 

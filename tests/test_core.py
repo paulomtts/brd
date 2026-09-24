@@ -1,6 +1,7 @@
 import pytest
 
 from brd import core, db
+from brd import refs as _refs
 from brd.models import Card
 
 
@@ -549,3 +550,20 @@ def test_import_tree_rejects_colliding_id_without_partial_import(conn):
 
     # nothing else got touched
     assert db.get_card(conn, other.id) is not None
+
+
+def test_create_card_indexes_description_links(conn):
+    target = core.create_card(conn, title="Target")
+    source = core.create_card(conn, title="Source", description=f"see [[{target.id}]]")
+    assert [r["id"] for r in _refs.outgoing(conn, source.id)] == [target.id]
+
+
+def test_update_card_removing_link_drops_link_ref_but_keeps_explicit(conn):
+    target = core.create_card(conn, title="Target")
+    other = core.create_card(conn, title="Other")
+    source = core.create_card(conn, title="Source", description=f"[[{target.id}]] [[{other.id}]]")
+    _refs.add_explicit(conn, source.id, other.id)
+    core.update_card(conn, source.id, description="no links now")
+    assert {(r["id"], r["origin"]) for r in _refs.outgoing(conn, source.id)} == {
+        (other.id, "explicit")
+    }
