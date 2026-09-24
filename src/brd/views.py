@@ -2,7 +2,7 @@ import dataclasses
 import sqlite3
 from pathlib import Path
 
-from brd import comments, core, db, documents, entities, refs, tags
+from brd import comments, core, db, documents, entities, issues, refs, tags
 from brd.errors import CardNotFoundError
 from brd.models import Card
 
@@ -32,6 +32,22 @@ def card_detail(conn: sqlite3.Connection, card: Card) -> dict:
         "children": [child.id for child in db.list_children(conn, card.id)],
         "comments": [comment_dict(c) for c in comments.list_for(conn, card.id)],
         **links_of(conn, card.id),
+    }
+
+
+def issue_detail(conn: sqlite3.Connection, issue: issues.Issue) -> dict:
+    return {
+        "id": issue.id,
+        "kind": "issue",
+        "title": issue.title,
+        "body": issue.body,
+        "status": issue.status,
+        "close_reason": issue.close_reason,
+        "blocks": issues.blocks_of(conn, issue.id),
+        "created_at": issue.created_at,
+        "updated_at": issue.updated_at,
+        "comments": [comment_dict(c) for c in comments.list_for(conn, issue.id)],
+        **links_of(conn, issue.id),
     }
 
 
@@ -67,4 +83,6 @@ def detail(conn: sqlite3.Connection, root: Path, entity_id: str) -> dict:
     results = documents.sync_all(conn, root)
     if kind == "document":
         return document_detail(conn, documents.require(conn, entity_id), results[entity_id])
+    if kind == "issue":
+        return issue_detail(conn, issues.require(conn, entity_id))
     return card_detail(conn, db.get_card(conn, entity_id))

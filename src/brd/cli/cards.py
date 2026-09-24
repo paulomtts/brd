@@ -135,10 +135,10 @@ def delete(
 @app.command()
 def block(
     card_id: str = typer.Argument(..., help="Id of the card to block."),
-    by: str = typer.Option(..., "--by", help="Id of the card blocking it."),
+    by: str = typer.Option(..., "--by", help="Id of the card or issue blocking it."),
     pretty: bool = pretty_option(),
 ) -> None:
-    """Mark a card as blocked by another card."""
+    """Mark a card as blocked by another card or an open issue."""
 
     def action(ctx):
         core.block_card(ctx.conn, card_id, by)
