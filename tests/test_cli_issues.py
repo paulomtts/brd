@@ -56,3 +56,7 @@ def test_delete_issue(project):
     issue = ok("issue", "open", "--title", "Q")
     assert ok("delete", issue["id"]) == {"deleted": [issue["id"]]}
     assert ok("issue", "list") == []
+
+
+def test_issue_list_rejects_unknown_status(project):
+    assert err("issue", "list", "--status", "opne") == "InvalidStatusError"

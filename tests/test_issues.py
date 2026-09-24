@@ -6,6 +6,7 @@ from brd.errors import (
     EntityNotFoundError,
     InvalidBlockerError,
     InvalidCloseReasonError,
+    InvalidStatusError,
     IssueNotFoundError,
 )
 from tests.factories import make_document
@@ -104,3 +105,17 @@ def test_deleting_issue_unblocks(pconn):
     issue = issues.open_issue(pconn, "q", blocks=[card.id])
     pconn.execute("DELETE FROM entities WHERE id = ?", (issue.id,))
     assert core.resolve_status(pconn, card) == "todo"
+
+
+def test_open_issue_ignores_duplicate_refs_and_blocks(pconn):
+    card = core.create_card(pconn, "C")
+    target = core.create_card(pconn, "T")
+    issue = issues.open_issue(pconn, "x", ref_ids=[target.id, target.id], blocks=[card.id, card.id])
+    assert [r["id"] for r in refs.outgoing(pconn, issue.id)] == [target.id]
+    assert issues.blocks_of(pconn, issue.id) == [card.id]
+
+
+def test_list_issues_rejects_unknown_status(pconn):
+    with pytest.raises(InvalidStatusError, match="opne"):
+        issues.list_issues(pconn, "opne")
+    assert issues.list_issues(pconn, "closed") == []

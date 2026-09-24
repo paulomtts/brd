@@ -4,9 +4,15 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from brd import core, db, entities, refs
-from brd.errors import CardNotFoundError, InvalidCloseReasonError, IssueNotFoundError
+from brd.errors import (
+    CardNotFoundError,
+    InvalidCloseReasonError,
+    InvalidStatusError,
+    IssueNotFoundError,
+)
 
 CLOSE_REASONS = ("resolved", "wontfix", "duplicate")
+STATUSES = ("open", "closed")
 
 
 @dataclass
@@ -49,6 +55,10 @@ def require(conn: sqlite3.Connection, issue_id: str) -> Issue:
 
 
 def list_issues(conn: sqlite3.Connection, status: str | None = None) -> list[Issue]:
+    if status is not None and status not in STATUSES:
+        raise InvalidStatusError(
+            f"invalid issue status {status!r}; use one of {', '.join(STATUSES)}"
+        )
     if status is None:
         rows = conn.execute("SELECT * FROM issues ORDER BY created_at, rowid").fetchall()
     else:
@@ -65,8 +75,10 @@ def open_issue(
     ref_ids: list[str] | None = None,
     blocks: list[str] | None = None,
 ) -> Issue:
-    ref_ids = ref_ids or []
-    blocks = blocks or []
+    # De-duplicate (keeping order) so a repeated --ref/--blocks can't fail
+    # on a unique constraint after the issue row is already committed.
+    ref_ids = list(dict.fromkeys(ref_ids or []))
+    blocks = list(dict.fromkeys(blocks or []))
     for ref_id in ref_ids:
         entities.require(conn, ref_id)
     for card_id in blocks:
