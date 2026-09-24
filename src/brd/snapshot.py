@@ -86,6 +86,11 @@ def _load_export(conn: sqlite3.Connection, snap: dict) -> dict:
     contents = {
         d["id"]: d["content"].encode("utf-8") for d in doc_rows if d.get("content") is not None
     }
+    # Write backups before touching the DB, so a DB failure never leaves a
+    # document row with no backup: if the transaction below fails, we delete
+    # exactly the backups we just wrote.
+    for doc_id, data in contents.items():
+        documents._write_backup(conn, doc_id, data)
     try:
         with conn:  # one transaction: commits on success, rolls back on error
             for node, parent_id in flattened:
@@ -133,11 +138,13 @@ def _load_export(conn: sqlite3.Connection, snap: dict) -> dict:
                         "INSERT INTO refs (src_id, dst_id, origin) VALUES (?, ?, 'explicit')",
                         (r["src_id"], r["dst_id"]),
                     )
-    except sqlite3.IntegrityError as exc:
-        raise ImportFormatError(f"snapshot is internally inconsistent: {exc}") from exc
+    except BaseException as exc:
+        for doc_id in contents:
+            documents.backup_path(conn, doc_id).unlink(missing_ok=True)
+        if isinstance(exc, sqlite3.IntegrityError):
+            raise ImportFormatError(f"snapshot is internally inconsistent: {exc}") from exc
+        raise
 
-    for doc_id, data in contents.items():
-        documents._write_backup(conn, doc_id, data)
     for entity_id in entity_ids:
         refs.reindex(conn, entity_id)
     return {

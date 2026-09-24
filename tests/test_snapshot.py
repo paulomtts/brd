@@ -2,6 +2,7 @@ import json
 
 import pytest
 
+from brd import paths
 from tests.cli_helpers import err, ok
 
 
@@ -98,6 +99,33 @@ def test_import_rejects_unknown_format(project, tmp_path):
     assert err("import", bad) == "ImportFormatError"
     bad.write_text("not json")
     assert err("import", bad) == "ImportReadError"
+
+
+def test_import_rolls_back_document_backup_on_integrity_error(populated, tmp_path, monkeypatch):
+    data = ok("export")
+    # A comment referencing an entity that doesn't exist in the snapshot (or
+    # the target board) violates the comments.entity_id foreign key, so the
+    # DB transaction fails after the document's backup was already written.
+    data["comments"].append(
+        {
+            "id": "00000000-0000-0000-0000-000000000000",
+            "entity_id": "does-not-exist",
+            "author": "x",
+            "body": "y",
+            "created_at": "2020-01-01T00:00:00+00:00",
+        }
+    )
+    snapshot = tmp_path / "snapshot.json"
+    snapshot.write_text(json.dumps(data))
+
+    other = tmp_path / "other"
+    other.mkdir()
+    monkeypatch.chdir(other)
+    ok("init")
+    assert err("import", snapshot) == "ImportFormatError"
+    assert ok("list") == [] and ok("issue", "list") == []
+    doc_id = populated["doc"]["id"]
+    assert not (paths.project_docs_dir(other) / f"{doc_id}.md").exists()
 
 
 def test_import_stem_collision_touches_nothing(populated, tmp_path, monkeypatch):
