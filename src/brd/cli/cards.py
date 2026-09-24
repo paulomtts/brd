@@ -4,7 +4,7 @@ from pathlib import Path
 
 import typer
 
-from brd import core, db, output, views
+from brd import core, db, entities, output, views
 from brd.cli._app import app, pretty_option, run
 from brd.errors import CardNotFoundError, ImportReadError
 from brd.models import Card
@@ -46,11 +46,11 @@ def add(
 
 @app.command()
 def show(
-    card_id: str = typer.Argument(..., help="Id of the card to show."),
+    entity_id: str = typer.Argument(..., help="Id of the card, issue, or document to show."),
     pretty: bool = pretty_option(),
 ) -> None:
-    """Show a single card's full detail."""
-    run(pretty, lambda ctx: views.card_detail(ctx.conn, _require_card(ctx.conn, card_id)))
+    """Show a card, issue, or document in full."""
+    run(pretty, lambda ctx: views.detail(ctx.conn, ctx.root, entity_id))
 
 
 @app.command(name="list")
@@ -107,16 +107,26 @@ def update(
     run(pretty, action)
 
 
+def delete_entity(conn: sqlite3.Connection, entity_id: str, cascade: bool) -> list[str]:
+    kind = entities.kind_of(conn, entity_id)
+    if kind is None:
+        raise CardNotFoundError(f"no card, issue, or document with id {entity_id}")
+    if kind == "card":
+        return core.delete_card(conn, entity_id, cascade=cascade)
+    entities.delete(conn, entity_id)
+    return [entity_id]
+
+
 @app.command()
 def delete(
-    card_id: str = typer.Argument(..., help="Id of the card to delete."),
+    entity_id: str = typer.Argument(..., help="Id of the card, issue, or document to delete."),
     cascade: bool = typer.Option(
-        False, "--cascade", help="Also delete all descendant cards."
+        False, "--cascade", help="Also delete all descendant cards (cards only)."
     ),
     pretty: bool = pretty_option(),
 ) -> None:
-    """Delete a card."""
-    run(pretty, lambda ctx: {"deleted": core.delete_card(ctx.conn, card_id, cascade=cascade)})
+    """Delete a card, issue, or document (a document's source file is kept)."""
+    run(pretty, lambda ctx: {"deleted": delete_entity(ctx.conn, entity_id, cascade)})
 
 
 @app.command()
