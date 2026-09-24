@@ -22,14 +22,18 @@ brd add --title "Write tests" \
   --blocked-by <parser-card-id>           # create a card blocked on another
 brd next                                  # fetch ready-to-work card(s)
 brd tree                                  # view the whole board as a tree
-brd show <card-id>                        # view one card's full detail
+brd show <id>                             # full detail of a card, issue, or document
 brd update <card-id> --status done        # move a card forward
-brd delete <card-id>                      # delete a card (--cascade for cards with children)
+brd delete <id>                           # delete (--cascade for cards with children)
 brd projects                              # list all registered projects
-```
 
-All commands output JSON by default (for agent consumption); pass
-`--pretty` for human-readable output.
+brd issue open --title "Grammar is ambiguous" --blocks <card-id>
+brd issue close <issue-id> --reason wontfix
+brd doc add docs/parser-notes.md --tag design   # register a markdown file
+brd doc update <doc-id>                   # after editing it: refresh brd's backup
+brd comment add <card-or-issue-id> "Lexer done; see [[parser-notes]]"
+brd tag list                              # all tags with counts
+```
 
 ## Storage
 
@@ -43,13 +47,23 @@ To keep a durable, diffable record in git and move a board between
 machines, commit a snapshot and restore from it:
 
 ```bash
-brd tree > docs/board/snapshot.json   # commit this
-brd import docs/board/snapshot.json   # on another machine/clone, after brd init
+brd export > docs/board/snapshot.json   # commit this
+brd import docs/board/snapshot.json     # on another machine/clone, after brd init
 ```
 
-`import` preserves the original ids, descriptions, and timestamps, and
-refuses to run (touching nothing) if any id in the snapshot already
-exists in the target board.
+`import` preserves the original ids, content, and timestamps — including document backups (restore a missing file with `brd doc restore <id>`) — and refuses to run (touching nothing) if any id in the snapshot already exists in the target board. Older `brd tree` snapshots still import.
+
+## Documents
+
+`brd doc add <path>` registers a markdown file inside the project. brd
+stores a backup copy next to the board database and compares hashes on
+every read: if the file changed, the backup is refreshed; if the file is
+gone, brd serves the backup and reports it as `missing`. brd never writes
+your files except when you run `brd doc restore`.
+
+Link anything from any text with Obsidian-style `[[doc-stem]]` or
+`[[<id>]]`; `brd show` lists outgoing refs and backlinks, and `--pretty`
+renders links as titles.
 
 ## For agents
 

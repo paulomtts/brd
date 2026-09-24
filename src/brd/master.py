@@ -4,12 +4,9 @@ from pathlib import Path
 
 from brd import db, paths
 from brd.models import Project
+from brd.errors import ProjectNotFoundError  # noqa: F401  (re-exported)
 
 MARKER_FILENAME = ".brd"
-
-
-class ProjectNotFoundError(Exception):
-    pass
 
 
 def _now() -> str:
@@ -114,11 +111,15 @@ def find_marker(start: Path) -> Path | None:
         current = current.parent
 
 
-def resolve_project_db(start: Path) -> Path:
+def resolve_project_root(start: Path) -> Path:
     marker = find_marker(start)
     if marker is None:
         raise ProjectNotFoundError(f"no {MARKER_FILENAME} marker found above {start}")
-    return paths.project_db_path(marker.parent)
+    return marker.parent
+
+
+def resolve_project_db(start: Path) -> Path:
+    return paths.project_db_path(resolve_project_root(start))
 
 
 def list_all_projects() -> list[Project]:
@@ -142,6 +143,10 @@ def forget_project(root_path: Path) -> Project:
     db_path = paths.project_db_path(root_path)
     if db_path.is_file():
         db_path.unlink()
+
+    docs_dir = paths.project_docs_dir(root_path)
+    if docs_dir.is_dir():
+        shutil.rmtree(docs_dir)
 
     marker = root_path / MARKER_FILENAME
     if marker.is_file():

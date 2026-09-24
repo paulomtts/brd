@@ -1,11 +1,14 @@
 import sqlite3
 from pathlib import Path
 
+from brd.errors import MigrationError
 from brd.models import Card, Project
 
 
 def connect(db_path: Path) -> sqlite3.Connection:
-    conn = sqlite3.connect(db_path)
+    # Wait for concurrent writers (e.g. parallel first-run migrations)
+    # instead of failing immediately with "database is locked".
+    conn = sqlite3.connect(db_path, timeout=10)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
@@ -49,30 +52,169 @@ def init_master_schema(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
-def init_project_schema(conn: sqlite3.Connection) -> None:
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS cards (
-            id TEXT PRIMARY KEY,
-            title TEXT NOT NULL,
-            description TEXT,
-            status TEXT NOT NULL CHECK (status IN ('todo', 'in_progress', 'done')),
-            parent_id TEXT REFERENCES cards(id),
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL
-        )
-        """
+SCHEMA_VERSION = 1
+
+_CARDS_SQL = """
+CREATE TABLE {name} (
+    id TEXT PRIMARY KEY REFERENCES entities(id) ON DELETE CASCADE,
+    title TEXT NOT NULL,
+    description TEXT,
+    status TEXT NOT NULL CHECK (status IN ('todo', 'in_progress', 'done')),
+    parent_id TEXT REFERENCES cards(id),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+)
+"""
+
+_BLOCKED_BY_SQL = """
+CREATE TABLE {name} (
+    card_id TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+    blocks_on_id TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+    PRIMARY KEY (card_id, blocks_on_id)
+)
+"""
+
+_V1_NEW_TABLES = [
+    """
+    CREATE TABLE issues (
+        id TEXT PRIMARY KEY REFERENCES entities(id) ON DELETE CASCADE,
+        title TEXT NOT NULL,
+        body TEXT,
+        status TEXT NOT NULL CHECK (status IN ('open', 'closed')),
+        close_reason TEXT CHECK (close_reason IN ('resolved', 'wontfix', 'duplicate')),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
     )
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS blocked_by (
-            card_id TEXT NOT NULL REFERENCES cards(id),
-            blocks_on_id TEXT NOT NULL REFERENCES cards(id),
-            PRIMARY KEY (card_id, blocks_on_id)
-        )
-        """
+    """,
+    """
+    CREATE TABLE documents (
+        id TEXT PRIMARY KEY REFERENCES entities(id) ON DELETE CASCADE,
+        title TEXT NOT NULL,
+        source_path TEXT NOT NULL UNIQUE,
+        stem TEXT NOT NULL UNIQUE COLLATE NOCASE,
+        content_hash TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
     )
+    """,
+    """
+    CREATE TABLE comments (
+        id TEXT PRIMARY KEY,
+        entity_id TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+        author TEXT NOT NULL,
+        body TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE tags (
+        entity_id TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+        tag TEXT NOT NULL,
+        PRIMARY KEY (entity_id, tag)
+    )
+    """,
+    """
+    CREATE TABLE refs (
+        src_id TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+        dst_id TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+        origin TEXT NOT NULL CHECK (origin IN ('explicit', 'link')),
+        PRIMARY KEY (src_id, dst_id, origin)
+    )
+    """,
+]
+
+_ENTITY_KINDS = (("cards", "card"), ("issues", "issue"), ("documents", "document"))
+
+
+def _register_trigger(table: str, kind: str) -> str:
+    # Every card/issue/document row gets its entities row automatically, so
+    # raw inserts (tests, legacy migrations) stay valid under the FK.
+    return (
+        f"CREATE TRIGGER {table}_register_entity BEFORE INSERT ON {table} "
+        f"BEGIN INSERT INTO entities (id, kind) VALUES (NEW.id, '{kind}'); END"
+    )
+
+
+def _migrate_to_v1(conn: sqlite3.Connection) -> None:
+    tables = {
+        row[0]
+        for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+    }
+    conn.execute(
+        "CREATE TABLE entities (id TEXT PRIMARY KEY, kind TEXT NOT NULL "
+        "CHECK (kind IN ('card', 'issue', 'document')))"
+    )
+    if "cards" in tables:
+        # Legacy boards may hold references to cards that no longer exist;
+        # drop them rather than refusing to migrate the whole board.
+        conn.execute(
+            "UPDATE cards SET parent_id = NULL WHERE parent_id IS NOT NULL "
+            "AND parent_id NOT IN (SELECT id FROM cards)"
+        )
+        conn.execute("INSERT INTO entities (id, kind) SELECT id, 'card' FROM cards")
+        conn.execute(_CARDS_SQL.format(name="cards_new"))
+        conn.execute(
+            "INSERT INTO cards_new SELECT id, title, description, status, parent_id, "
+            "created_at, updated_at FROM cards"
+        )
+        conn.execute(_BLOCKED_BY_SQL.format(name="blocked_by_new"))
+        if "blocked_by" in tables:
+            conn.execute(
+                "INSERT INTO blocked_by_new SELECT card_id, blocks_on_id FROM blocked_by "
+                "WHERE card_id IN (SELECT id FROM cards) "
+                "AND blocks_on_id IN (SELECT id FROM cards)"
+            )
+            conn.execute("DROP TABLE blocked_by")
+        conn.execute("DROP TABLE cards")
+        conn.execute("ALTER TABLE cards_new RENAME TO cards")
+        conn.execute("ALTER TABLE blocked_by_new RENAME TO blocked_by")
+    else:
+        conn.execute(_CARDS_SQL.format(name="cards"))
+        conn.execute(_BLOCKED_BY_SQL.format(name="blocked_by"))
+    for statement in _V1_NEW_TABLES:
+        conn.execute(statement)
+    for table, kind in _ENTITY_KINDS:
+        conn.execute(_register_trigger(table, kind))
+
+
+def migrate_project(conn: sqlite3.Connection) -> None:
+    version = conn.execute("PRAGMA user_version").fetchone()[0]
+    if version >= SCHEMA_VERSION:
+        return
     conn.commit()
+    # Must be issued outside a transaction; SQLite ignores it inside one.
+    conn.execute("PRAGMA foreign_keys=OFF")
+    try:
+        # IMMEDIATE takes the write lock up front, so concurrent migrators
+        # queue on the busy timeout instead of failing to upgrade a read.
+        conn.execute("BEGIN IMMEDIATE")
+        # Another process may have migrated while we waited for the lock.
+        if conn.execute("PRAGMA user_version").fetchone()[0] >= SCHEMA_VERSION:
+            conn.rollback()
+            return
+        _migrate_to_v1(conn)
+        violations = conn.execute("PRAGMA foreign_key_check").fetchall()
+        if violations:
+            raise MigrationError(
+                f"migration left {len(violations)} foreign key violation(s)"
+            )
+        conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
+    finally:
+        conn.execute("PRAGMA foreign_keys=ON")
+
+
+def init_project_schema(conn: sqlite3.Connection) -> None:
+    migrate_project(conn)
+
+
+def docs_dir(conn: sqlite3.Connection) -> Path:
+    """Directory holding document backups: next to the db, `<db stem>.docs`."""
+    main = next(row for row in conn.execute("PRAGMA database_list") if row["name"] == "main")
+    return Path(main["file"]).with_suffix(".docs")
 
 
 def _row_to_project(row: sqlite3.Row) -> Project:
@@ -209,9 +351,6 @@ def list_children(conn: sqlite3.Connection, parent_id: str) -> list[Card]:
 
 
 def delete_card(conn: sqlite3.Connection, card_id: str) -> None:
-    conn.execute(
-        "DELETE FROM blocked_by WHERE card_id = ? OR blocks_on_id = ?",
-        (card_id, card_id),
-    )
-    conn.execute("DELETE FROM cards WHERE id = ?", (card_id,))
+    # Cascades to the cards row, its block edges, comments, tags, and refs.
+    conn.execute("DELETE FROM entities WHERE id = ?", (card_id,))
     conn.commit()

@@ -2,12 +2,17 @@ import sqlite3
 import uuid
 from datetime import datetime, timezone
 
-from brd import db
+from brd import db, entities, refs
 from brd.models import Card
-
-
-class CycleError(Exception):
-    pass
+from brd.errors import (  # noqa: F401  (re-exported for existing callers)
+    CardAlreadyExistsError,
+    CardHasChildrenError,
+    CardNotFoundError,
+    CycleError,
+    ImportFormatError,
+    InvalidBlockerError,
+    InvalidStatusError,
+)
 
 
 def resolve_status(conn: sqlite3.Connection, card: Card, _seen: set[str] | None = None) -> str:
@@ -24,6 +29,12 @@ def resolve_status(conn: sqlite3.Connection, card: Card, _seen: set[str] | None 
     for blocker_id in db.list_blockers_of(conn, card.id):
         blocker = db.get_card(conn, blocker_id)
         if blocker is None:
+            # Issues block while open, whatever reason they are later closed with.
+            issue = conn.execute(
+                "SELECT status FROM issues WHERE id = ?", (blocker_id,)
+            ).fetchone()
+            if issue is not None and issue["status"] == "open":
+                return "blocked"
             continue
         if resolve_status(conn, blocker, seen) != "done":
             return "blocked"
@@ -60,22 +71,6 @@ def would_create_block_cycle(conn: sqlite3.Connection, card_id: str, new_blocker
     return False
 
 
-class CardNotFoundError(Exception):
-    pass
-
-
-class InvalidStatusError(Exception):
-    pass
-
-
-class CardAlreadyExistsError(Exception):
-    pass
-
-
-class CardHasChildrenError(Exception):
-    pass
-
-
 CLEAR_PARENT = object()  # sentinel: "explicitly set parent_id to None"
 
 
@@ -90,6 +85,14 @@ def _require_card(conn: sqlite3.Connection, card_id: str) -> Card:
     return card
 
 
+def _require_blocker(conn: sqlite3.Connection, blocker_id: str) -> None:
+    kind = entities.kind_of(conn, blocker_id)
+    if kind is None:
+        raise CardNotFoundError(f"no card or issue with id {blocker_id}")
+    if kind not in entities.BLOCKERS:
+        raise InvalidBlockerError(f"a {kind} can't block a card; only cards and issues can")
+
+
 def create_card(
     conn: sqlite3.Connection,
     title: str,
@@ -102,7 +105,7 @@ def create_card(
 
     blocked_by = blocked_by or []
     for blocker_id in blocked_by:
-        _require_card(conn, blocker_id)
+        _require_blocker(conn, blocker_id)
 
     now = _now()
     card = Card(
@@ -120,6 +123,9 @@ def create_card(
         if would_create_block_cycle(conn, card.id, blocker_id):
             raise CycleError(f"blocking {card.id} on {blocker_id} would create a cycle")
         db.add_blocked_by_edge(conn, card.id, blocker_id)
+
+    if description:
+        refs.reindex(conn, card.id)
 
     return card
 
@@ -156,13 +162,15 @@ def update_card(
     if fields:
         fields["updated_at"] = _now()
         db.update_card_fields(conn, card_id, **fields)
+        if description is not None:
+            refs.reindex(conn, card_id)
 
     return _require_card(conn, card_id)
 
 
 def block_card(conn: sqlite3.Connection, card_id: str, blocker_id: str) -> None:
     _require_card(conn, card_id)
-    _require_card(conn, blocker_id)
+    _require_blocker(conn, blocker_id)
     if would_create_block_cycle(conn, card_id, blocker_id):
         raise CycleError(f"blocking {card_id} on {blocker_id} would create a cycle")
     db.add_blocked_by_edge(conn, card_id, blocker_id)
@@ -250,29 +258,34 @@ def import_tree(conn: sqlite3.Connection, nodes: list[dict]) -> int:
     flattened = _flatten_tree(nodes)
 
     for node, _ in flattened:
-        if db.get_card(conn, node["id"]) is not None:
+        if entities.kind_of(conn, node["id"]) is not None:
             raise CardAlreadyExistsError(
                 f"card {node['id']} already exists in this board"
             )
 
-    for node, parent_id in flattened:
-        status = node["status"]
-        stored_status = "todo" if status == "blocked" else status
-        db.insert_card(
-            conn,
-            Card(
-                id=node["id"],
-                title=node["title"],
-                description=node.get("description"),
-                status=stored_status,
-                parent_id=parent_id,
-                created_at=node["created_at"],
-                updated_at=node["updated_at"],
-            ),
-        )
+    try:
+        with conn:  # one transaction: all cards and edges, or nothing
+            for node, parent_id in flattened:
+                status = "todo" if node["status"] == "blocked" else node["status"]
+                conn.execute(
+                    "INSERT INTO cards (id, title, description, status, parent_id, "
+                    "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (node["id"], node["title"], node.get("description"), status,
+                     parent_id, node["created_at"], node["updated_at"]),
+                )
+            for node, _ in flattened:
+                for blocker_id in node.get("blocked_by", []):
+                    conn.execute(
+                        "INSERT INTO blocked_by (card_id, blocks_on_id) VALUES (?, ?)",
+                        (node["id"], blocker_id),
+                    )
+    except sqlite3.IntegrityError as exc:
+        raise ImportFormatError(
+            "snapshot references a blocker or parent id that isn't in the snapshot, "
+            f"or is otherwise inconsistent: {exc}"
+        ) from exc
 
     for node, _ in flattened:
-        for blocker_id in node.get("blocked_by", []):
-            db.add_blocked_by_edge(conn, node["id"], blocker_id)
+        refs.reindex(conn, node["id"])
 
     return len(flattened)
