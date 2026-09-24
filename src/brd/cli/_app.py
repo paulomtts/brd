@@ -9,9 +9,33 @@ import typer
 from brd import db, master, output, paths
 from brd.errors import BrdError
 
+GUIDE = """\
+Cards are units of work. There are no Epic/Story/Task types: a card with children \
+(`--parent <its-id>`) is a container, not work, so `brd next` skips it and surfaces its leaves.
+
+Issues are bugs, questions, and findings that aren't work yet. An open issue can block a card \
+(`brd block <card> --by <issue>`); closing it, for any reason, unblocks the card.
+
+Documents are registered `.md` files that brd backs up. Whenever you edit a registered document, \
+run `brd doc update <id>` right after; after moving or renaming one, run \
+`brd doc update <id> --path <new>`.
+
+Links: write \\[\\[doc-stem]] or \\[\\[<id>]] in card descriptions, issue bodies, and comments; \
+`brd show` lists refs and backlinks.
+
+Comments record progress or decisions on cards and issues. The author is --author, else \
+$BRD_AUTHOR, else the OS user; agents should set BRD_AUTHOR to their name.
+
+Board data lives outside the repo (~/.local/share/brd/), keyed to the project's path. \
+`brd export > docs/board/snapshot.json` gives a committable snapshot; `brd import <file>` restores it.
+
+Output is JSON by default; add --pretty for human-readable text. \
+Run `brd <command> --help` for a command's options."""
+
 app = typer.Typer(
     name="brd",
     help="Local kanban board for tracking work, no visual UI.",
+    epilog=GUIDE,
     no_args_is_help=True,
 )
 
