@@ -7,14 +7,16 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from brd import db, refs, tags
+from brd import db, entities, refs, tags
 from brd.errors import (
+    DocumentContentLostError,
     DocumentNotFoundError,
     DocumentSourceNotFoundError,
     DuplicatePathError,
     DuplicateStemError,
     NotMarkdownError,
     PathOutsideProjectError,
+    RestoreConflictError,
 )
 
 
@@ -180,3 +182,58 @@ def sync(conn: sqlite3.Connection, root: Path, doc: Document) -> SyncResult:
 
 def sync_all(conn: sqlite3.Connection, root: Path) -> dict[str, SyncResult]:
     return {doc.id: sync(conn, root, doc) for doc in list_all(conn)}
+
+
+def update(
+    conn: sqlite3.Connection,
+    root: Path,
+    doc_id: str,
+    new_path: Path | None = None,
+    title: str | None = None,
+) -> tuple[Document, SyncResult]:
+    doc = require(conn, doc_id)
+    old_stem = doc.stem
+    if new_path is not None:
+        rel, stem = _validate_path(root, new_path)
+        _check_unique(conn, rel, stem, exclude_id=doc.id)
+        conn.execute(
+            "UPDATE documents SET source_path = ?, stem = ?, updated_at = ? WHERE id = ?",
+            (rel, stem, _now(), doc.id),
+        )
+    if title is not None:
+        conn.execute(
+            "UPDATE documents SET title = ?, updated_at = ? WHERE id = ?",
+            (title, _now(), doc.id),
+        )
+    conn.commit()
+    doc = require(conn, doc_id)
+    result = sync(conn, root, doc)
+    if doc.stem.lower() != old_stem.lower():
+        refs.reindex_mentions(conn, old_stem)
+        refs.reindex_mentions(conn, doc.stem)
+    return require(conn, doc_id), result
+
+
+def restore(conn: sqlite3.Connection, root: Path, doc_id: str, force: bool = False) -> Document:
+    doc = require(conn, doc_id)
+    backup = backup_path(conn, doc.id)
+    if not backup.is_file():
+        raise DocumentContentLostError(f"no backup exists for document {doc_id}")
+    source = root.resolve() / doc.source_path
+    if source.is_file():
+        if _hash(source.read_bytes()) == doc.content_hash:
+            return doc
+        if not force:
+            raise RestoreConflictError(
+                f"{doc.source_path} exists and differs from brd's backup; "
+                "pass --force to overwrite it"
+            )
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_bytes(backup.read_bytes())
+    return doc
+
+
+def delete(conn: sqlite3.Connection, doc_id: str) -> None:
+    require(conn, doc_id)
+    entities.delete(conn, doc_id)
+    backup_path(conn, doc_id).unlink(missing_ok=True)

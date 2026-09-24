@@ -266,3 +266,15 @@ def test_list_all_projects_is_empty_before_any_registration(tmp_path, monkeypatc
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
 
     assert master.list_all_projects() == []
+
+
+def test_forget_removes_document_backups(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    repo = tmp_path / "myrepo"
+    repo.mkdir()
+    master.init_project(repo)
+    docs = paths.project_docs_dir(repo)
+    docs.mkdir()
+    (docs / "x.md").write_text("backup")
+    master.forget_project(repo)
+    assert not docs.exists()

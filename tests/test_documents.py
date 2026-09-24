@@ -2,11 +2,14 @@ import pytest
 
 from brd import core, documents, refs, tags
 from brd.errors import (
+    DocumentContentLostError,
+    DocumentNotFoundError,
     DocumentSourceNotFoundError,
     DuplicatePathError,
     DuplicateStemError,
     NotMarkdownError,
     PathOutsideProjectError,
+    RestoreConflictError,
 )
 
 
@@ -136,3 +139,93 @@ def test_sync_all_and_no_temp_files_left(pconn, root):
     results = documents.sync_all(pconn, root)
     assert {k: v.source_state for k, v in results.items()} == {a.id: "ok", b.id: "updated"}
     assert sorted(p.suffix for p in documents.backup_path(pconn, a.id).parent.iterdir()) == [".md", ".md"]
+
+
+def test_update_rename_path_and_stem(pconn, root):
+    old = write(root, "docs/old.md", "x")
+    doc = documents.add(pconn, root, old)
+    old.rename(root / "docs" / "new.md")
+    updated, result = documents.update(pconn, root, doc.id, new_path=root / "docs" / "new.md")
+    assert (updated.source_path, updated.stem, result.source_state) == ("docs/new.md", "new", "ok")
+
+
+def test_update_rename_moves_link_resolution(pconn, root):
+    old_card = core.create_card(pconn, title="Old", description="[[old]]")
+    new_card = core.create_card(pconn, title="New", description="[[new]]")
+    old = write(root, "docs/old.md", "x")
+    doc = documents.add(pconn, root, old)
+    old.rename(root / "docs" / "new.md")
+    documents.update(pconn, root, doc.id, new_path=root / "docs" / "new.md")
+    assert refs.outgoing(pconn, old_card.id) == []
+    assert [r["id"] for r in refs.outgoing(pconn, new_card.id)] == [doc.id]
+
+
+def test_update_rename_to_taken_stem(pconn, root):
+    documents.add(pconn, root, write(root, "docs/a.md", ""))
+    b = documents.add(pconn, root, write(root, "docs/b.md", ""))
+    write(root, "other/a.md", "")
+    with pytest.raises(DuplicateStemError):
+        documents.update(pconn, root, b.id, new_path=root / "other" / "a.md")
+
+
+def test_update_title_only(pconn, root):
+    doc = documents.add(pconn, root, write(root, "docs/a.md", ""))
+    updated, _ = documents.update(pconn, root, doc.id, title="Better")
+    assert updated.title == "Better"
+
+
+def test_update_unknown(pconn, root):
+    with pytest.raises(DocumentNotFoundError):
+        documents.update(pconn, root, "nope")
+
+
+def test_restore_missing_source(pconn, root):
+    path = write(root, "docs/a.md", "keep me")
+    doc = documents.add(pconn, root, path)
+    path.unlink()
+    documents.restore(pconn, root, doc.id)
+    assert path.read_text() == "keep me"
+
+
+def test_restore_recreates_parent_dirs(pconn, root):
+    path = write(root, "deep/dir/a.md", "x")
+    doc = documents.add(pconn, root, path)
+    path.unlink()
+    path.parent.rmdir()
+    documents.restore(pconn, root, doc.id)
+    assert path.read_text() == "x"
+
+
+def test_restore_conflict_and_force(pconn, root):
+    path = write(root, "docs/a.md", "v1")
+    doc = documents.add(pconn, root, path)
+    path.write_text("local edit")
+    with pytest.raises(RestoreConflictError):
+        documents.restore(pconn, root, doc.id)
+    documents.restore(pconn, root, doc.id, force=True)
+    assert path.read_text() == "v1"
+
+
+def test_restore_matching_is_noop(pconn, root):
+    path = write(root, "docs/a.md", "v1")
+    doc = documents.add(pconn, root, path)
+    documents.restore(pconn, root, doc.id)
+    assert path.read_text() == "v1"
+
+
+def test_restore_lost(pconn, root):
+    path = write(root, "docs/a.md", "v1")
+    doc = documents.add(pconn, root, path)
+    path.unlink()
+    documents.backup_path(pconn, doc.id).unlink()
+    with pytest.raises(DocumentContentLostError):
+        documents.restore(pconn, root, doc.id)
+
+
+def test_delete_removes_backup_keeps_source(pconn, root):
+    path = write(root, "docs/a.md", "v1")
+    doc = documents.add(pconn, root, path)
+    documents.delete(pconn, doc.id)
+    assert documents.get(pconn, doc.id) is None
+    assert not documents.backup_path(pconn, doc.id).exists()
+    assert path.read_text() == "v1"

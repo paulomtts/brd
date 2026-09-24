@@ -144,6 +144,10 @@ def forget_project(root_path: Path) -> Project:
     if db_path.is_file():
         db_path.unlink()
 
+    docs_dir = paths.project_docs_dir(root_path)
+    if docs_dir.is_dir():
+        shutil.rmtree(docs_dir)
+
     marker = root_path / MARKER_FILENAME
     if marker.is_file():
         marker.unlink()
