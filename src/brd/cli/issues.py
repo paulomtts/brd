@@ -1,6 +1,7 @@
 import typer
 
 from brd import issues, views
+from brd import pretty as pretty_render
 from brd.cli._app import app, pretty_option, run
 
 issue_app = typer.Typer(help="Track bugs, questions, and findings.", no_args_is_help=True)
@@ -33,6 +34,7 @@ def list_cmd(
     run(
         pretty,
         lambda ctx: [views.issue_detail(ctx.conn, i) for i in issues.list_issues(ctx.conn, status)],
+        render=lambda ctx, data: pretty_render.render_list(ctx.conn, data),
     )
 
 

@@ -3,6 +3,7 @@ import sqlite3
 import typer
 
 from brd import core, db, documents, entities, output, views
+from brd import pretty as pretty_render
 from brd.cli._app import app, pretty_option, run
 from brd.errors import CardNotFoundError
 from brd.models import Card
@@ -48,7 +49,11 @@ def show(
     pretty: bool = pretty_option(),
 ) -> None:
     """Show a card, issue, or document in full."""
-    run(pretty, lambda ctx: views.detail(ctx.conn, ctx.root, entity_id))
+    run(
+        pretty,
+        lambda ctx: views.detail(ctx.conn, ctx.root, entity_id),
+        render=lambda ctx, data: pretty_render.render_detail(ctx.conn, data),
+    )
 
 
 @app.command(name="list")
@@ -69,7 +74,7 @@ def list_cards_cmd(
             kwargs["parent_id"] = parent
         return [views.card_detail(ctx.conn, card) for card in db.list_cards(ctx.conn, **kwargs)]
 
-    run(pretty, action)
+    run(pretty, action, render=lambda ctx, data: pretty_render.render_list(ctx.conn, data))
 
 
 @app.command()
@@ -194,4 +199,4 @@ def next_cmd(
         cards = core.next_cards(ctx.conn, limit=limit, parent_id=parent)
         return [views.card_detail(ctx.conn, card) for card in cards]
 
-    run(pretty, action)
+    run(pretty, action, render=lambda ctx, data: pretty_render.render_list(ctx.conn, data))

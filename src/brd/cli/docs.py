@@ -3,6 +3,7 @@ from pathlib import Path
 import typer
 
 from brd import documents, tags, views
+from brd import pretty as pretty_render
 from brd.cli._app import app, pretty_option, run
 
 doc_app = typer.Typer(help="Register and track markdown documents.", no_args_is_help=True)
@@ -46,7 +47,7 @@ def list_cmd(
                 items.append(summary)
         return items
 
-    run(pretty, action)
+    run(pretty, action, render=lambda ctx, data: pretty_render.render_list(ctx.conn, data))
 
 
 @doc_app.command("update")

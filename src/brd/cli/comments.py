@@ -3,6 +3,7 @@ import sys
 import typer
 
 from brd import comments, views
+from brd import pretty as pretty_render
 from brd.cli._app import app, pretty_option, run
 
 comment_app = typer.Typer(help="Comment on cards and issues.", no_args_is_help=True)
@@ -34,7 +35,11 @@ def list_cmd(
     pretty: bool = pretty_option(),
 ) -> None:
     """List comments, oldest first."""
-    run(pretty, lambda ctx: [views.comment_dict(c) for c in comments.list_for(ctx.conn, entity_id)])
+    run(
+        pretty,
+        lambda ctx: [views.comment_dict(c) for c in comments.list_for(ctx.conn, entity_id)],
+        render=lambda ctx, data: pretty_render.render_comments(ctx.conn, data),
+    )
 
 
 @comment_app.command("delete")
