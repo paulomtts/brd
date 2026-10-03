@@ -567,3 +567,27 @@ def test_update_card_removing_link_drops_link_ref_but_keeps_explicit(conn):
     assert {(r["id"], r["origin"]) for r in _refs.outgoing(conn, source.id)} == {
         (other.id, "explicit")
     }
+
+
+@pytest.mark.parametrize("blocker_status", ["done", "merged", "canceled"])
+def test_resolve_status_terminal_blocker_releases_dependent(conn, blocker_status):
+    db.insert_card(conn, _card("blocker", status=blocker_status))
+    db.insert_card(conn, _card("c1"))
+    db.add_blocked_by_edge(conn, "c1", "blocker")
+
+    assert core.resolve_status(conn, db.get_card(conn, "c1")) == "todo"
+
+
+@pytest.mark.parametrize("status", ["merged", "canceled"])
+def test_update_card_accepts_merged_and_canceled(conn, status):
+    db.insert_card(conn, _card("c1"))
+
+    assert core.update_card(conn, "c1", status=status).status == status
+    assert core.resolve_status(conn, db.get_card(conn, "c1")) == status
+
+
+def test_update_card_rejects_unknown_status(conn):
+    db.insert_card(conn, _card("c1"))
+
+    with pytest.raises(core.InvalidStatusError):
+        core.update_card(conn, "c1", status="cancelled")

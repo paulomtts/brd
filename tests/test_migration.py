@@ -50,13 +50,13 @@ def _tables(conn):
     return {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
 
 
-def test_fresh_db_gets_version_1_schema(tmp_path):
+def test_fresh_db_gets_current_schema(tmp_path):
     conn = db.connect(tmp_path / "p.db")
     db.migrate_project(conn)
     assert {
         "entities", "cards", "blocked_by", "issues", "documents", "comments", "tags", "refs"
     } <= _tables(conn)
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 1
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION
 
 
 def test_v0_cards_are_backfilled_into_entities(v0_path):
@@ -78,7 +78,7 @@ def test_migration_is_idempotent(v0_path):
     db.migrate_project(conn)
     db.migrate_project(conn)
     assert conn.execute("SELECT COUNT(*) FROM entities").fetchone()[0] == 3
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 1
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION
 
 
 def test_foreign_keys_are_on_after_migration(v0_path):
@@ -165,6 +165,44 @@ def test_concurrent_first_run_migrations_all_succeed(tmp_path):
             thread.join()
         assert errors == []
         conn = db.connect(path)
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 1
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION
         assert [r[0] for r in conn.execute("SELECT id FROM entities ORDER BY id")] == ["c", "p"]
         conn.close()
+
+
+def test_migration_preserves_cards_and_accepts_new_statuses(v0_path):
+    conn = db.connect(v0_path)
+    db.migrate_project(conn)
+
+    assert [r["id"] for r in conn.execute("SELECT id FROM cards ORDER BY id")] == ["c", "o", "p"]
+    assert conn.execute("SELECT COUNT(*) FROM blocked_by").fetchone()[0] == 1
+    for status in ("merged", "canceled"):
+        conn.execute("UPDATE cards SET status = ? WHERE id = 'o'", (status,))
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute("UPDATE cards SET status = 'blocked' WHERE id = 'o'")
+
+
+def test_v1_db_upgrades_to_v2_and_keeps_entity_trigger(tmp_path):
+    path = tmp_path / "p.db"
+    conn = db.connect(path)
+    db.migrate_project(conn)
+    # Roll the db back to a v1 shape: old CHECK, version 1.
+    conn.execute("PRAGMA foreign_keys=OFF")
+    conn.execute("DROP TRIGGER cards_register_entity")
+    conn.execute("ALTER TABLE cards RENAME TO cards_old")
+    conn.execute(db._cards_sql("cards", db._V1_CARD_STATUSES))
+    conn.execute(db._register_trigger("cards", "card"))
+    conn.execute("DROP TABLE cards_old")
+    conn.execute("PRAGMA user_version = 1")
+    conn.commit()
+    conn.close()
+
+    conn = db.connect(path)
+    db.migrate_project(conn)
+
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
+    conn.execute(
+        "INSERT INTO cards (id, title, status, created_at, updated_at) "
+        "VALUES ('x', 'x', 'canceled', 'now', 'now')"
+    )
+    assert conn.execute("SELECT kind FROM entities WHERE id = 'x'").fetchone()[0] == "card"

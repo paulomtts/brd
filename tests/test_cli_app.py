@@ -31,7 +31,7 @@ def test_commands_migrate_a_v0_board(tmp_path, monkeypatch):
 
     assert [c["id"] for c in ok("list")] == ["c1"]
     conn = db.connect(paths.project_db_path(repo))
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 1
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION
 
 
 def test_domain_errors_become_envelopes(project):

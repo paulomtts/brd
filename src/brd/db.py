@@ -52,19 +52,29 @@ def init_master_schema(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+
+# Stored card statuses ('blocked' is derived, never stored).
+CARD_STATUSES = ("todo", "in_progress", "done", "merged", "canceled")
 
 _CARDS_SQL = """
 CREATE TABLE {name} (
     id TEXT PRIMARY KEY REFERENCES entities(id) ON DELETE CASCADE,
     title TEXT NOT NULL,
     description TEXT,
-    status TEXT NOT NULL CHECK (status IN ('todo', 'in_progress', 'done')),
+    status TEXT NOT NULL CHECK (status IN ({statuses})),
     parent_id TEXT REFERENCES cards(id),
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 )
 """
+
+_V1_CARD_STATUSES = ("todo", "in_progress", "done")
+
+
+def _cards_sql(name: str, statuses: tuple[str, ...]) -> str:
+    quoted = ", ".join(f"'{status}'" for status in statuses)
+    return _CARDS_SQL.format(name=name, statuses=quoted)
 
 _BLOCKED_BY_SQL = """
 CREATE TABLE {name} (
@@ -152,7 +162,7 @@ def _migrate_to_v1(conn: sqlite3.Connection) -> None:
             "AND parent_id NOT IN (SELECT id FROM cards)"
         )
         conn.execute("INSERT INTO entities (id, kind) SELECT id, 'card' FROM cards")
-        conn.execute(_CARDS_SQL.format(name="cards_new"))
+        conn.execute(_cards_sql("cards_new", _V1_CARD_STATUSES))
         conn.execute(
             "INSERT INTO cards_new SELECT id, title, description, status, parent_id, "
             "created_at, updated_at FROM cards"
@@ -169,12 +179,26 @@ def _migrate_to_v1(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE cards_new RENAME TO cards")
         conn.execute("ALTER TABLE blocked_by_new RENAME TO blocked_by")
     else:
-        conn.execute(_CARDS_SQL.format(name="cards"))
+        conn.execute(_cards_sql("cards", _V1_CARD_STATUSES))
         conn.execute(_BLOCKED_BY_SQL.format(name="blocked_by"))
     for statement in _V1_NEW_TABLES:
         conn.execute(statement)
     for table, kind in _ENTITY_KINDS:
         conn.execute(_register_trigger(table, kind))
+
+
+def _migrate_to_v2(conn: sqlite3.Connection) -> None:
+    # SQLite cannot alter a CHECK constraint, so rebuild cards with the wider
+    # status set. Dropping the table drops its entity-registration trigger;
+    # recreate it.
+    conn.execute(_cards_sql("cards_new", CARD_STATUSES))
+    conn.execute(
+        "INSERT INTO cards_new SELECT id, title, description, status, parent_id, "
+        "created_at, updated_at FROM cards"
+    )
+    conn.execute("DROP TABLE cards")
+    conn.execute("ALTER TABLE cards_new RENAME TO cards")
+    conn.execute(_register_trigger("cards", "card"))
 
 
 def migrate_project(conn: sqlite3.Connection) -> None:
@@ -189,10 +213,14 @@ def migrate_project(conn: sqlite3.Connection) -> None:
         # queue on the busy timeout instead of failing to upgrade a read.
         conn.execute("BEGIN IMMEDIATE")
         # Another process may have migrated while we waited for the lock.
-        if conn.execute("PRAGMA user_version").fetchone()[0] >= SCHEMA_VERSION:
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+        if version >= SCHEMA_VERSION:
             conn.rollback()
             return
-        _migrate_to_v1(conn)
+        if version < 1:
+            _migrate_to_v1(conn)
+        if version < 2:
+            _migrate_to_v2(conn)
         violations = conn.execute("PRAGMA foreign_key_check").fetchall()
         if violations:
             raise MigrationError(

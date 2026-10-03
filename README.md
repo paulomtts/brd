@@ -23,7 +23,7 @@ brd add --title "Write tests" \
 brd next                                  # fetch ready-to-work card(s)
 brd tree                                  # view the whole board as a tree
 brd show <id>                             # full detail of a card, issue, or document
-brd update <card-id> --status done        # move a card forward
+brd update <card-id> --status done        # move a card forward (todo, in_progress, done, merged, canceled)
 brd delete <id>                           # delete (--cascade for cards with children)
 brd projects                              # list all registered projects
 
