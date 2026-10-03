@@ -15,6 +15,11 @@ from brd.errors import (  # noqa: F401  (re-exported for existing callers)
 )
 
 
+# A blocker in one of these statuses no longer holds its dependents back:
+# finished work (done, merged) and abandoned work (canceled) both release them.
+_RELEASING_STATUSES = frozenset({"done", "merged", "canceled"})
+
+
 def resolve_status(conn: sqlite3.Connection, card: Card, _seen: set[str] | None = None) -> str:
     if card.status != "todo":
         return card.status
@@ -36,7 +41,7 @@ def resolve_status(conn: sqlite3.Connection, card: Card, _seen: set[str] | None 
             if issue is not None and issue["status"] == "open":
                 return "blocked"
             continue
-        if resolve_status(conn, blocker, seen) != "done":
+        if resolve_status(conn, blocker, seen) not in _RELEASING_STATUSES:
             return "blocked"
 
     if card.parent_id is not None:
@@ -149,6 +154,10 @@ def update_card(
     if description is not None:
         fields["description"] = description
     if status is not None:
+        if status not in db.CARD_STATUSES:
+            raise InvalidStatusError(
+                f"invalid card status {status!r}; use one of {', '.join(db.CARD_STATUSES)}"
+            )
         fields["status"] = status
 
     if parent_id is CLEAR_PARENT:
