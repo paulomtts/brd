@@ -52,10 +52,10 @@ def init_master_schema(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 # Stored card statuses ('blocked' is derived, never stored).
-CARD_STATUSES = ("todo", "in_progress", "done", "merged", "canceled")
+CARD_STATUSES = ("todo", "in_progress", "done", "merged", "canceled", "archived")
 
 _CARDS_SQL = """
 CREATE TABLE {name} (
@@ -201,6 +201,22 @@ def _migrate_to_v2(conn: sqlite3.Connection) -> None:
     conn.execute(_register_trigger("cards", "card"))
 
 
+def _migrate_to_v3(conn: sqlite3.Connection) -> None:
+    # Same rebuild as v2, for the same reason: adding 'archived' to the CHECK
+    # constraint. A fresh v0/v1 board runs this right after _migrate_to_v2,
+    # which already rebuilt against the live (archived-inclusive)
+    # CARD_STATUSES -- redundant in that case, but harmless, and it keeps
+    # each version's migration naming the version it actually targets.
+    conn.execute(_cards_sql("cards_new", CARD_STATUSES))
+    conn.execute(
+        "INSERT INTO cards_new SELECT id, title, description, status, parent_id, "
+        "created_at, updated_at FROM cards"
+    )
+    conn.execute("DROP TABLE cards")
+    conn.execute("ALTER TABLE cards_new RENAME TO cards")
+    conn.execute(_register_trigger("cards", "card"))
+
+
 def migrate_project(conn: sqlite3.Connection) -> None:
     version = conn.execute("PRAGMA user_version").fetchone()[0]
     if version >= SCHEMA_VERSION:
@@ -221,6 +237,8 @@ def migrate_project(conn: sqlite3.Connection) -> None:
             _migrate_to_v1(conn)
         if version < 2:
             _migrate_to_v2(conn)
+        if version < 3:
+            _migrate_to_v3(conn)
         violations = conn.execute("PRAGMA foreign_key_check").fetchall()
         if violations:
             raise MigrationError(

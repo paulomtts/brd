@@ -176,7 +176,7 @@ def test_migration_preserves_cards_and_accepts_new_statuses(v0_path):
 
     assert [r["id"] for r in conn.execute("SELECT id FROM cards ORDER BY id")] == ["c", "o", "p"]
     assert conn.execute("SELECT COUNT(*) FROM blocked_by").fetchone()[0] == 1
-    for status in ("merged", "canceled"):
+    for status in ("merged", "canceled", "archived"):
         conn.execute("UPDATE cards SET status = ? WHERE id = 'o'", (status,))
     with pytest.raises(sqlite3.IntegrityError):
         conn.execute("UPDATE cards SET status = 'blocked' WHERE id = 'o'")
@@ -200,9 +200,35 @@ def test_v1_db_upgrades_to_v2_and_keeps_entity_trigger(tmp_path):
     conn = db.connect(path)
     db.migrate_project(conn)
 
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION
     conn.execute(
         "INSERT INTO cards (id, title, status, created_at, updated_at) "
-        "VALUES ('x', 'x', 'canceled', 'now', 'now')"
+        "VALUES ('x', 'x', 'archived', 'now', 'now')"
     )
     assert conn.execute("SELECT kind FROM entities WHERE id = 'x'").fetchone()[0] == "card"
+
+
+def test_v2_db_upgrades_to_v3_and_accepts_archived(tmp_path):
+    path = tmp_path / "p.db"
+    conn = db.connect(path)
+    db.migrate_project(conn)
+    # Roll the db back to a v2 shape: the pre-archived CHECK, version 2.
+    conn.execute("PRAGMA foreign_keys=OFF")
+    conn.execute("DROP TRIGGER cards_register_entity")
+    conn.execute("ALTER TABLE cards RENAME TO cards_old")
+    conn.execute(db._cards_sql("cards", ("todo", "in_progress", "done", "merged", "canceled")))
+    conn.execute(db._register_trigger("cards", "card"))
+    conn.execute("DROP TABLE cards_old")
+    conn.execute("PRAGMA user_version = 2")
+    conn.commit()
+    conn.close()
+
+    conn = db.connect(path)
+    db.migrate_project(conn)
+
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION
+    conn.execute(
+        "INSERT INTO cards (id, title, status, created_at, updated_at) "
+        "VALUES ('y', 'y', 'archived', 'now', 'now')"
+    )
+    assert conn.execute("SELECT kind FROM entities WHERE id = 'y'").fetchone()[0] == "card"

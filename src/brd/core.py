@@ -16,8 +16,9 @@ from brd.errors import (  # noqa: F401  (re-exported for existing callers)
 
 
 # A blocker in one of these statuses no longer holds its dependents back:
-# finished work (done, merged) and abandoned work (canceled) both release them.
-_RELEASING_STATUSES = frozenset({"done", "merged", "canceled"})
+# finished work (done, merged), abandoned work (canceled) and set-aside work
+# (archived) all release them.
+_RELEASING_STATUSES = frozenset({"done", "merged", "canceled", "archived"})
 
 
 def resolve_status(conn: sqlite3.Connection, card: Card, _seen: set[str] | None = None) -> str:

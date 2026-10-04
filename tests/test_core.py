@@ -569,7 +569,7 @@ def test_update_card_removing_link_drops_link_ref_but_keeps_explicit(conn):
     }
 
 
-@pytest.mark.parametrize("blocker_status", ["done", "merged", "canceled"])
+@pytest.mark.parametrize("blocker_status", ["done", "merged", "canceled", "archived"])
 def test_resolve_status_terminal_blocker_releases_dependent(conn, blocker_status):
     db.insert_card(conn, _card("blocker", status=blocker_status))
     db.insert_card(conn, _card("c1"))
@@ -578,8 +578,8 @@ def test_resolve_status_terminal_blocker_releases_dependent(conn, blocker_status
     assert core.resolve_status(conn, db.get_card(conn, "c1")) == "todo"
 
 
-@pytest.mark.parametrize("status", ["merged", "canceled"])
-def test_update_card_accepts_merged_and_canceled(conn, status):
+@pytest.mark.parametrize("status", ["merged", "canceled", "archived"])
+def test_update_card_accepts_every_terminal_status(conn, status):
     db.insert_card(conn, _card("c1"))
 
     assert core.update_card(conn, "c1", status=status).status == status

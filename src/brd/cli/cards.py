@@ -87,8 +87,8 @@ def update(
     status: str | None = typer.Option(
         None,
         "--status",
-        help="New stored status: todo, in_progress, done, merged or canceled "
-        "(cannot be 'blocked').",
+        help="New stored status: todo, in_progress, done, merged, canceled or "
+        "archived (cannot be 'blocked').",
     ),
     parent: str | None = typer.Option(None, "--parent", help="New parent card id."),
     clear_parent: bool = typer.Option(
