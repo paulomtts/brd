@@ -1,17 +1,39 @@
 import sqlite3
+import time
 import uuid
 from pathlib import Path
 
-from brd.errors import MigrationError
+from brd.errors import MigrationError, ProjectAlreadyExistsError
 from brd.models import Card, Project
+
+_BUSY_TIMEOUT = 10
+
+
+def _use_wal(conn: sqlite3.Connection) -> None:
+    # Switching a brand-new file to WAL can fail at once with "database is
+    # locked" while another connection does the same: SQLite does not run the
+    # busy handler there. Retry for as long as the busy timeout would wait.
+    deadline = time.monotonic() + _BUSY_TIMEOUT
+    while True:
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+            return
+        except sqlite3.OperationalError as exc:
+            if "locked" not in str(exc) or time.monotonic() >= deadline:
+                raise
+            time.sleep(0.01)
 
 
 def connect(db_path: Path) -> sqlite3.Connection:
     # Wait for concurrent writers (e.g. parallel first-run migrations)
     # instead of failing immediately with "database is locked".
-    conn = sqlite3.connect(db_path, timeout=10)
+    conn = sqlite3.connect(db_path, timeout=_BUSY_TIMEOUT)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
+    try:
+        _use_wal(conn)
+    except BaseException:
+        conn.close()
+        raise
     conn.execute("PRAGMA foreign_keys=ON")
     return conn
 
@@ -331,7 +353,7 @@ def _rebuild_table(
     conn.execute(f"ALTER TABLE {table}_new RENAME TO {table}")
 
 
-def _migrate_to_v4(conn: sqlite3.Connection, project: Project) -> None:
+def _migrate_to_v4(conn: sqlite3.Connection, project: Project | None) -> None:
     # Drop the register triggers first: ALTER TABLE RENAME re-parses every
     # trigger, and their INSERT INTO entities would break the rebuilds.
     for table, _ in _ENTITY_KINDS:
@@ -340,12 +362,15 @@ def _migrate_to_v4(conn: sqlite3.Connection, project: Project) -> None:
     # replaces it.
     conn.execute("DROP TABLE IF EXISTS projects")
     conn.execute(_PROJECTS_SQL.format(name="projects"))
-    conn.execute(
-        "INSERT INTO projects (id, name, root_path, created_at) VALUES (?, ?, ?, ?)",
-        (project.id, project.name, project.root_path, project.created_at),
-    )
+    # No project: brd.db's empty schema, with no rows to stamp.
+    project_id = project.id if project is not None else None
+    if project is not None:
+        conn.execute(
+            "INSERT INTO projects (id, name, root_path, created_at) VALUES (?, ?, ?, ?)",
+            (project.id, project.name, project.root_path, project.created_at),
+        )
     _rebuild_table(
-        conn, "entities", _ENTITIES_SQL, "id, kind, project_id", "id, kind, ?", (project.id,)
+        conn, "entities", _ENTITIES_SQL, "id, kind, project_id", "id, kind, ?", (project_id,)
     )
     _rebuild_table(
         conn,
@@ -353,7 +378,7 @@ def _migrate_to_v4(conn: sqlite3.Connection, project: Project) -> None:
         _DOCUMENTS_SQL,
         f"id, project_id, {_DOCUMENT_COLUMNS}",
         f"id, ?, {_DOCUMENT_COLUMNS}",
-        (project.id,),
+        (project_id,),
     )
     _rebuild_table(
         conn, "blocked_by", _V4_BLOCKED_BY_SQL, "card_id, blocks_on_id", "card_id, blocks_on_id"
@@ -433,10 +458,22 @@ def init_project_schema(conn: sqlite3.Connection, project: Project) -> None:
     migrate_project(conn, project)
 
 
+def init_brd_schema(conn: sqlite3.Connection) -> None:
+    """Build brd.db's empty v4 schema: the migrations a fresh board runs, so
+    the two cannot drift, but with no projects row. Runs inside the caller's
+    transaction with foreign keys off, as migrate_project runs them; the
+    caller sets user_version and commits."""
+    _migrate_to_v1(conn)
+    _migrate_to_v2(conn)
+    _migrate_to_v3(conn)
+    _migrate_to_v4(conn, None)
+
+
 def docs_dir(conn: sqlite3.Connection) -> Path:
-    """Directory holding document backups: next to the db, `<db stem>.docs`."""
+    """Directory holding document backups: `docs/` next to the db file. For
+    brd.db that is paths.docs_dir()."""
     main = next(row for row in conn.execute("PRAGMA database_list") if row["name"] == "main")
-    return Path(main["file"]).with_suffix(".docs")
+    return Path(main["file"]).parent / "docs"
 
 
 def _row_to_project(row: sqlite3.Row) -> Project:
@@ -472,9 +509,53 @@ def get_project(conn: sqlite3.Connection, root_path: str) -> Project | None:
     return _row_to_project(row) if row else None
 
 
-def delete_project(conn: sqlite3.Connection, root_path: str) -> None:
-    conn.execute("DELETE FROM projects WHERE root_path = ?", (root_path,))
-    conn.commit()
+def get_project_by_id(conn: sqlite3.Connection, project_id: str) -> Project | None:
+    row = conn.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
+    return _row_to_project(row) if row else None
+
+
+def relink_project(
+    conn: sqlite3.Connection, project_id: str, root_path: str, name: str | None
+) -> Project:
+    """Point project_id at root_path, renaming it when name is given; id and
+    created_at stay. No commit: the caller's transaction covers its lookup
+    and this update. The UNIQUE root_path is the conflict check."""
+    try:
+        conn.execute(
+            "UPDATE projects SET root_path = ?, name = COALESCE(?, name) WHERE id = ?",
+            (root_path, name, project_id),
+        )
+    except sqlite3.IntegrityError:
+        other = get_project(conn, root_path)
+        if other is None:
+            raise
+        raise ProjectAlreadyExistsError(
+            f"{root_path} is already the root of project {other.name} ({other.id})"
+        ) from None
+    return get_project_by_id(conn, project_id)
+
+
+def deepest_project(conn: sqlite3.Connection, root_paths: list[str]) -> Project | None:
+    """The project registered at the longest of root_paths, or None. An exact
+    IN match, so `%` and `_` in a path are plain characters."""
+    marks = ", ".join("?" for _ in root_paths)
+    row = conn.execute(
+        f"SELECT * FROM projects WHERE root_path IN ({marks}) "
+        "ORDER BY length(root_path) DESC LIMIT 1",
+        root_paths,
+    ).fetchone()
+    return _row_to_project(row) if row else None
+
+
+def delete_project(conn: sqlite3.Connection, project_id: str) -> None:
+    """Delete the project and, through the cascade, everything it owns. Edges
+    from other projects that point at its entities have no foreign key to
+    cascade through, so they go explicitly, in the same transaction."""
+    owned = "SELECT id FROM entities WHERE project_id = ?"
+    with conn:
+        conn.execute(f"DELETE FROM blocked_by WHERE blocks_on_id IN ({owned})", (project_id,))
+        conn.execute(f"DELETE FROM refs WHERE dst_id IN ({owned})", (project_id,))
+        conn.execute("DELETE FROM projects WHERE id = ?", (project_id,))
 
 
 def in_project(id_column: str) -> str:

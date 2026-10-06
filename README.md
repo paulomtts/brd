@@ -37,11 +37,25 @@ brd tag list                              # all tags with counts
 
 ## Storage
 
-`brd init` creates a gitignored `.brd` marker file in the project root
-and stores the actual board in a per-project SQLite file under
-`~/.local/share/brd/` (or `$XDG_DATA_HOME/brd`), keyed by the project's
-absolute path. Nothing project-specific is committed to git; a board
-doesn't automatically travel with a clone to another machine.
+`brd init` registers the current directory in `~/.local/share/brd/brd.db`
+(or `$XDG_DATA_HOME/brd/brd.db`) and writes nothing into the repo. Every
+project's board lives in that one file. A command uses the registered
+project whose root is the current directory or its deepest ancestor, so
+it works from any subdirectory, and nested projects are allowed: inside
+a nested project, its own root wins. Nothing project-specific is
+committed to git; a board doesn't automatically travel with a clone to
+another machine.
+
+If you move a repo, run `brd init --relink <old-path-or-id>` in its new
+location: the existing project, with its id and board, now lives at the
+current directory. `brd forget --project <id>` removes a project whose
+directory is gone; `brd projects` lists the ids.
+
+Older versions of brd wrote a `.brd` marker file and added `.brd` to
+`.gitignore`. brd now ignores both; delete them by hand if you like.
+Boards stored in the very old in-repo `.brd/` directory or UUID-marker
+formats are no longer imported: open them once with the last release
+that still used per-project databases before upgrading.
 
 To keep a durable, diffable record in git and move a board between
 machines, commit a snapshot and restore from it:

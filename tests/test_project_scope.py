@@ -749,3 +749,59 @@ def test_show_lists_comments_of_a_foreign_card_and_issue(two):
     _comment(two, "k-i", "qi", "on issue")
     assert [c["id"] for c in views.detail(two, "q1")["comments"]] == ["k-c"]
     assert [c["id"] for c in views.detail(two, "qi")["comments"]] == ["k-i"]
+
+
+def _explicit_ref(conn, src_id, dst_id):
+    conn.execute(
+        "INSERT INTO refs (src_id, dst_id, origin) VALUES (?, ?, 'explicit')", (src_id, dst_id)
+    )
+    conn.commit()
+
+
+def test_export_holds_only_the_projects_comments_tags_and_refs(two, root):
+    make_issue(two, "pi")
+    make_document(two, "pd", "pnotes")
+    two.executemany(
+        "INSERT INTO tags (entity_id, tag) VALUES (?, ?)", [("pd", "ptag"), ("pd", "atag")]
+    )
+    _comment(two, "k-p2", "p1", "on p card")  # inserted first: rowid, not id, orders
+    _comment(two, "k-p1", "pi", "on p issue")
+    _comment(two, "k-qc", "q1", "on q card")
+    _comment(two, "k-qi", "qi", "on q issue")
+    _explicit_ref(two, "p1", "pi")
+    _explicit_ref(two, "p1", "p2")
+    _explicit_ref(two, "q1", "q-child")
+    data = snapshot.export(two, P, root)
+    assert [c["id"] for c in data["comments"]] == ["k-p2", "k-p1"]
+    assert data["comments"][0] == {
+        "id": "k-p2", "entity_id": "p1", "author": "me", "body": "on p card", "created_at": NOW
+    }
+    assert data["tags"] == [{"entity_id": "pd", "tag": "atag"}, {"entity_id": "pd", "tag": "ptag"}]
+    assert data["refs"] == [
+        {"src_id": "p1", "dst_id": "p2", "origin": "explicit"},
+        {"src_id": "p1", "dst_id": "pi", "origin": "explicit"},
+    ]
+    still = two.execute(
+        "SELECT (SELECT COUNT(*) FROM comments WHERE entity_id IN ('q1', 'qi')), "
+        "(SELECT COUNT(*) FROM tags WHERE entity_id = 'qd'), "
+        "(SELECT COUNT(*) FROM refs WHERE src_id = 'q1')"
+    ).fetchone()
+    assert tuple(still) == (2, 1, 1)
+
+
+def test_export_of_a_project_without_comments_tags_or_refs_is_empty(two, root):
+    _comment(two, "k-qc", "q1", "on q card")
+    _explicit_ref(two, "q1", "q-child")  # Q's qd is already tagged qtag
+    data = snapshot.export(two, P, root)
+    assert (data["comments"], data["tags"], data["refs"]) == ([], [], [])
+
+
+def test_export_keeps_a_ref_to_another_projects_entity(two, root):
+    _explicit_ref(two, "p1", "qi")
+    _explicit_ref(two, "q1", "p1")
+    assert snapshot.export(two, P, root)["refs"] == [
+        {"src_id": "p1", "dst_id": "qi", "origin": "explicit"}
+    ]
+    assert snapshot.export(two, Q, root)["refs"] == [
+        {"src_id": "q1", "dst_id": "p1", "origin": "explicit"}
+    ]

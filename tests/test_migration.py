@@ -190,7 +190,7 @@ def test_delete_card_goes_through_entities(v0_path):
 
 def test_docs_dir_sits_next_to_the_db(tmp_path):
     conn = db.connect(tmp_path / "project.db")
-    assert db.docs_dir(conn).resolve() == (tmp_path / "project.docs").resolve()
+    assert db.docs_dir(conn).resolve() == (tmp_path / "docs").resolve()
 
 
 def test_project_docs_dir_matches_db_path(tmp_path, monkeypatch):
@@ -361,3 +361,21 @@ def test_migrate_project_rejects_v4_board_with_no_project(tmp_path):
     with pytest.raises(MigrationError, match="no project") as excinfo:
         db.migrate_project(conn, PROJECT)
     assert PROJECT.id in str(excinfo.value)
+
+
+def test_brd_schema_matches_a_fresh_board_without_its_project(tmp_path):
+    board = db.connect(tmp_path / "board.db")
+    db.migrate_project(board, PROJECT)
+    brd = db.connect(tmp_path / "brd.db")
+    brd.execute("PRAGMA foreign_keys=OFF")
+    brd.execute("BEGIN IMMEDIATE")
+    db.init_brd_schema(brd)
+    brd.commit()
+
+    query = "SELECT type, name, tbl_name, sql FROM sqlite_master ORDER BY type, name"
+    assert [tuple(r) for r in brd.execute(query)] == [tuple(r) for r in board.execute(query)]
+    assert _rows(brd, "projects") == []
+    # The caller sets the version once its own work is done.
+    assert brd.execute("PRAGMA user_version").fetchone()[0] == 0
+    board.close()
+    brd.close()

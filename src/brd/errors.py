@@ -6,6 +6,10 @@ class ProjectNotFoundError(BrdError):
     pass
 
 
+class ProjectAlreadyExistsError(BrdError):
+    pass
+
+
 class MigrationError(BrdError):
     pass
 

@@ -50,3 +50,14 @@ def test_project_db_path_differs_per_root(monkeypatch, tmp_path):
     repo2.mkdir()
 
     assert paths.project_db_path(repo1) != paths.project_db_path(repo2)
+
+
+def test_brd_db_path(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    assert paths.brd_db_path() == tmp_path / "brd" / "brd.db"
+
+
+def test_docs_dir_sits_in_the_data_dir_and_is_not_created(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    assert paths.docs_dir() == tmp_path / "brd" / "docs"
+    assert not paths.docs_dir().exists()

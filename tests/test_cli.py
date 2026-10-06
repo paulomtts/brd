@@ -1,4 +1,5 @@
 import json
+import shutil
 import uuid
 
 import pytest
@@ -55,8 +56,15 @@ def test_init_registers_project(isolated_env):
     payload = json.loads(result.stdout)
     assert payload["ok"] is True
     assert payload["data"]["name"] == "myrepo"
-    assert (isolated_env / ".brd").is_file()
-    assert paths.project_db_path(isolated_env).is_file()
+    assert set(payload["data"]) == {"id", "name", "root_path", "created_at"}
+    assert payload["data"]["root_path"] == str(isolated_env)
+    assert list(isolated_env.iterdir()) == []
+    conn = db.connect(paths.brd_db_path())
+    try:
+        stored = conn.execute("SELECT name, root_path FROM projects").fetchall()
+    finally:
+        conn.close()
+    assert [tuple(r) for r in stored] == [("myrepo", str(isolated_env))]
 
 
 def test_init_twice_succeeds_and_preserves_cards(isolated_env):
@@ -87,6 +95,80 @@ def test_init_pretty_flag_switches_off_json(isolated_env, flag):
     with pytest.raises(json.JSONDecodeError):
         json.loads(result.stdout)
     assert "myrepo" in result.stdout
+
+
+def _moved(tmp_path, monkeypatch):
+    """init + one card in old/, then old/ renamed to new/ and the cwd moved there."""
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    old = tmp_path / "old"
+    new = tmp_path / "new"
+    old.mkdir()
+    monkeypatch.chdir(old)
+    project = ok("init")
+    ok("add", "--title", "Moved card")
+    old.rename(new)
+    monkeypatch.chdir(new)
+    return project, old, new
+
+
+def test_init_relink_by_old_root_brings_the_board_along(tmp_path, monkeypatch):
+    project, old, new = _moved(tmp_path, monkeypatch)
+    assert err("list") == "ProjectNotFoundError"
+
+    relinked = ok("init", "--relink", old)
+
+    assert relinked == {**project, "root_path": str(new)}
+    assert [card["title"] for card in ok("list")] == ["Moved card"]
+
+
+def test_init_relink_by_id_brings_the_board_along(tmp_path, monkeypatch):
+    project, old, new = _moved(tmp_path, monkeypatch)
+
+    relinked = ok("init", "--relink", project["id"], "--name", "renamed")
+
+    assert relinked == {**project, "root_path": str(new), "name": "renamed"}
+    assert [card["title"] for card in ok("list")] == ["Moved card"]
+    assert ok("projects") == [relinked]
+
+
+def test_init_relink_with_an_unknown_id_is_not_found(tmp_path, monkeypatch):
+    project, old, new = _moved(tmp_path, monkeypatch)
+
+    assert err("init", "--relink", str(uuid.uuid4())) == "ProjectNotFoundError"
+    assert ok("projects") == [project]
+
+
+def test_init_relink_onto_another_projects_root_is_refused(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    a = tmp_path / "a"
+    b = tmp_path / "b"
+    a.mkdir()
+    b.mkdir()
+    monkeypatch.chdir(a)
+    project_a = ok("init")
+    monkeypatch.chdir(b)
+    ok("init")
+    before = ok("projects")
+
+    assert err("init", "--relink", project_a["id"]) == "ProjectAlreadyExistsError"
+    assert ok("projects") == before
+
+
+def test_init_relink_pretty_flag_switches_off_json(tmp_path, monkeypatch):
+    project, old, new = _moved(tmp_path, monkeypatch)
+
+    result = invoke("init", "--relink", old, "--pretty")
+
+    assert result.exit_code == 0, result.output
+    with pytest.raises(json.JSONDecodeError):
+        json.loads(result.stdout)
+    assert str(new) in result.stdout
+
+
+def test_init_help_mentions_relink():
+    result = invoke("init", "--help")
+    assert result.exit_code == 0
+    assert "--relink" in result.output
 
 
 def test_projects_lists_registered_projects(isolated_env):
@@ -124,7 +206,11 @@ def test_forget_removes_current_project(isolated_env):
     assert payload["ok"] is True
     assert payload["data"]["name"] == "myrepo"
     assert not (isolated_env / ".brd").exists()
-    assert not paths.project_db_path(isolated_env).is_file()
+    conn = db.connect(paths.brd_db_path())
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM projects").fetchone()[0] == 0
+    finally:
+        conn.close()
 
     projects_result = runner.invoke(app, ["projects"])
     assert json.loads(projects_result.stdout)["data"] == []
@@ -157,6 +243,49 @@ def test_forget_pretty_flag_switches_off_json(isolated_env, flag):
     with pytest.raises(json.JSONDecodeError):
         json.loads(result.stdout)
     assert "myrepo" in result.stdout
+
+
+def test_forget_project_option_works_after_the_repo_is_deleted(
+    isolated_env, tmp_path, monkeypatch
+):
+    project = ok("init")
+    monkeypatch.chdir(tmp_path)
+    shutil.rmtree(isolated_env)
+
+    assert ok("forget", "--project", project["id"]) == project
+    assert ok("projects") == []
+
+
+def test_forget_project_option_with_an_unknown_id_is_not_found(isolated_env):
+    project = ok("init")
+
+    assert err("forget", "--project", str(uuid.uuid4())) == "ProjectNotFoundError"
+    assert ok("projects") == [project]
+
+
+def test_forget_from_a_subdirectory_forgets_the_enclosing_project(
+    isolated_env, monkeypatch
+):
+    project = ok("init")
+    sub = isolated_env / "sub"
+    sub.mkdir()
+    monkeypatch.chdir(sub)
+
+    assert ok("forget") == project
+    assert ok("projects") == []
+
+
+def test_forget_refuses_both_a_path_and_project(isolated_env):
+    project = ok("init")
+
+    assert err("forget", isolated_env, "--project", project["id"]) == "UsageError"
+    assert ok("projects") == [project]
+
+
+def test_forget_help_mentions_project_option():
+    result = invoke("forget", "--help")
+    assert result.exit_code == 0
+    assert "--project" in result.output
 
 
 def _last_json_line(output: str) -> dict:
@@ -553,6 +682,8 @@ def test_import_round_trips_a_board_into_a_fresh_project(isolated_env, monkeypat
     snapshot_file = isolated_env.parent / "snapshot.json"
     snapshot_file.write_text(tree_result.stdout)
 
+    # A second install: one install's projects share brd.db, where these ids exist.
+    monkeypatch.setenv("XDG_DATA_HOME", str(isolated_env.parent / "other-data"))
     other_repo = isolated_env.parent / "other-repo"
     other_repo.mkdir()
     monkeypatch.chdir(other_repo)
@@ -757,7 +888,7 @@ FOREIGN = "f0f0f0f0-0000-4000-8000-000000000000"
 def foreign(project):
     """Seed another project and its card FOREIGN into the current board file.
     No command can do this until every project shares one database."""
-    conn = db.connect(paths.project_db_path(project))
+    conn = db.connect(paths.brd_db_path())
     try:
         add_project(conn, OTHER_PROJECT)
         make_card(conn, FOREIGN, title="Foreign", project_id=OTHER_PROJECT.id)
@@ -774,7 +905,7 @@ FOREIGN_DOC = "f2f2f2f2-0000-4000-8000-000000000000"
 def foreign_entities(project, foreign):
     """Besides card FOREIGN, the other project owns the open issue
     FOREIGN_ISSUE and the document FOREIGN_DOC (stem `notes`, tag `t`)."""
-    conn = db.connect(paths.project_db_path(project))
+    conn = db.connect(paths.brd_db_path())
     try:
         make_issue(conn, FOREIGN_ISSUE, title="Foreign issue", project_id=OTHER_PROJECT.id)
         make_document(
@@ -858,7 +989,7 @@ def test_show_is_global_and_names_the_owner(foreign):
         "id": OTHER_PROJECT.id,
         "name": OTHER_PROJECT.name,
     }
-    registered = ok("projects")[0]
+    registered = next(p for p in ok("projects") if p["id"] != OTHER_PROJECT.id)
     assert ok("show", mine)["project"] == {"id": registered["id"], "name": registered["name"]}
     assert "project" not in ok("list")[0]
     assert err("show", "nope") == "CardNotFoundError"
@@ -912,7 +1043,7 @@ def test_tag_commands_are_scoped_to_this_project(foreign_entities):
 
 
 def test_comment_commands_are_scoped_to_this_project(project, foreign_entities):
-    conn = db.connect(paths.project_db_path(project))
+    conn = db.connect(paths.brd_db_path())
     try:
         conn.execute(
             "INSERT INTO comments (id, entity_id, author, body, created_at) "
@@ -930,3 +1061,51 @@ def test_comment_commands_are_scoped_to_this_project(project, foreign_entities):
     _refused("comment", "delete", "k-foreign", error_type="CommentNotFoundError")
     assert ok("show", foreign_entities["issue"])["comments"] == []
     assert [c["id"] for c in ok("show", foreign_entities["card"])["comments"]] == ["k-foreign"]
+
+
+def test_forget_removes_only_the_current_projects_rows_and_backups(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    ids = {}
+    for name in ("keep", "gone"):
+        root = tmp_path / name
+        root.mkdir()
+        monkeypatch.chdir(root)
+        ok("init")
+        (root / "notes.md").write_text(f"{name} notes")
+        parent = ok("add", "--title", "Parent")
+        child = ok("add", "--title", "Child", "--parent", parent["id"])
+        issue = ok("issue", "open", "--title", "Q", "--blocks", child["id"])
+        ok("comment", "add", child["id"], "progress")
+        doc = ok("doc", "add", "notes.md", "--tag", "design")
+        ids[name] = {"parent": parent["id"], "child": child["id"], "issue": issue["id"], "doc": doc["id"]}
+
+    monkeypatch.chdir(tmp_path / "gone")
+    assert ok("forget")["name"] == "gone"
+
+    assert not (paths.docs_dir() / f"{ids['gone']['doc']}.md").exists()
+    assert (paths.docs_dir() / f"{ids['keep']['doc']}.md").read_text() == "keep notes"
+    gone = list(ids["gone"].values())
+    marks = ", ".join("?" for _ in gone)
+    conn = db.connect(paths.brd_db_path())
+    try:
+        assert [r[0] for r in conn.execute("SELECT root_path FROM projects")] == [
+            str(tmp_path / "keep")
+        ]
+        for table, column in (
+            ("entities", "id"),
+            ("comments", "entity_id"),
+            ("tags", "entity_id"),
+            ("blocked_by", "card_id"),
+            ("blocked_by", "blocks_on_id"),
+            ("refs", "src_id"),
+        ):
+            count = conn.execute(
+                f"SELECT COUNT(*) FROM {table} WHERE {column} IN ({marks})", gone
+            ).fetchone()[0]
+            assert count == 0, (table, column)
+    finally:
+        conn.close()
+    monkeypatch.chdir(tmp_path / "keep")
+    assert {c["id"] for c in ok("list")} == {ids["keep"]["parent"], ids["keep"]["child"]}
+    assert ok("show", ids["keep"]["doc"])["tags"] == ["design"]
+    assert len(ok("show", ids["keep"]["child"])["comments"]) == 1

@@ -20,19 +20,17 @@ def test_commands_migrate_a_v0_board(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
     repo = tmp_path / "repo"
     repo.mkdir()
-    (repo / ".brd").write_text("")
     monkeypatch.chdir(repo)
-    master_conn = master._master_conn()
+    project = Project(
+        id=db.new_project_id(),
+        name="repo",
+        root_path=str(repo),
+        created_at="2026-01-01T00:00:00",
+    )
+    master_conn = db.connect(paths.master_db_path())
     try:
-        db.upsert_project(
-            master_conn,
-            Project(
-                id=db.new_project_id(),
-                name="repo",
-                root_path=str(repo),
-                created_at="2026-01-01T00:00:00",
-            ),
-        )
+        db.init_master_schema(master_conn)
+        db.upsert_project(master_conn, project)
     finally:
         master_conn.close()
     legacy = sqlite3.connect(paths.project_db_path(repo))
@@ -46,8 +44,17 @@ def test_commands_migrate_a_v0_board(tmp_path, monkeypatch):
     legacy.close()
 
     assert [c["id"] for c in ok("list")] == ["c1"]
-    conn = db.connect(paths.project_db_path(repo))
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION
+    conn = db.connect(paths.brd_db_path())
+    try:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION
+        assert conn.execute("SELECT project_id FROM entities WHERE id = 'c1'").fetchone()[0] == (
+            project.id
+        )
+    finally:
+        conn.close()
+    board = paths.project_db_path(repo)
+    assert not board.exists()
+    assert board.with_name(board.name + ".migrated").is_file()
 
 
 def test_domain_errors_become_envelopes(project):
@@ -98,11 +105,10 @@ def test_open_project_through_a_symlinked_cwd_resolves_the_same_project(
         ctx.conn.close()
 
 
-def test_unregistered_marker_is_a_project_not_found_envelope(tmp_path, monkeypatch):
+def test_unregistered_dir_is_a_project_not_found_envelope(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
     repo = tmp_path / "repo"
     repo.mkdir()
-    (repo / ".brd").write_text("")
     monkeypatch.chdir(repo)
 
     result = invoke("list")
@@ -112,12 +118,50 @@ def test_unregistered_marker_is_a_project_not_found_envelope(tmp_path, monkeypat
     assert error["type"] == "ProjectNotFoundError"
     assert "brd init" in error["message"]
     assert str(repo) in error["message"]
-    assert not paths.project_db_path(repo).exists()
+    conn = db.connect(paths.brd_db_path())
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM projects").fetchone()[0] == 0
+    finally:
+        conn.close()
 
 
-def test_open_project_closes_connection_when_migration_fails(project, monkeypatch):
-    from brd.errors import MigrationError
+def test_commands_from_a_deep_subdirectory_use_the_enclosing_project(project, monkeypatch):
+    card = ok("add", "--title", "Root card")
+    deeper = project / "sub" / "deeper"
+    deeper.mkdir(parents=True)
+    monkeypatch.chdir(deeper)
 
+    assert [c["id"] for c in ok("list")] == [card["id"]]
+
+
+def test_nested_init_makes_the_deepest_root_win(project, monkeypatch):
+    sub = project / "sub"
+    (sub / "x").mkdir(parents=True)
+    root_card = ok("add", "--title", "Root card")
+    monkeypatch.chdir(sub)
+    ok("init")
+    monkeypatch.chdir(sub / "x")
+    sub_card = ok("add", "--title", "Sub card")
+
+    monkeypatch.chdir(sub)
+    assert [c["id"] for c in ok("list")] == [sub_card["id"]]
+    monkeypatch.chdir(project)
+    assert [c["id"] for c in ok("list")] == [root_card["id"]]
+
+
+def test_a_stale_marker_in_a_subdirectory_does_not_hide_the_enclosing_project(
+    project, monkeypatch
+):
+    card = ok("add", "--title", "Root card")
+    sub = project / "sub"
+    sub.mkdir()
+    (sub / ".brd").write_text("")
+    monkeypatch.chdir(sub)
+
+    assert [c["id"] for c in ok("list")] == [card["id"]]
+
+
+def _track_connections(monkeypatch):
     opened = []
     real_connect = db.connect
 
@@ -126,13 +170,45 @@ def test_open_project_closes_connection_when_migration_fails(project, monkeypatc
         opened.append(conn)
         return conn
 
-    def failing_migrate(conn, project):
-        raise MigrationError("boom")
-
     monkeypatch.setattr(db, "connect", tracking_connect)
-    monkeypatch.setattr(db, "migrate_project", failing_migrate)
-    assert err("list") == "MigrationError"
-    assert len(opened) == 2
+    return opened
+
+
+def _assert_all_closed(opened):
+    assert opened
     for conn in opened:
         with pytest.raises(sqlite3.ProgrammingError, match="closed"):
             conn.execute("SELECT 1")
+
+
+def test_open_project_closes_connection_when_the_root_is_not_registered(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    monkeypatch.chdir(repo)
+    opened = _track_connections(monkeypatch)
+
+    assert err("list") == "ProjectNotFoundError"
+    _assert_all_closed(opened)
+
+
+def test_open_project_closes_connection_when_migration_fails(tmp_path, monkeypatch):
+    from brd import consolidate
+    from brd.errors import MigrationError
+
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    monkeypatch.chdir(repo)
+    registry = db.connect(paths.master_db_path())
+    db.init_master_schema(registry)
+    registry.close()
+
+    def failing_migrate(conn):
+        raise MigrationError("boom")
+
+    monkeypatch.setattr(consolidate, "migrate", failing_migrate)
+    opened = _track_connections(monkeypatch)
+
+    assert err("list") == "MigrationError"
+    _assert_all_closed(opened)

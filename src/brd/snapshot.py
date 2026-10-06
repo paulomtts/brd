@@ -29,19 +29,29 @@ def export(conn: sqlite3.Connection, project_id: str, root: Path) -> dict:
         "comments": [
             dict(row)
             for row in conn.execute(
-                "SELECT id, entity_id, author, body, created_at FROM comments "
-                "ORDER BY created_at, rowid"
+                "SELECT comments.id, comments.entity_id, comments.author, comments.body, "
+                f"comments.created_at FROM comments {db.in_project('comments.entity_id')} "
+                "ORDER BY comments.created_at, comments.rowid",
+                (project_id,),
             )
         ],
         "tags": [
             dict(row)
-            for row in conn.execute("SELECT entity_id, tag FROM tags ORDER BY entity_id, tag")
+            for row in conn.execute(
+                f"SELECT tags.entity_id, tags.tag FROM tags {db.in_project('tags.entity_id')} "
+                "ORDER BY tags.entity_id, tags.tag",
+                (project_id,),
+            )
         ],
         "refs": [
             dict(row)
+            # Scoped by source only: edges are exported as stored, so a ref
+            # to another project's entity stays.
             for row in conn.execute(
-                "SELECT src_id, dst_id, origin FROM refs WHERE origin = 'explicit' "
-                "ORDER BY src_id, dst_id"
+                "SELECT refs.src_id, refs.dst_id, refs.origin FROM refs "
+                f"{db.in_project('refs.src_id')} WHERE refs.origin = 'explicit' "
+                "ORDER BY refs.src_id, refs.dst_id",
+                (project_id,),
             )
         ],
     }

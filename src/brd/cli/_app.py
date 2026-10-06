@@ -6,7 +6,7 @@ from typing import Any, NoReturn
 
 import typer
 
-from brd import db, master, output, paths
+from brd import master, output
 from brd.errors import BrdError
 from brd.models import Project
 
@@ -62,11 +62,11 @@ def fail(exc: BrdError, pretty: bool) -> NoReturn:
 
 
 def open_project() -> Ctx:
-    root = master.resolve_project_root(Path.cwd())
-    project = master.registered_project(root)
-    conn = db.connect(paths.project_db_path(root))
+    # Connect (and so migrate) first: any data command on an unmigrated
+    # install migrates, even one run outside a project.
+    conn = master.connect()
     try:
-        db.migrate_project(conn, project)
+        project = master.resolve_project(conn, Path.cwd())
     except BaseException:
         conn.close()
         raise
