@@ -56,8 +56,10 @@ def test_help_states_the_blocking_contract():
 
 def test_help_names_every_releasing_status():
     text = _help_text()
+    # Only the blocking section counts: "done" appears elsewhere in the help.
+    section = text[text.index("Blocking:") : text.index("Documents are registered")]
     for status in sorted(core._RELEASING_STATUSES):
-        assert status in text, status
+        assert status in section, status
 
 
 def test_prompt_states_the_blocking_contract():
