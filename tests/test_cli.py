@@ -7,8 +7,16 @@ from typer.testing import CliRunner
 
 from brd import db, paths
 from brd.cli import app
+from brd.models import Project
 from tests.cli_helpers import err, human, invoke, ok
-from tests.factories import OTHER_PROJECT, add_project, make_card, make_document, make_issue
+from tests.factories import (
+    NOW,
+    OTHER_PROJECT,
+    add_project,
+    make_card,
+    make_document,
+    make_issue,
+)
 
 runner = CliRunner()
 
@@ -971,7 +979,87 @@ def test_blocker_targets_may_live_in_another_project(foreign_entities):
 def test_show_pretty_renders_a_foreign_blocker(foreign):
     mine = ok("add", "--title", "mine")["id"]
     ok("block", mine, "--by", foreign)
-    assert "blocked by: [[Foreign]] (card)" in human("show", mine)
+    assert "blocked by: other: Foreign" in human("show", mine).splitlines()
+
+
+def _seed_edges(card_id, *blocker_ids):
+    """blocked_by rows no command would write (a missing or document target,
+    or one from another project's card)."""
+    conn = db.connect(paths.brd_db_path())
+    try:
+        for blocker_id in blocker_ids:
+            db.add_blocked_by_edge(conn, card_id, blocker_id)
+    finally:
+        conn.close()
+
+
+def test_show_pretty_renders_a_foreign_issue_blocker(foreign_entities):
+    mine = ok("add", "--title", "mine", "--blocked-by", FOREIGN_ISSUE)["id"]
+    assert "blocked by: other: Foreign issue" in human("show", mine).splitlines()
+
+
+def test_a_foreign_document_blocker_renders_and_never_blocks(foreign_entities):
+    mine = ok("add", "--title", "mine")["id"]
+    _seed_edges(mine, FOREIGN_DOC)
+    shown = ok("show", mine)
+    assert shown["status"] == "todo"
+    assert shown["blockers"] == [
+        {
+            "id": FOREIGN_DOC,
+            "kind": "document",
+            "project": {"id": OTHER_PROJECT.id, "name": OTHER_PROJECT.name},
+            "title": "notes",
+            "status": None,
+            "released": True,
+        }
+    ]
+    assert "blocked by: other: notes" in human("show", mine).splitlines()
+
+
+def test_show_pretty_mixed_blockers_keep_order(foreign):
+    lexer = ok("add", "--title", "Lexer")["id"]
+    mine = ok("add", "--title", "mine", "--blocked-by", lexer, "--blocked-by", foreign)["id"]
+    _seed_edges(mine, "ghost")
+    rendered = {lexer: "[[Lexer]] (card)", foreign: "other: Foreign", "ghost": "not-found ghost"}
+    blocked_by = ok("show", mine)["blocked_by"]
+    assert sorted(blocked_by) == sorted(rendered)
+    expected = "blocked by: " + ", ".join(rendered[b] for b in blocked_by)
+    assert expected in human("show", mine).splitlines()
+
+
+def test_show_pretty_of_a_foreign_card_treats_its_own_project_as_local(foreign):
+    here = ok("add", "--title", "Here")
+    conn = db.connect(paths.brd_db_path())
+    try:
+        make_card(conn, "F2", title="F2", project_id=OTHER_PROJECT.id)
+    finally:
+        conn.close()
+    _seed_edges("F2", foreign, here["id"])
+    # Shown from this project's cwd, but F2 belongs to `other`: its sibling
+    # card is local and this project's card is the foreign one.
+    here_name = ok("show", here["id"])["project"]["name"]
+    rendered = {foreign: "[[Foreign]] (card)", here["id"]: f"{here_name}: Here"}
+    blocked_by = ok("show", "F2")["blocked_by"]
+    expected = "blocked by: " + ", ".join(rendered[b] for b in blocked_by)
+    assert expected in human("show", "F2").splitlines()
+
+
+def test_show_pretty_tells_a_same_named_project_apart_by_id(project):
+    mine = ok("add", "--title", "mine")["id"]
+    twin = Project(
+        id="33333333-3333-4333-8333-333333333333",
+        name=ok("show", mine)["project"]["name"],  # the cwd project's own name
+        root_path="/twin",
+        created_at=NOW,
+    )
+    conn = db.connect(paths.brd_db_path())
+    try:
+        add_project(conn, twin)
+        make_card(conn, "twin-card", title="Twin", project_id=twin.id)
+    finally:
+        conn.close()
+    ok("block", mine, "--by", "twin-card")
+    assert f"blocked by: {twin.name}: Twin" in human("show", mine).splitlines()
 
 
 def _blocker_entry(id_, kind, title, status, released, project=OTHER_PROJECT):
@@ -1072,9 +1160,9 @@ def test_forget_leaves_a_foreign_card_blocked_until_unblocked(tmp_path, monkeypa
     assert shown["blockers"] == gone
     assert [c["blockers"] for c in ok("list")] == [gone]
     assert [n["blockers"] for n in ok("tree")] == [gone]
-    assert f"not-found {theirs}" in human("show", mine)
-    human("list")
-    human("tree")
+    assert f"blocked by: not-found {theirs}" in human("show", mine).splitlines()
+    # list, next and tree --pretty print no blockers, and still none.
+    assert "blocked by" not in human("list") + human("tree")
 
     unblocked = ok("unblock", mine, "--by", theirs)
     assert (unblocked["blocked_by"], unblocked["status"]) == ([], "todo")
