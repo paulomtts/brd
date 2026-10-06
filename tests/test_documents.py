@@ -11,7 +11,7 @@ from brd.errors import (
     PathOutsideProjectError,
     RestoreConflictError,
 )
-from tests.factories import PROJECT
+from tests.factories import OTHER_PROJECT, PROJECT, add_project
 
 
 @pytest.fixture
@@ -268,3 +268,14 @@ def test_delete_document_removes_incoming_refs_without_fk_cascade(pconn, root):
     assert refs.outgoing(pconn, linker.id) == []
     assert not documents.backup_path(pconn, doc.id).exists()
     assert path.read_text() == "v1"
+
+
+def test_add_records_its_project(pconn, root):
+    add_project(pconn, OTHER_PROJECT)
+    doc = documents.add(pconn, OTHER_PROJECT.id, root, write(root, "docs/a.md", "x"))
+    entity = pconn.execute(
+        "SELECT kind, project_id FROM entities WHERE id = ?", (doc.id,)
+    ).fetchone()
+    assert tuple(entity) == ("document", OTHER_PROJECT.id)
+    stored = pconn.execute("SELECT project_id FROM documents WHERE id = ?", (doc.id,)).fetchone()
+    assert stored[0] == OTHER_PROJECT.id

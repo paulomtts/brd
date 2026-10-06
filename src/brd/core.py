@@ -309,6 +309,7 @@ def import_tree(conn: sqlite3.Connection, project_id: str, nodes: list[dict]) ->
         with conn:  # one transaction: all cards and edges, or nothing
             for node, parent_id in flattened:
                 status = "todo" if node["status"] == "blocked" else node["status"]
+                db.insert_entity(conn, project_id, node["id"], "card")
                 conn.execute(
                     "INSERT INTO cards (id, title, description, status, parent_id, "
                     "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",

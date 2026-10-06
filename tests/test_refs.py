@@ -1,6 +1,6 @@
 import pytest
 
-from brd import refs
+from brd import entities, refs
 from brd.errors import EntityNotFoundError, SelfReferenceError
 from tests.factories import make_card, make_document
 
@@ -96,7 +96,7 @@ def test_deleted_target_disappears_from_refs(pconn):
     make_card(pconn, B)
     make_card(pconn, A, description=f"[[{B}]]")
     refs.reindex(pconn, A)
-    pconn.execute("DELETE FROM entities WHERE id = ?", (B,))
+    entities.delete(pconn, B)
     assert refs.outgoing(pconn, A) == []
 
 

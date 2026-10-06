@@ -87,12 +87,13 @@ def open_issue(
             raise CardNotFoundError(f"no card with id {card_id}")
     now = _now()
     issue = Issue(str(uuid.uuid4()), title, body, "open", None, now, now)
-    conn.execute(
-        "INSERT INTO issues (id, title, body, status, close_reason, created_at, updated_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (issue.id, issue.title, issue.body, issue.status, None, now, now),
-    )
-    conn.commit()
+    with conn:
+        db.insert_entity(conn, project_id, issue.id, "issue")
+        conn.execute(
+            "INSERT INTO issues (id, title, body, status, close_reason, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (issue.id, issue.title, issue.body, issue.status, None, now, now),
+        )
     for ref_id in ref_ids:
         refs.add_explicit(conn, issue.id, ref_id)
     for card_id in blocks:

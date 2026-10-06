@@ -5,7 +5,14 @@ import pytest
 
 from brd import db
 from brd.models import Card, Project
-from tests.factories import PROJECT
+from tests.factories import (
+    OTHER_PROJECT,
+    PROJECT,
+    add_project,
+    make_card,
+    make_document,
+    make_issue,
+)
 
 
 @pytest.fixture
@@ -252,6 +259,7 @@ def test_init_project_schema_is_idempotent(conn):
 
 def test_cards_status_check_constraint_rejects_blocked(conn):
     db.init_project_schema(conn, PROJECT)
+    db.insert_entity(conn, PROJECT.id, "c1", "card")
     with pytest.raises(sqlite3.IntegrityError):
         conn.execute(
             "INSERT INTO cards (id, title, description, status, parent_id, "
@@ -292,6 +300,7 @@ def test_projects_id_is_unique_and_required(conn):
 
 
 def _insert_card(conn, card_id, parent_id=None):
+    db.insert_entity(conn, PROJECT.id, card_id, "card")
     conn.execute(
         "INSERT INTO cards (id, title, description, status, parent_id, "
         "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -305,18 +314,19 @@ def test_cards_parent_id_foreign_key_is_enforced(conn):
         _insert_card(conn, "c1", parent_id="ghost")
 
 
-def test_blocked_by_foreign_keys_are_enforced(conn):
-    db.init_project_schema(conn, PROJECT)
-    _insert_card(conn, "c1")
+def test_edge_targets_accept_unknown_ids(pconn):
+    make_card(pconn, "c1")
+    db.add_blocked_by_edge(pconn, "c1", "not-an-entity")
+    pconn.execute(
+        "INSERT INTO refs (src_id, dst_id, origin) VALUES ('c1', 'not-an-entity', 'explicit')"
+    )
+    pconn.commit()
+    assert db.list_blockers_of(pconn, "c1") == ["not-an-entity"]
     with pytest.raises(sqlite3.IntegrityError):
-        conn.execute(
-            "INSERT INTO blocked_by (card_id, blocks_on_id) VALUES (?, ?)",
-            ("c1", "ghost"),
-        )
+        db.add_blocked_by_edge(pconn, "not-an-entity", "c1")
     with pytest.raises(sqlite3.IntegrityError):
-        conn.execute(
-            "INSERT INTO blocked_by (card_id, blocks_on_id) VALUES (?, ?)",
-            ("ghost", "c1"),
+        pconn.execute(
+            "INSERT INTO refs (src_id, dst_id, origin) VALUES ('not-an-entity', 'c1', 'explicit')"
         )
 
 
@@ -652,3 +662,67 @@ def test_blocked_by_edge_writes_commit_so_another_connection_sees_them(tmp_path)
     finally:
         reader.close()
         writer.close()
+
+
+def _ids(conn, sql):
+    return [row[0] for row in conn.execute(sql)]
+
+
+def test_no_register_trigger_so_raw_kind_insert_without_entity_fails(pconn):
+    with pytest.raises(sqlite3.IntegrityError):
+        pconn.execute(
+            "INSERT INTO cards (id, title, status, created_at, updated_at) "
+            "VALUES ('c', 'c', 'todo', 'now', 'now')"
+        )
+    with pytest.raises(sqlite3.IntegrityError):
+        pconn.execute(
+            "INSERT INTO issues (id, title, status, created_at, updated_at) "
+            "VALUES ('i', 'i', 'open', 'now', 'now')"
+        )
+    with pytest.raises(sqlite3.IntegrityError):
+        pconn.execute(
+            "INSERT INTO documents (id, project_id, title, source_path, stem, content_hash, "
+            "created_at, updated_at) VALUES ('d', ?, 'd', 'docs/d.md', 'd', 'h', 'now', 'now')",
+            (PROJECT.id,),
+        )
+    pconn.rollback()
+    assert _count(pconn, "SELECT COUNT(*) FROM entities") == 0
+
+
+def test_document_unique_per_project(pconn):
+    add_project(pconn, OTHER_PROJECT)
+    make_document(pconn, "d1", "a")
+    make_document(pconn, "d2", "a", project_id=OTHER_PROJECT.id)
+    with pytest.raises(sqlite3.IntegrityError, match="UNIQUE"):
+        make_document(pconn, "d3", "a")
+    with pytest.raises(sqlite3.IntegrityError, match="UNIQUE"):
+        make_document(pconn, "d4", "A")
+    assert _ids(pconn, "SELECT id FROM documents ORDER BY id") == ["d1", "d2"]
+    assert _ids(pconn, "SELECT id FROM entities ORDER BY id") == ["d1", "d2"]
+
+
+def test_deleting_project_row_cascades_its_entities(pconn):
+    add_project(pconn, OTHER_PROJECT)
+    for project, n in ((PROJECT, "1"), (OTHER_PROJECT, "2")):
+        make_card(pconn, f"c{n}", project_id=project.id)
+        make_issue(pconn, f"i{n}", project_id=project.id)
+        make_document(pconn, f"d{n}", f"notes{n}", project_id=project.id)
+        pconn.execute(
+            "INSERT INTO comments (id, entity_id, author, body, created_at) "
+            "VALUES (?, ?, 'me', 'hi', 'now')",
+            (f"k{n}", f"c{n}"),
+        )
+        pconn.execute("INSERT INTO tags (entity_id, tag) VALUES (?, 'design')", (f"d{n}",))
+    db.add_blocked_by_edge(pconn, "c2", "c1")
+
+    pconn.execute("DELETE FROM projects WHERE id = ?", (PROJECT.id,))
+    pconn.commit()
+
+    assert _ids(pconn, "SELECT id FROM entities ORDER BY id") == ["c2", "d2", "i2"]
+    assert _ids(pconn, "SELECT id FROM cards") == ["c2"]
+    assert _ids(pconn, "SELECT id FROM issues") == ["i2"]
+    assert _ids(pconn, "SELECT id FROM documents") == ["d2"]
+    assert _ids(pconn, "SELECT id FROM comments") == ["k2"]
+    assert _ids(pconn, "SELECT entity_id FROM tags") == ["d2"]
+    # D8: an incoming edge from a row that survives stays.
+    assert db.list_blockers_of(pconn, "c2") == ["c1"]

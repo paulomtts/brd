@@ -25,6 +25,7 @@ def _copy_cards(old_db_path: Path, new_db_path: Path, project: Project) -> None:
     try:
         db.init_project_schema(new_conn, project)
         for row in old_conn.execute("SELECT * FROM cards"):
+            db.insert_entity(new_conn, project.id, row["id"], "card")
             new_conn.execute(
                 "INSERT INTO cards (id, title, description, status, "
                 "parent_id, created_at, updated_at) "

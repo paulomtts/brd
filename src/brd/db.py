@@ -75,7 +75,7 @@ def init_master_schema(conn: sqlite3.Connection) -> None:
         raise
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 # Stored card statuses ('blocked' is derived, never stored).
 CARD_STATUSES = ("todo", "in_progress", "done", "merged", "canceled", "archived")
@@ -168,6 +168,57 @@ def _register_trigger(table: str, kind: str) -> str:
     )
 
 
+_ENTITIES_SQL = """
+CREATE TABLE {name} (
+    id TEXT PRIMARY KEY,
+    kind TEXT NOT NULL CHECK (kind IN ('card', 'issue', 'document')),
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE
+)
+"""
+
+_DOCUMENTS_SQL = """
+CREATE TABLE {name} (
+    id TEXT PRIMARY KEY REFERENCES entities(id) ON DELETE CASCADE,
+    project_id TEXT NOT NULL,
+    title TEXT NOT NULL,
+    source_path TEXT NOT NULL,
+    stem TEXT NOT NULL COLLATE NOCASE,
+    content_hash TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE (project_id, source_path),
+    UNIQUE (project_id, stem COLLATE NOCASE)
+)
+"""
+
+# From v4 on, edge targets have no foreign key: a target may live in another
+# project, and deleting an entity removes its incoming edges explicitly.
+_V4_BLOCKED_BY_SQL = """
+CREATE TABLE {name} (
+    card_id TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+    blocks_on_id TEXT NOT NULL,
+    PRIMARY KEY (card_id, blocks_on_id)
+)
+"""
+
+_V4_REFS_SQL = """
+CREATE TABLE {name} (
+    src_id TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+    dst_id TEXT NOT NULL,
+    origin TEXT NOT NULL CHECK (origin IN ('explicit', 'link')),
+    PRIMARY KEY (src_id, dst_id, origin)
+)
+"""
+
+_V4_INDEXES = [
+    "CREATE INDEX entities_project ON entities(project_id, kind)",
+    "CREATE INDEX blocked_by_target ON blocked_by(blocks_on_id)",
+    "CREATE INDEX refs_target ON refs(dst_id)",
+]
+
+_DOCUMENT_COLUMNS = "title, source_path, stem, content_hash, created_at, updated_at"
+
+
 def _migrate_to_v1(conn: sqlite3.Connection) -> None:
     tables = {
         row[0]
@@ -240,6 +291,56 @@ def _migrate_to_v3(conn: sqlite3.Connection) -> None:
     conn.execute(_register_trigger("cards", "card"))
 
 
+def _rebuild_table(
+    conn: sqlite3.Connection,
+    table: str,
+    create_sql: str,
+    columns: str,
+    values: str,
+    params: tuple = (),
+) -> None:
+    # SQLite's usual rebuild: create the new shape, copy, drop, rename.
+    # Child foreign keys name the table, so they follow the rename.
+    conn.execute(create_sql.format(name=f"{table}_new"))
+    conn.execute(f"INSERT INTO {table}_new ({columns}) SELECT {values} FROM {table}", params)
+    conn.execute(f"DROP TABLE {table}")
+    conn.execute(f"ALTER TABLE {table}_new RENAME TO {table}")
+
+
+def _migrate_to_v4(conn: sqlite3.Connection, project: Project) -> None:
+    # Drop the register triggers first: ALTER TABLE RENAME re-parses every
+    # trigger, and their INSERT INTO entities would break the rebuilds.
+    for table, _ in _ENTITY_KINDS:
+        conn.execute(f"DROP TRIGGER IF EXISTS {table}_register_entity")
+    # A legacy board may carry a stray projects table; the board's own row
+    # replaces it.
+    conn.execute("DROP TABLE IF EXISTS projects")
+    conn.execute(_PROJECTS_SQL.format(name="projects"))
+    conn.execute(
+        "INSERT INTO projects (id, name, root_path, created_at) VALUES (?, ?, ?, ?)",
+        (project.id, project.name, project.root_path, project.created_at),
+    )
+    _rebuild_table(
+        conn, "entities", _ENTITIES_SQL, "id, kind, project_id", "id, kind, ?", (project.id,)
+    )
+    _rebuild_table(
+        conn,
+        "documents",
+        _DOCUMENTS_SQL,
+        f"id, project_id, {_DOCUMENT_COLUMNS}",
+        f"id, ?, {_DOCUMENT_COLUMNS}",
+        (project.id,),
+    )
+    _rebuild_table(
+        conn, "blocked_by", _V4_BLOCKED_BY_SQL, "card_id, blocks_on_id", "card_id, blocks_on_id"
+    )
+    _rebuild_table(
+        conn, "refs", _V4_REFS_SQL, "src_id, dst_id, origin", "src_id, dst_id, origin"
+    )
+    for statement in _V4_INDEXES:
+        conn.execute(statement)
+
+
 def migrate_project(conn: sqlite3.Connection, project: Project) -> None:
     version = conn.execute("PRAGMA user_version").fetchone()[0]
     if version >= SCHEMA_VERSION:
@@ -262,6 +363,8 @@ def migrate_project(conn: sqlite3.Connection, project: Project) -> None:
             _migrate_to_v2(conn)
         if version < 3:
             _migrate_to_v3(conn)
+        if version < 4:
+            _migrate_to_v4(conn, project)
         violations = conn.execute("PRAGMA foreign_key_check").fetchall()
         if violations:
             raise MigrationError(
@@ -336,21 +439,33 @@ def _row_to_card(row: sqlite3.Row) -> Card:
     )
 
 
-def insert_card(conn: sqlite3.Connection, project_id: str, card: Card) -> None:
+def insert_entity(
+    conn: sqlite3.Connection, project_id: str, entity_id: str, kind: str
+) -> None:
+    # No commit: callers insert the kind row in the same transaction, so the
+    # two land together or not at all.
     conn.execute(
-        "INSERT INTO cards (id, title, description, status, parent_id, "
-        "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (
-            card.id,
-            card.title,
-            card.description,
-            card.status,
-            card.parent_id,
-            card.created_at,
-            card.updated_at,
-        ),
+        "INSERT INTO entities (id, kind, project_id) VALUES (?, ?, ?)",
+        (entity_id, kind, project_id),
     )
-    conn.commit()
+
+
+def insert_card(conn: sqlite3.Connection, project_id: str, card: Card) -> None:
+    with conn:
+        insert_entity(conn, project_id, card.id, "card")
+        conn.execute(
+            "INSERT INTO cards (id, title, description, status, parent_id, "
+            "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                card.id,
+                card.title,
+                card.description,
+                card.status,
+                card.parent_id,
+                card.created_at,
+                card.updated_at,
+            ),
+        )
 
 
 def get_card(conn: sqlite3.Connection, card_id: str) -> Card | None:

@@ -1,6 +1,6 @@
 import pytest
 
-from brd import core, issues, refs
+from brd import core, entities, issues, refs
 from brd.errors import (
     CardNotFoundError,
     EntityNotFoundError,
@@ -9,7 +9,7 @@ from brd.errors import (
     InvalidStatusError,
     IssueNotFoundError,
 )
-from tests.factories import PROJECT, make_document
+from tests.factories import OTHER_PROJECT, PROJECT, add_project, make_document
 
 
 def test_open_and_get(pconn):
@@ -103,7 +103,7 @@ def test_issue_cannot_be_blocked(pconn):
 def test_deleting_issue_unblocks(pconn):
     card = core.create_card(pconn, PROJECT.id, title="w")
     issue = issues.open_issue(pconn, PROJECT.id, "q", blocks=[card.id])
-    pconn.execute("DELETE FROM entities WHERE id = ?", (issue.id,))
+    entities.delete(pconn, issue.id)
     assert core.resolve_status(pconn, card) == "todo"
 
 
@@ -119,3 +119,10 @@ def test_list_issues_rejects_unknown_status(pconn):
     with pytest.raises(InvalidStatusError, match="opne"):
         issues.list_issues(pconn, "opne")
     assert issues.list_issues(pconn, "closed") == []
+
+
+def test_open_issue_records_its_project(pconn):
+    add_project(pconn, OTHER_PROJECT)
+    issue = issues.open_issue(pconn, OTHER_PROJECT.id, "Q")
+    row = pconn.execute("SELECT kind, project_id FROM entities WHERE id = ?", (issue.id,)).fetchone()
+    assert tuple(row) == ("issue", OTHER_PROJECT.id)

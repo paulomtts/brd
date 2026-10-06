@@ -2,7 +2,7 @@ import dataclasses
 import sqlite3
 from pathlib import Path, PurePosixPath
 
-from brd import core, documents, entities, issues, refs
+from brd import core, db, documents, entities, issues, refs
 from brd.errors import EntityAlreadyExistsError, ImportFormatError
 
 FORMAT_VERSION = 1
@@ -127,6 +127,7 @@ def _load_export(conn: sqlite3.Connection, project_id: str, snap: dict) -> dict:
         with conn:  # one transaction: commits on success, rolls back on error
             for node, parent_id in flattened:
                 status = "todo" if node["status"] == "blocked" else node["status"]
+                db.insert_entity(conn, project_id, node["id"], "card")
                 conn.execute(
                     "INSERT INTO cards (id, title, description, status, parent_id, "
                     "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -134,6 +135,7 @@ def _load_export(conn: sqlite3.Connection, project_id: str, snap: dict) -> dict:
                      parent_id, node["created_at"], node["updated_at"]),
                 )
             for i in issue_rows:
+                db.insert_entity(conn, project_id, i["id"], "issue")
                 conn.execute(
                     "INSERT INTO issues (id, title, body, status, close_reason, created_at, "
                     "updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -142,11 +144,13 @@ def _load_export(conn: sqlite3.Connection, project_id: str, snap: dict) -> dict:
                 )
             for d in doc_rows:
                 digest = documents._hash(contents[d["id"]]) if d["id"] in contents else d["content_hash"]
+                db.insert_entity(conn, project_id, d["id"], "document")
                 conn.execute(
-                    "INSERT INTO documents (id, title, source_path, stem, content_hash, "
-                    "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    (d["id"], d["title"], d["source_path"], PurePosixPath(d["source_path"]).stem,
-                     digest, d["created_at"], d["updated_at"]),
+                    "INSERT INTO documents (id, project_id, title, source_path, stem, "
+                    "content_hash, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (d["id"], project_id, d["title"], d["source_path"],
+                     PurePosixPath(d["source_path"]).stem, digest, d["created_at"],
+                     d["updated_at"]),
                 )
             for node, _ in flattened:
                 for blocker_id in node.get("blocked_by", []):

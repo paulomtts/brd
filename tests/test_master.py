@@ -4,7 +4,7 @@ import uuid
 import pytest
 
 from brd import db, master, paths
-from tests.factories import PROJECT
+from tests.factories import PROJECT, make_card
 
 
 def test_init_project_creates_central_db_and_gitignored_marker(tmp_path, monkeypatch):
@@ -46,17 +46,12 @@ def test_init_project_twice_preserves_existing_cards(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
     repo = tmp_path / "myrepo"
     repo.mkdir()
-    master.init_project(repo)
+    project = master.init_project(repo)
 
     db_path = paths.project_db_path(repo)
     conn = db.connect(db_path)
     try:
-        conn.execute(
-            "INSERT INTO cards (id, title, description, status, parent_id, "
-            "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            ("c1", "Existing card", None, "todo", None, "now", "now"),
-        )
-        conn.commit()
+        make_card(conn, "c1", title="Existing card", project_id=project.id)
     finally:
         conn.close()
 
@@ -98,12 +93,7 @@ def test_init_project_migrates_legacy_uuid_marker_preserving_cards(
     old_db_path = old_projects_dir / f"{legacy_id}.db"
     old_conn = db.connect(old_db_path)
     db.init_project_schema(old_conn, PROJECT)
-    old_conn.execute(
-        "INSERT INTO cards (id, title, description, status, parent_id, "
-        "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        ("c1", "Old card", None, "todo", None, "now", "now"),
-    )
-    old_conn.commit()
+    make_card(old_conn, "c1", title="Old card")
     old_conn.close()
 
     master.init_project(repo)
@@ -131,12 +121,7 @@ def test_init_project_migrates_in_repo_format_preserving_cards(tmp_path, monkeyp
     old_db_path = brd_dir / "board.db"
     old_conn = db.connect(old_db_path)
     db.init_project_schema(old_conn, PROJECT)
-    old_conn.execute(
-        "INSERT INTO cards (id, title, description, status, parent_id, "
-        "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        ("c1", "In-repo card", None, "todo", None, "now", "now"),
-    )
-    old_conn.commit()
+    make_card(old_conn, "c1", title="In-repo card")
     old_conn.close()
 
     master.init_project(repo)

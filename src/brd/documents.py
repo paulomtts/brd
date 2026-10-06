@@ -141,12 +141,14 @@ def add(
     now = _now()
     doc = Document(str(uuid.uuid4()), title or stem, rel, stem, _hash(data), now, now)
     _write_backup(conn, doc.id, data)
-    conn.execute(
-        "INSERT INTO documents (id, title, source_path, stem, content_hash, created_at, "
-        "updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (doc.id, doc.title, doc.source_path, doc.stem, doc.content_hash, doc.created_at, doc.updated_at),
-    )
-    conn.commit()
+    with conn:
+        db.insert_entity(conn, project_id, doc.id, "document")
+        conn.execute(
+            "INSERT INTO documents (id, project_id, title, source_path, stem, content_hash, "
+            "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (doc.id, project_id, doc.title, doc.source_path, doc.stem, doc.content_hash,
+             doc.created_at, doc.updated_at),
+        )
     if normalized_tags:
         tags.add(conn, doc.id, normalized_tags)
     refs.reindex(conn, doc.id)

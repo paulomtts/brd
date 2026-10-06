@@ -3,7 +3,7 @@ import pytest
 from brd import core, db, issues
 from brd import refs as _refs
 from brd.models import Card
-from tests.factories import PROJECT
+from tests.factories import OTHER_PROJECT, PROJECT, add_project
 
 
 @pytest.fixture
@@ -768,3 +768,28 @@ def test_resolve_status_terminates_on_persisted_parent_cycle(conn):
     dependent = _blocked_on(conn, "d", "p")
 
     assert core.resolve_status(conn, dependent) == "blocked"
+
+
+def _entity_project(conn, entity_id):
+    return conn.execute(
+        "SELECT project_id FROM entities WHERE id = ?", (entity_id,)
+    ).fetchone()[0]
+
+
+def test_create_card_records_its_project(conn):
+    add_project(conn, OTHER_PROJECT)
+    card = core.create_card(conn, OTHER_PROJECT.id, "Card")
+    assert _entity_project(conn, card.id) == OTHER_PROJECT.id
+
+
+def test_import_tree_records_its_project(conn):
+    parent = core.create_card(conn, PROJECT.id, "Parent")
+    core.create_card(conn, PROJECT.id, "Child", parent_id=parent.id)
+    tree = core.build_tree(conn)
+
+    fresh_conn = db.connect(":memory:")
+    db.init_project_schema(fresh_conn, OTHER_PROJECT)
+    core.import_tree(fresh_conn, OTHER_PROJECT.id, tree)
+
+    projects = {r[0] for r in fresh_conn.execute("SELECT project_id FROM entities")}
+    assert projects == {OTHER_PROJECT.id}
