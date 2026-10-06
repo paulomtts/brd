@@ -174,8 +174,8 @@ def forget_project_by_id(project_id: str) -> Project:
 
 
 def _forget(find: Callable[[sqlite3.Connection], Project]) -> Project:
-    """Delete the project find returns, the edges pointing at its entities,
-    and its document backups."""
+    """Delete the project find returns and its document backups. Edges from
+    other projects pointing at its entities are kept, as not-found."""
     conn = connect()
     try:
         project = find(conn)

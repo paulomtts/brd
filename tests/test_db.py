@@ -502,7 +502,7 @@ def test_delete_project_removes_the_row_and_everything_it_owns(project_conn):
     assert [row["id"] for row in project_conn.execute("SELECT id FROM entities")] == ["o1"]
 
 
-def test_delete_project_removes_incoming_edges_from_other_projects(project_conn):
+def test_delete_project_keeps_incoming_edges_from_other_projects(project_conn):
     add_project(project_conn, OTHER_PROJECT)
     make_card(project_conn, "a1")
     make_card(project_conn, "b1", project_id=OTHER_PROJECT.id)
@@ -511,11 +511,14 @@ def test_delete_project_removes_incoming_edges_from_other_projects(project_conn)
     db.add_blocked_by_edge(project_conn, "b1", "b2")
     _add_ref(project_conn, "b1", "a1")
     _add_ref(project_conn, "b1", "b2")
+    # Outgoing from the forgotten project: these go with it, through the cascade.
+    db.add_blocked_by_edge(project_conn, "a1", "b2")
+    _add_ref(project_conn, "a1", "b2")
 
     db.delete_project(project_conn, PROJECT.id)
 
-    assert _blocked_by_rows(project_conn) == {("b1", "b2")}
-    assert _ref_rows(project_conn) == {("b1", "b2")}
+    assert _blocked_by_rows(project_conn) == {("b1", "a1"), ("b1", "b2")}
+    assert _ref_rows(project_conn) == {("b1", "a1"), ("b1", "b2")}
 
 
 def test_delete_project_is_a_noop_when_absent(project_conn):

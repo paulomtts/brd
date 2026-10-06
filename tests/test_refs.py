@@ -134,3 +134,23 @@ def test_reindex_mentions_scans_document_backups(pconn):
     make_document(pconn, E, "later")
     refs.reindex_mentions(pconn, PROJECT.id, "later")
     assert out(pconn, D) == {(E, "link")}
+
+
+GHOST = "99999999-9999-4999-8999-999999999999"
+
+
+def test_refs_outgoing_lists_a_not_found_target_with_null_kind_and_title(pconn):
+    make_card(pconn, A)
+    make_card(pconn, B, title="Bee")
+    with pconn:
+        pconn.executemany(
+            "INSERT INTO refs (src_id, dst_id, origin) VALUES (?, ?, ?)",
+            [(A, B, "explicit"), (A, GHOST, "explicit"), (A, GHOST, "link")],
+        )
+
+    # ORDER BY origin, dst_id: "9…" sorts before "b…".
+    assert refs.outgoing(pconn, A) == [
+        {"id": GHOST, "kind": None, "title": None, "origin": "explicit"},
+        {"id": B, "kind": "card", "title": "Bee", "origin": "explicit"},
+        {"id": GHOST, "kind": None, "title": None, "origin": "link"},
+    ]

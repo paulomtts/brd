@@ -106,8 +106,8 @@ def reindex_mentions(conn: sqlite3.Connection, project_id: str, stem: str) -> No
 
 def add_explicit(conn: sqlite3.Connection, project_id: str, src_id: str, dst_id: str) -> None:
     entities.require_in_project(conn, project_id, src_id)
-    # Ref targets stay in the current project until S4 lifts the check.
-    entities.require_in_project(conn, project_id, dst_id)
+    # Like a blocker, a ref target may belong to any project.
+    entities.require(conn, dst_id)
     if src_id == dst_id:
         raise SelfReferenceError(f"{src_id} can't reference itself")
     conn.execute(
@@ -129,7 +129,18 @@ def remove_explicit(conn: sqlite3.Connection, project_id: str, src_id: str, dst_
 
 
 def _summaries(conn: sqlite3.Connection, rows, column: str) -> list[dict]:
-    return [{**entities.summary(conn, row[column]), "origin": row["origin"]} for row in rows]
+    # A target whose project was forgotten has no entity row: keep its id
+    # and null the rest, rather than drop the ref.
+    return [
+        {
+            **(
+                entities.summary(conn, row[column])
+                or {"id": row[column], "kind": None, "title": None}
+            ),
+            "origin": row["origin"],
+        }
+        for row in rows
+    ]
 
 
 def outgoing(conn: sqlite3.Connection, entity_id: str) -> list[dict]:

@@ -67,8 +67,13 @@ def test_round_trip_into_fresh_project(populated, tmp_path, monkeypatch):
     assert {s["project"]["id"] for s in before.values()}.isdisjoint(
         {s["project"]["id"] for s in after.values()}
     )
+    # So does each blocker's; here every blocker is on its card's own board.
+    child_id = populated["child"]["id"]
+    assert [b["id"] for b in before[child_id]["blockers"]] == [populated["issue"]["id"]]
     for data in (before, after):
         for shown in data.values():
+            for blocker in shown.get("blockers", []):
+                assert blocker.pop("project") == shown["project"]
             shown.pop("project")
     assert before == after
     ok("doc", "restore", populated["doc"]["id"])
@@ -93,8 +98,11 @@ def test_import_accepts_wrapped_export_envelope(populated, tmp_path, monkeypatch
 def test_old_tree_snapshot_still_imports(project, tmp_path, monkeypatch):
     a = ok("add", "--title", "A")
     ok("add", "--title", "B", "--blocked-by", a["id"])
+    tree = ok("tree")
+    # The tree output carries the derived `blockers`; import must ignore it.
+    assert any(node["blockers"] for node in tree)
     snapshot = tmp_path / "tree.json"
-    snapshot.write_text(json.dumps({"ok": True, "data": ok("tree")}))
+    snapshot.write_text(json.dumps({"ok": True, "data": tree}))
     other = _fresh_project(tmp_path, monkeypatch)
     assert ok("import", snapshot) == {"imported": 2}
     assert err("import", snapshot) == "CardAlreadyExistsError"
@@ -268,3 +276,17 @@ def test_round_trip_keeps_refs_between_snapshot_entities(populated, tmp_path, mo
     other = _fresh_project(tmp_path, monkeypatch)
     ok("import", snapshot)
     assert ok("export")["refs"] == data["refs"]
+
+
+def _card_nodes(nodes):
+    for node in nodes:
+        yield node
+        yield from _card_nodes(node["children"])
+
+
+def test_export_card_nodes_have_no_blockers(populated):
+    nodes = list(_card_nodes(ok("export")["cards"]))
+    assert {n["id"] for n in nodes} == {populated["card"]["id"], populated["child"]["id"]}
+    assert all("blockers" not in n and "blocked_by" in n for n in nodes)
+    (child,) = [n for n in nodes if n["id"] == populated["child"]["id"]]
+    assert child["blocked_by"] == [populated["issue"]["id"]]

@@ -9,12 +9,14 @@ from brd.cli import cards as cli_cards
 from brd.errors import (
     CardNotFoundError,
     CommentNotFoundError,
+    CycleError,
     DocumentNotFoundError,
     DuplicatePathError,
     DuplicateStemError,
     EntityNotFoundError,
     InvalidBlockerError,
     IssueNotFoundError,
+    SelfReferenceError,
 )
 from brd.models import Card
 from tests.factories import (
@@ -197,24 +199,8 @@ REFUSED = [
         id="unblock_card_foreign_source",
     ),
     pytest.param(
-        lambda c: core.block_card(c, P, "p1", "q1"), "q1", "card or issue",
-        id="block_card_foreign_card_target",
-    ),
-    pytest.param(
-        lambda c: core.block_card(c, P, "p1", "qi"), "qi", "card or issue",
-        id="block_card_foreign_issue_target",
-    ),
-    pytest.param(
-        lambda c: core.block_card(c, P, "p1", "qd"), "qd", "card or issue",
-        id="block_card_foreign_document_target",
-    ),
-    pytest.param(
-        lambda c: core.create_card(c, P, "new", blocked_by=["p2", "q1"]), "q1", "card or issue",
-        id="create_card_foreign_blocker",
-    ),
-    pytest.param(
-        lambda c: issues.open_issue(c, P, "t", blocks=["p1", "q1"]), "q1", "card",
-        id="open_issue_foreign_blocks",
+        lambda c: core.block_card(c, P, "q1", "qi"), "q1", "card",
+        id="block_card_foreign_source_foreign_target",
     ),
     pytest.param(
         lambda c: comments.add(c, P, "q1", "hi", "alice"), "q1", "card",
@@ -262,6 +248,126 @@ def test_a_document_of_this_project_still_cannot_block(two):
 def test_a_missing_blocker_is_unchanged(two):
     with pytest.raises(CardNotFoundError, match=r"^no card or issue with id nope$"):
         core.block_card(two, P, "p1", "nope")
+
+
+def _status(conn, card_id):
+    return core.resolve_status(conn, db.get_card(conn, card_id))
+
+
+def _next(conn, project_id):
+    return {card.id for card in core.next_cards(conn, project_id)}
+
+
+def test_a_card_or_issue_of_another_project_can_block(two):
+    core.block_card(two, P, "p1", "q1")
+    core.block_card(two, P, "p1", "qi")
+    assert sorted(db.list_blockers_of(two, "p1")) == ["q1", "qi"]
+
+
+def test_a_new_card_can_be_blocked_by_another_projects_issue(two):
+    card = core.create_card(two, P, "new", blocked_by=["p2", "qi"])
+    assert db.owner_of(two, card.id).id == P
+    assert sorted(db.list_blockers_of(two, card.id)) == ["p2", "qi"]
+
+
+def test_a_foreign_document_is_refused_for_its_kind(two):
+    before = _state(two)
+    message = r"^a document can't block a card; only cards and issues can$"
+    with pytest.raises(InvalidBlockerError, match=message):
+        core.block_card(two, P, "p1", "qd")
+    with pytest.raises(InvalidBlockerError, match=message):
+        core.create_card(two, P, "n", blocked_by=["qd"])
+    assert _state(two) == before
+
+
+def test_a_card_still_cannot_block_itself(two):
+    before = _state(two)
+    with pytest.raises(CycleError, match=r"^blocking p1 on p1 would create a cycle$"):
+        core.block_card(two, P, "p1", "p1")
+    assert _state(two) == before
+
+
+def test_a_repeated_foreign_block_fails_like_a_repeated_local_one(two):
+    core.block_card(two, P, "p1", "p2")
+    core.block_card(two, P, "p1", "q1")
+    with pytest.raises(sqlite3.IntegrityError):
+        core.block_card(two, P, "p1", "p2")
+    with pytest.raises(sqlite3.IntegrityError):
+        core.block_card(two, P, "p1", "q1")
+
+
+def test_a_card_is_released_when_a_foreign_blocker_chain_releases(two):
+    core.block_card(two, P, "p1", "q1")
+    assert _status(two, "p1") == "blocked"
+    # q1 is itself blocked by p2 (fixture): releasing p2 frees q1, not p1.
+    core.update_card(two, P, "p2", status="done")
+    assert _status(two, "q1") == "todo"
+    assert _status(two, "p1") == "blocked"
+    core.update_card(two, Q, "q1", status="done")
+    assert _status(two, "p1") == "todo"
+    assert "p1" in _next(two, P)
+
+
+def test_a_foreign_issue_blocks_while_open_whatever_the_close_reason(two):
+    core.block_card(two, P, "p1", "qi")
+    assert _status(two, "p1") == "blocked"
+    assert "p1" not in _next(two, P)
+    issues.close(two, Q, "qi", reason="wontfix")
+    assert _status(two, "p1") == "todo"
+    assert "p1" in _next(two, P)
+    issues.reopen(two, Q, "qi")
+    assert _status(two, "p1") == "blocked"
+
+
+def test_a_foreign_container_releases_when_every_child_releases(two):
+    make_card(two, "qs", project_id=Q)
+    make_card(two, "qs1", parent_id="qs", project_id=Q)
+    make_card(two, "qs2", parent_id="qs", project_id=Q)
+    core.block_card(two, P, "p1", "qs")
+    assert _status(two, "p1") == "blocked"
+    core.update_card(two, Q, "qs1", status="done")
+    assert _status(two, "p1") == "blocked"
+    core.update_card(two, Q, "qs2", status="canceled")
+    assert _status(two, "p1") == "todo"
+    assert _status(two, "qs") == "todo"
+
+
+def test_a_cycle_through_another_project_is_refused(two):
+    core.block_card(two, P, "p1", "q1")
+    before = _state(two)
+    with pytest.raises(CycleError, match=r"^blocking q1 on p1 would create a cycle$"):
+        core.block_card(two, Q, "q1", "p1")
+    assert _state(two) == before
+    # q1 is blocked by p2 (fixture), so p2 -> p1 would close p2 -> p1 -> q1 -> p2.
+    with pytest.raises(CycleError, match=r"^blocking p2 on p1 would create a cycle$"):
+        core.block_card(two, P, "p2", "p1")
+    assert _state(two) == before
+
+
+def test_an_issue_can_block_a_card_of_another_project(two):
+    # q-child inherits its parent's block, and q1 is blocked by p2 (fixture):
+    # release p2 first so q-child can resolve to todo once the issue closes.
+    core.update_card(two, P, "p2", status="done")
+    issue = issues.open_issue(two, P, "t", blocks=["p1", "q-child"])
+    assert db.owner_of(two, issue.id).id == P
+    assert issues.blocks_of(two, issue.id) == ["p1", "q-child"]
+    assert _status(two, "q-child") == "blocked"
+    assert "q-child" not in _next(two, Q)
+    issues.close(two, P, issue.id)
+    assert _status(two, "q-child") == "todo"
+    assert "q-child" in _next(two, Q)
+
+
+@pytest.mark.parametrize(
+    ("blocks", "bad"),
+    [(["q1", "qi"], "qi"), (["p1", "nope"], "nope"), (["p1", "qd"], "qd")],
+    ids=["foreign_issue", "missing", "foreign_document"],
+)
+def test_open_issue_refuses_a_blocks_id_that_is_no_card_and_writes_nothing(two, blocks, bad):
+    before = _state(two)
+    with pytest.raises(CardNotFoundError, match=rf"^no card with id {bad}$"):
+        issues.open_issue(two, P, "t", blocks=blocks)
+    assert _state(two) == before
 
 
 def test_list_cards_returns_only_the_projects_cards(two):
@@ -406,24 +512,12 @@ SCOPED_REFUSED = [
         id="issue_reopen",
     ),
     pytest.param(
-        lambda c: issues.open_issue(c, P, "t", ref_ids=["q1"]), CardNotFoundError, "q1", "card",
-        id="open_issue_foreign_ref",
-    ),
-    pytest.param(
-        lambda c: issues.open_issue(c, P, "t", ref_ids=["p1", "qd"]), DocumentNotFoundError,
-        "qd", "document", id="open_issue_mixed_refs",
-    ),
-    pytest.param(
         lambda c: cli_cards.delete_entity(c, P, "qi", False), IssueNotFoundError, "qi", "issue",
         id="delete_entity_issue",
     ),
     pytest.param(
         lambda c: refs.add_explicit(c, P, "q1", "p1"), CardNotFoundError, "q1", "card",
         id="ref_add_foreign_source",
-    ),
-    pytest.param(
-        lambda c: refs.add_explicit(c, P, "p1", "qi"), IssueNotFoundError, "qi", "issue",
-        id="ref_add_foreign_target",
     ),
     pytest.param(
         lambda c: refs.remove_explicit(c, P, "q1", "p1"), CardNotFoundError, "q1", "card",
@@ -710,6 +804,39 @@ def test_ref_remove_checks_only_the_source(two):
         refs.remove_explicit(two, P, "q1", "p1")
     refs.remove_explicit(two, P, "p1", "q1")  # a foreign target: the edge still goes
     assert [tuple(r) for r in two.execute("SELECT src_id, dst_id FROM refs")] == [("q1", "p1")]
+
+
+def test_a_ref_can_target_another_projects_entity(two):
+    refs.add_explicit(two, P, "p1", "qi")
+    refs.add_explicit(two, P, "p1", "qd")
+    assert refs.outgoing(two, "p1") == [
+        {"id": "qd", "kind": "document", "title": "qnotes", "origin": "explicit"},
+        {"id": "qi", "kind": "issue", "title": "qi", "origin": "explicit"},
+    ]
+    assert refs.incoming(two, "qi") == [
+        {"id": "p1", "kind": "card", "title": "p1", "origin": "explicit"}
+    ]
+
+
+def test_ref_add_still_refuses_a_missing_target_and_itself(two):
+    before = _state(two)
+    with pytest.raises(EntityNotFoundError, match=r"^no entity with id nope$"):
+        refs.add_explicit(two, P, "p1", "nope")
+    with pytest.raises(SelfReferenceError):
+        refs.add_explicit(two, P, "p1", "p1")
+    assert _state(two) == before
+
+
+def test_open_issue_refs_may_target_another_project(two):
+    issue = issues.open_issue(two, P, "t", ref_ids=["p1", "qd"])
+    assert [r["id"] for r in refs.outgoing(two, issue.id)] == ["p1", "qd"]
+
+
+def test_open_issue_with_a_missing_ref_writes_nothing(two):
+    before = _state(two)
+    with pytest.raises(EntityNotFoundError, match=r"^no entity with id nope$"):
+        issues.open_issue(two, P, "t", ref_ids=["q1", "nope"])
+    assert _state(two) == before
 
 
 def test_tag_counts_cover_only_the_projects_entities(two):

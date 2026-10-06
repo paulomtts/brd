@@ -7,8 +7,16 @@ from typer.testing import CliRunner
 
 from brd import db, paths
 from brd.cli import app
-from tests.cli_helpers import err, invoke, ok
-from tests.factories import OTHER_PROJECT, add_project, make_card, make_document, make_issue
+from brd.models import Project
+from tests.cli_helpers import err, human, invoke, ok
+from tests.factories import (
+    NOW,
+    OTHER_PROJECT,
+    add_project,
+    make_card,
+    make_document,
+    make_issue,
+)
 
 runner = CliRunner()
 
@@ -951,16 +959,219 @@ def test_block_and_unblock_refuse_a_foreign_card(foreign):
     assert ok("show", foreign)["blocked_by"] == []
 
 
-def test_blocker_targets_must_be_in_this_project(foreign):
+def test_blocker_targets_may_live_in_another_project(foreign_entities):
     mine = ok("add", "--title", "mine")["id"]
-    _refused("block", mine, "--by", foreign)
-    _refused("add", "--title", "t", "--blocked-by", foreign)
-    assert ok("show", mine)["blocked_by"] == []
+    ok("block", mine, "--by", FOREIGN)
+    blocked = ok("block", mine, "--by", FOREIGN_ISSUE)
+    assert sorted(blocked["blocked_by"]) == sorted([FOREIGN, FOREIGN_ISSUE])
+    assert blocked["status"] == "blocked"
+    added = ok("add", "--title", "t", "--blocked-by", FOREIGN)
+    assert (added["blocked_by"], added["status"]) == ([FOREIGN], "blocked")
+    assert err("block", mine, "--by", FOREIGN_DOC) == "InvalidBlockerError"
+    next_ids = [c["id"] for c in ok("next")]
+    assert mine not in next_ids and added["id"] not in next_ids
+    ok("unblock", mine, "--by", FOREIGN)
+    unblocked = ok("unblock", mine, "--by", FOREIGN_ISSUE)
+    assert (unblocked["blocked_by"], unblocked["status"]) == ([], "todo")
+    assert mine in [c["id"] for c in ok("next")]
 
 
-def test_issue_open_refuses_a_foreign_blocks_card(foreign):
-    _refused("issue", "open", "--title", "q", "--blocks", foreign)
-    assert ok("issue", "list") == []
+def test_show_pretty_renders_a_foreign_blocker(foreign):
+    mine = ok("add", "--title", "mine")["id"]
+    ok("block", mine, "--by", foreign)
+    assert "blocked by: other: Foreign" in human("show", mine).splitlines()
+
+
+def _seed_edges(card_id, *blocker_ids):
+    """blocked_by rows no command would write (a missing or document target,
+    or one from another project's card)."""
+    conn = db.connect(paths.brd_db_path())
+    try:
+        for blocker_id in blocker_ids:
+            db.add_blocked_by_edge(conn, card_id, blocker_id)
+    finally:
+        conn.close()
+
+
+def test_show_pretty_renders_a_foreign_issue_blocker(foreign_entities):
+    mine = ok("add", "--title", "mine", "--blocked-by", FOREIGN_ISSUE)["id"]
+    assert "blocked by: other: Foreign issue" in human("show", mine).splitlines()
+
+
+def test_a_foreign_document_blocker_renders_and_never_blocks(foreign_entities):
+    mine = ok("add", "--title", "mine")["id"]
+    _seed_edges(mine, FOREIGN_DOC)
+    shown = ok("show", mine)
+    assert shown["status"] == "todo"
+    assert shown["blockers"] == [
+        {
+            "id": FOREIGN_DOC,
+            "kind": "document",
+            "project": {"id": OTHER_PROJECT.id, "name": OTHER_PROJECT.name},
+            "title": "notes",
+            "status": None,
+            "released": True,
+        }
+    ]
+    assert "blocked by: other: notes" in human("show", mine).splitlines()
+
+
+def test_show_pretty_mixed_blockers_keep_order(foreign):
+    lexer = ok("add", "--title", "Lexer")["id"]
+    mine = ok("add", "--title", "mine", "--blocked-by", lexer, "--blocked-by", foreign)["id"]
+    _seed_edges(mine, "ghost")
+    rendered = {lexer: "[[Lexer]] (card)", foreign: "other: Foreign", "ghost": "not-found ghost"}
+    blocked_by = ok("show", mine)["blocked_by"]
+    assert sorted(blocked_by) == sorted(rendered)
+    expected = "blocked by: " + ", ".join(rendered[b] for b in blocked_by)
+    assert expected in human("show", mine).splitlines()
+
+
+def test_show_pretty_of_a_foreign_card_treats_its_own_project_as_local(foreign):
+    here = ok("add", "--title", "Here")
+    conn = db.connect(paths.brd_db_path())
+    try:
+        make_card(conn, "F2", title="F2", project_id=OTHER_PROJECT.id)
+    finally:
+        conn.close()
+    _seed_edges("F2", foreign, here["id"])
+    # Shown from this project's cwd, but F2 belongs to `other`: its sibling
+    # card is local and this project's card is the foreign one.
+    here_name = ok("show", here["id"])["project"]["name"]
+    rendered = {foreign: "[[Foreign]] (card)", here["id"]: f"{here_name}: Here"}
+    blocked_by = ok("show", "F2")["blocked_by"]
+    expected = "blocked by: " + ", ".join(rendered[b] for b in blocked_by)
+    assert expected in human("show", "F2").splitlines()
+
+
+def test_show_pretty_tells_a_same_named_project_apart_by_id(project):
+    mine = ok("add", "--title", "mine")["id"]
+    twin = Project(
+        id="33333333-3333-4333-8333-333333333333",
+        name=ok("show", mine)["project"]["name"],  # the cwd project's own name
+        root_path="/twin",
+        created_at=NOW,
+    )
+    conn = db.connect(paths.brd_db_path())
+    try:
+        add_project(conn, twin)
+        make_card(conn, "twin-card", title="Twin", project_id=twin.id)
+    finally:
+        conn.close()
+    ok("block", mine, "--by", "twin-card")
+    assert f"blocked by: {twin.name}: Twin" in human("show", mine).splitlines()
+
+
+def _blocker_entry(id_, kind, title, status, released, project=OTHER_PROJECT):
+    return {
+        "id": id_,
+        "kind": kind,
+        "project": {"id": project.id, "name": project.name},
+        "title": title,
+        "status": status,
+        "released": released,
+    }
+
+
+def test_card_outputs_carry_foreign_blockers(foreign_entities):
+    expected = {
+        FOREIGN: _blocker_entry(FOREIGN, "card", "Foreign", "todo", False),
+        FOREIGN_ISSUE: _blocker_entry(FOREIGN_ISSUE, "issue", "Foreign issue", "open", False),
+    }
+    mine = ok("add", "--title", "mine")["id"]
+    ok("block", mine, "--by", FOREIGN)
+    blocked = ok("block", mine, "--by", FOREIGN_ISSUE)
+    (listed,) = [c for c in ok("list") if c["id"] == mine]
+    (node,) = [n for n in ok("tree") if n["id"] == mine]
+    for card in (blocked, ok("show", mine), listed, node):
+        # blocked_by is still the plain list of ids; blockers follows its order.
+        assert sorted(card["blocked_by"]) == sorted([FOREIGN, FOREIGN_ISSUE])
+        assert card["blockers"] == [expected[b] for b in card["blocked_by"]]
+
+    added = ok("add", "--title", "t", "--blocked-by", FOREIGN)
+    assert (added["blocked_by"], added["blockers"]) == ([FOREIGN], [expected[FOREIGN]])
+    assert ok("update", added["id"], "--title", "t2")["blockers"] == [expected[FOREIGN]]
+    unblocked = ok("unblock", mine, "--by", FOREIGN)
+    assert (unblocked["blocked_by"], unblocked["blockers"]) == (
+        [FOREIGN_ISSUE],
+        [expected[FOREIGN_ISSUE]],
+    )
+    free = ok("add", "--title", "free")["id"]
+    assert [c["blockers"] for c in ok("next") if c["id"] == free] == [[]]
+
+
+def test_a_finished_foreign_blocker_is_released(foreign):
+    mine = ok("add", "--title", "mine", "--blocked-by", foreign)["id"]
+    conn = db.connect(paths.brd_db_path())
+    try:
+        conn.execute("UPDATE cards SET status = 'done' WHERE id = ?", (foreign,))
+        conn.commit()
+    finally:
+        conn.close()
+
+    shown = ok("show", mine)
+    assert shown["status"] == "todo"
+    assert shown["blockers"] == [_blocker_entry(foreign, "card", "Foreign", "done", True)]
+    assert mine in [c["id"] for c in ok("next")]
+
+
+def test_issue_open_can_block_a_foreign_card(foreign):
+    issue = ok("issue", "open", "--title", "q", "--blocks", foreign)
+    assert issue["blocks"] == [foreign]
+    shown = ok("show", foreign)
+    assert (shown["blocked_by"], shown["status"]) == ([issue["id"]], "blocked")
+    ok("issue", "close", issue["id"])
+    assert ok("show", foreign)["status"] == "todo"
+
+
+def test_forget_leaves_a_foreign_card_blocked_until_unblocked(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    for name in ("a", "b"):
+        (tmp_path / name).mkdir()
+    monkeypatch.chdir(tmp_path / "a")
+    project_a = ok("init")
+    theirs = ok("add", "--title", "theirs")["id"]
+    monkeypatch.chdir(tmp_path / "b")
+    ok("init")
+    mine = ok("add", "--title", "mine")["id"]
+    ok("block", mine, "--by", theirs)
+    ok("ref", "add", mine, theirs)
+
+    ok("forget", "--project", project_a["id"])
+
+    shown = ok("show", mine)
+    assert (shown["status"], shown["blocked_by"]) == ("blocked", [theirs])
+    assert shown["refs"] == [
+        {"id": theirs, "kind": None, "title": None, "origin": "explicit"}
+    ]
+    assert mine not in [c["id"] for c in ok("next")]
+    assert [(c["id"], c["status"]) for c in ok("list")] == [(mine, "blocked")]
+    assert [(n["id"], n["status"]) for n in ok("tree")] == [(mine, "blocked")]
+    gone = [
+        {
+            "id": theirs,
+            "kind": None,
+            "project": None,
+            "title": None,
+            "status": "not-found",
+            "released": False,
+        }
+    ]
+    assert shown["blockers"] == gone
+    assert [c["blockers"] for c in ok("list")] == [gone]
+    assert [n["blockers"] for n in ok("tree")] == [gone]
+    assert f"blocked by: not-found {theirs}" in human("show", mine).splitlines()
+    # list, next and tree --pretty print no blockers, and still none.
+    assert "blocked by" not in human("list") + human("tree")
+
+    unblocked = ok("unblock", mine, "--by", theirs)
+    assert (unblocked["blocked_by"], unblocked["status"]) == ([], "todo")
+    assert mine in [c["id"] for c in ok("next")]
+    assert ok("ref", "remove", mine, theirs)["refs"] == []
+
+    # Commands still refuse to add an edge to a missing id.
+    assert err("block", mine, "--by", theirs) == "CardNotFoundError"
+    assert err("ref", "add", mine, theirs) == "EntityNotFoundError"
 
 
 def test_comment_add_refuses_a_foreign_card(foreign):
@@ -1004,7 +1215,6 @@ def test_issue_commands_are_scoped_to_this_project(foreign_entities):
     _refused("issue", "close", issue, error_type="IssueNotFoundError")
     _refused("issue", "reopen", issue, error_type="IssueNotFoundError")
     _refused("delete", issue, error_type="IssueNotFoundError")
-    _refused("issue", "open", "--title", "q", "--ref", foreign_entities["card"])
     shown = ok("show", issue)
     assert (shown["title"], shown["status"]) == ("Foreign issue", "open")
     assert [i["id"] for i in ok("issue", "list")] == [mine]
@@ -1027,10 +1237,24 @@ def test_document_commands_are_scoped_to_this_project(project, foreign_entities)
 def test_ref_commands_are_scoped_to_this_project(foreign_entities):
     mine = ok("add", "--title", "mine")["id"]
     _refused("ref", "add", foreign_entities["card"], mine)
-    _refused("ref", "add", mine, foreign_entities["issue"], error_type="IssueNotFoundError")
     _refused("ref", "remove", foreign_entities["card"], mine)
     assert ok("show", mine)["refs"] == []
     assert ok("show", foreign_entities["card"])["refs"] == []
+
+
+def test_ref_targets_may_live_in_another_project(foreign_entities):
+    mine = ok("add", "--title", "mine")["id"]
+    added = ok("ref", "add", mine, FOREIGN_ISSUE)
+    assert added == {
+        "id": mine,
+        "refs": [
+            {"id": FOREIGN_ISSUE, "kind": "issue", "title": "Foreign issue", "origin": "explicit"}
+        ],
+    }
+    assert [r["id"] for r in ok("show", mine)["refs"]] == [FOREIGN_ISSUE]
+    assert [r["id"] for r in ok("show", FOREIGN_ISSUE)["referenced_by"]] == [mine]
+    issue = ok("issue", "open", "--title", "q", "--ref", FOREIGN)
+    assert [r["id"] for r in ok("show", issue["id"])["refs"]] == [FOREIGN]
 
 
 def test_tag_commands_are_scoped_to_this_project(foreign_entities):
