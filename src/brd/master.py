@@ -1,3 +1,4 @@
+import os
 import shutil
 import sqlite3
 import sys
@@ -92,6 +93,42 @@ def resolve_project(conn: sqlite3.Connection, start: Path) -> Project:
     if project is None:
         raise ProjectNotFoundError(
             f"no registered project at or above {resolved}; run `brd init` there"
+        )
+    return project
+
+
+def relink_project(root_path: Path, ref: str, name: str | None = None) -> Project:
+    """Point the project whose id or old root is ref at root_path, e.g. after
+    the repo moved. Its id, created_at and board stay; the name changes only
+    when name is given."""
+    conn = connect()
+    try:
+        # IMMEDIATE takes the write lock up front, so the lookup and the
+        # update see one state of projects.
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            project = _find_relink_target(conn, root_path, ref)
+            relinked = db.relink_project(conn, project.id, str(root_path), name or None)
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
+        return relinked
+    finally:
+        conn.close()
+
+
+def _find_relink_target(conn: sqlite3.Connection, root_path: Path, ref: str) -> Project:
+    project = db.get_project_by_id(conn, ref)
+    # An empty ref would normalise to root_path itself.
+    if project is None and ref:
+        # Not resolve(): the old directory is usually gone, and stored roots
+        # do not follow symlinks either.
+        old_root = os.path.normpath(os.path.join(root_path, ref))
+        project = db.get_project(conn, old_root)
+    if project is None:
+        raise ProjectNotFoundError(
+            f"no project with id or root path {ref}; see `brd projects`"
         )
     return project
 

@@ -4,6 +4,7 @@ import uuid
 import pytest
 
 from brd import db, master, paths
+from brd.errors import ProjectAlreadyExistsError, ProjectNotFoundError
 from brd.models import Project
 from tests.factories import PROJECT, make_card, make_document
 
@@ -526,3 +527,159 @@ def test_forgetting_a_nested_project_hands_its_tree_back_to_the_outer_one(
 
     assert _resolve(inner / "x") == outer_project
     assert master.list_all_projects() == [outer_project]
+
+
+def _moved_repo(tmp_path, monkeypatch):
+    """A project registered at old/ with one card, and an empty new/."""
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    old = tmp_path / "old"
+    new = tmp_path / "new"
+    old.mkdir()
+    new.mkdir()
+    project = master.init_project(old)
+    conn = _brd()
+    try:
+        make_card(conn, "c1", title="Moved card", project_id=project.id)
+    finally:
+        conn.close()
+    return project, old, new
+
+
+def test_relink_project_by_old_root_points_the_project_at_the_new_root(
+    tmp_path, monkeypatch
+):
+    project, old, new = _moved_repo(tmp_path, monkeypatch)
+
+    relinked = master.relink_project(new, str(old))
+
+    assert relinked == Project(project.id, project.name, str(new), project.created_at)
+    assert master.list_all_projects() == [relinked]
+    assert _card_owner("c1") == ("Moved card", project.id)
+    assert _resolve(new / "sub") == relinked
+    with pytest.raises(ProjectNotFoundError):
+        _resolve(old)
+
+
+def test_relink_project_by_id_after_the_old_directory_is_gone(tmp_path, monkeypatch):
+    project, old, new = _moved_repo(tmp_path, monkeypatch)
+    shutil.rmtree(old)
+
+    relinked = master.relink_project(new, project.id)
+
+    assert relinked == Project(project.id, project.name, str(new), project.created_at)
+    assert master.list_all_projects() == [relinked]
+    assert _card_owner("c1") == ("Moved card", project.id)
+
+
+@pytest.mark.parametrize("spelling", ["{old}/", "{old}/../old", "{old}/./"])
+def test_relink_project_normalises_the_old_root(tmp_path, monkeypatch, spelling):
+    project, old, new = _moved_repo(tmp_path, monkeypatch)
+
+    relinked = master.relink_project(new, spelling.format(old=old))
+
+    assert (relinked.id, relinked.root_path) == (project.id, str(new))
+
+
+def test_relink_project_accepts_a_relative_old_root(tmp_path, monkeypatch):
+    project, old, new = _moved_repo(tmp_path, monkeypatch)
+
+    relinked = master.relink_project(new, "../old")
+
+    assert (relinked.id, relinked.root_path) == (project.id, str(new))
+
+
+def test_relink_project_keeps_the_name_unless_one_is_given(tmp_path, monkeypatch):
+    project, old, new = _moved_repo(tmp_path, monkeypatch)
+
+    kept = master.relink_project(new, str(old))
+    assert kept.name == "old"
+
+    renamed = master.relink_project(new, project.id, name="renamed")
+    assert renamed.name == "renamed"
+    assert renamed.root_path == str(new)
+
+
+def test_relink_project_already_at_the_cwd_changes_nothing(tmp_path, monkeypatch):
+    project, old, new = _moved_repo(tmp_path, monkeypatch)
+
+    assert master.relink_project(old, str(old)) == project
+    assert master.relink_project(old, project.id) == project
+    assert master.list_all_projects() == [project]
+
+
+@pytest.mark.parametrize("ref", [str(uuid.uuid4()), "/never/registered"])
+def test_relink_project_with_an_unknown_ref_is_not_found(tmp_path, monkeypatch, ref):
+    project, old, new = _moved_repo(tmp_path, monkeypatch)
+
+    with pytest.raises(ProjectNotFoundError) as excinfo:
+        master.relink_project(new, ref)
+
+    assert ref in str(excinfo.value)
+    assert "brd projects" in str(excinfo.value)
+    assert master.list_all_projects() == [project]
+
+
+def test_relink_project_with_empty_ref_is_not_found(tmp_path, monkeypatch):
+    # "" normalises to the cwd itself; it must not match the cwd's project.
+    project, old, new = _moved_repo(tmp_path, monkeypatch)
+
+    with pytest.raises(ProjectNotFoundError):
+        master.relink_project(old, "")
+
+    assert master.list_all_projects() == [project]
+
+
+def test_relink_project_onto_another_projects_root_is_refused(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    a = tmp_path / "a"
+    b = tmp_path / "b"
+    a.mkdir()
+    b.mkdir()
+    project_a = master.init_project(a)
+    project_b = master.init_project(b)
+
+    with pytest.raises(ProjectAlreadyExistsError) as excinfo:
+        master.relink_project(b, project_a.id)
+
+    message = str(excinfo.value)
+    assert str(b) in message
+    assert project_b.name in message
+    assert project_b.id in message
+    assert sorted(master.list_all_projects(), key=lambda p: p.id) == sorted(
+        [project_a, project_b], key=lambda p: p.id
+    )
+
+
+def test_relink_project_refusal_leaves_the_database_writable(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    a = tmp_path / "a"
+    b = tmp_path / "b"
+    c = tmp_path / "c"
+    for d in (a, b, c):
+        d.mkdir()
+    project_a = master.init_project(a)
+    master.init_project(b)
+    with pytest.raises(ProjectAlreadyExistsError):
+        master.relink_project(b, project_a.id)
+
+    # A lock or a half-applied update left behind would show up here.
+    project_c = master.init_project(c)
+
+    assert {p.root_path for p in master.list_all_projects()} == {str(a), str(b), str(c)}
+    assert _resolve(c) == project_c
+    assert _resolve(a) == project_a
+
+
+def test_relink_project_into_another_projects_tree_nests_it(tmp_path, monkeypatch):
+    project, old, new = _moved_repo(tmp_path, monkeypatch)
+    outer = tmp_path / "outer"
+    inner = outer / "inner"
+    (inner / "x").mkdir(parents=True)
+    (outer / "y").mkdir()
+    outer_project = master.init_project(outer)
+
+    relinked = master.relink_project(inner, str(old))
+
+    assert relinked.id == project.id
+    assert _resolve(inner / "x") == relinked
+    assert _resolve(outer / "y") == outer_project
