@@ -98,6 +98,7 @@ def init_project(root_path: Path, name: str | None = None) -> Project:
     finally:
         conn.close()
 
+
 def find_marker(start: Path) -> Path | None:
     current = start.resolve()
     while True:
