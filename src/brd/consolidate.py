@@ -202,7 +202,23 @@ def migrate(conn: sqlite3.Connection) -> Report:
     )
 
 
+def _rename(source: Path, target: Path) -> None:
+    try:
+        source.rename(target)
+    except OSError:
+        # brd.db is migrated, so this never runs again; the stray old file
+        # is left for the user.
+        pass
+
+
 def retire(old_files: list[Path]) -> None:
-    """Rename each old file with the .migrated suffix; never delete one."""
+    """Rename each old file with the .migrated suffix, and its -wal/-shm
+    sidecars with it so the renamed file still opens with all its data.
+    Never deletes a file."""
     for path in old_files:
-        path.rename(path.with_name(path.name + SUFFIX))
+        target = path.with_name(path.name + SUFFIX)
+        _rename(path, target)
+        for sidecar in ("-wal", "-shm"):
+            source = path.with_name(path.name + sidecar)
+            if source.exists():
+                _rename(source, target.with_name(target.name + sidecar))

@@ -1,5 +1,6 @@
 import shutil
 import sqlite3
+import threading
 from pathlib import Path
 
 import pytest
@@ -433,3 +434,109 @@ def test_failed_backup_copy_removes_the_backups_it_copied(data, tmp_path, monkey
     assert sorted(path.name for path in (data / "docs").iterdir()) == ["keep.md"]
     assert (data / "docs" / "keep.md").read_text() == "mine"
     assert_nothing_migrated([owner])
+
+
+def test_concurrent_first_runs_migrate_exactly_once(tmp_path, monkeypatch):
+    for attempt in range(5):
+        monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / f"data{attempt}"))
+        for name in ("one", "two"):
+            project = register(tmp_path / f"roots{attempt}", name)
+            conn = v4_board(project)
+            make_card(conn, f"{name}-card", project_id=project.id)
+            conn.close()
+        barrier = threading.Barrier(4, timeout=20)
+        notices: list[str] = []
+        errors = []
+
+        def first_run():
+            try:
+                barrier.wait()
+                master.connect(notify=notices.append).close()
+            except Exception as exc:  # noqa: BLE001 — collected and asserted below
+                errors.append(exc)
+
+        threads = [threading.Thread(target=first_run) for _ in range(4)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        assert errors == []
+        assert notices == [NOTICE.format(n=2)]
+        conn = db.connect(paths.brd_db_path())
+        try:
+            assert rows(conn, "cards", "id") == [("one-card",), ("two-card",)]
+            assert len(rows(conn, "projects")) == 2
+        finally:
+            conn.close()
+        assert migrated(paths.master_db_path()).is_file()
+        assert not paths.master_db_path().exists()
+
+
+def test_concurrent_first_runs_on_a_fresh_install_all_succeed(tmp_path, monkeypatch):
+    for attempt in range(10):
+        monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / f"fresh{attempt}"))
+        barrier = threading.Barrier(4, timeout=20)
+        notices: list[str] = []
+        errors = []
+
+        def first_run():
+            try:
+                barrier.wait()
+                master.connect(notify=notices.append).close()
+            except Exception as exc:  # noqa: BLE001 — collected and asserted below
+                errors.append(exc)
+
+        threads = [threading.Thread(target=first_run) for _ in range(4)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        assert errors == []
+        assert notices == []
+
+
+def test_failed_rename_neither_fails_nor_reruns_the_migration(data, tmp_path, monkeypatch):
+    owner = register(tmp_path, "owner")
+    conn = v4_board(owner)
+    make_card(conn, "c1", project_id=owner.id)
+    conn.close()
+    stuck = board_path(owner)
+    real_rename = Path.rename
+
+    def rename(self, target):
+        if self == stuck:
+            raise PermissionError("read-only")
+        return real_rename(self, target)
+
+    monkeypatch.setattr(Path, "rename", rename)
+    first, notices = open_brd()
+    first.close()
+    assert notices == [NOTICE.format(n=1)]
+    assert stuck.is_file()
+    assert migrated(paths.master_db_path()).is_file()
+
+    second, again = open_brd()
+    try:
+        assert rows(second, "cards", "id") == [("c1",)]
+    finally:
+        second.close()
+    assert again == []
+
+
+def test_wal_sidecar_follows_its_database(data, tmp_path):
+    owner = register(tmp_path, "owner")
+    holder = v4_board(owner)
+    make_card(holder, "c1", project_id=owner.id)
+    board = board_path(owner)
+    # This open connection keeps the board's -wal file on disk.
+    try:
+        assert board.with_name(board.name + "-wal").exists()
+        brd, _ = open_brd()
+        brd.close()
+        renamed = migrated(board)
+        assert renamed.is_file()
+        assert renamed.with_name(renamed.name + "-wal").exists()
+        assert not board.with_name(board.name + "-wal").exists()
+    finally:
+        holder.close()

@@ -1,17 +1,39 @@
 import sqlite3
+import time
 import uuid
 from pathlib import Path
 
 from brd.errors import MigrationError
 from brd.models import Card, Project
 
+_BUSY_TIMEOUT = 10
+
+
+def _use_wal(conn: sqlite3.Connection) -> None:
+    # Switching a brand-new file to WAL can fail at once with "database is
+    # locked" while another connection does the same: SQLite does not run the
+    # busy handler there. Retry for as long as the busy timeout would wait.
+    deadline = time.monotonic() + _BUSY_TIMEOUT
+    while True:
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+            return
+        except sqlite3.OperationalError as exc:
+            if "locked" not in str(exc) or time.monotonic() >= deadline:
+                raise
+            time.sleep(0.01)
+
 
 def connect(db_path: Path) -> sqlite3.Connection:
     # Wait for concurrent writers (e.g. parallel first-run migrations)
     # instead of failing immediately with "database is locked".
-    conn = sqlite3.connect(db_path, timeout=10)
+    conn = sqlite3.connect(db_path, timeout=_BUSY_TIMEOUT)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
+    try:
+        _use_wal(conn)
+    except BaseException:
+        conn.close()
+        raise
     conn.execute("PRAGMA foreign_keys=ON")
     return conn
 

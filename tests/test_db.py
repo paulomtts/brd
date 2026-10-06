@@ -777,3 +777,28 @@ def test_card_parent_must_be_in_same_project(pconn):
             "VALUES ('orphan', 'o', 'todo', 'ghost', 'now', 'now')"
         )
     pconn.rollback()
+
+
+def test_concurrent_first_opens_of_a_new_file_all_succeed(tmp_path):
+    import threading
+
+    # Switching a brand-new file to WAL can fail at once under contention,
+    # without waiting on the busy timeout; every first open must still work.
+    for attempt in range(20):
+        path = tmp_path / f"new{attempt}.db"
+        barrier = threading.Barrier(4, timeout=20)
+        errors = []
+
+        def open_it():
+            try:
+                barrier.wait()
+                db.connect(path).close()
+            except Exception as exc:  # noqa: BLE001 — collected and asserted below
+                errors.append(exc)
+
+        threads = [threading.Thread(target=open_it) for _ in range(4)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        assert errors == [], attempt
