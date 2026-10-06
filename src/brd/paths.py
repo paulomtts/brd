@@ -15,6 +15,14 @@ def master_db_path() -> Path:
     return data_dir() / "master.db"
 
 
+def brd_db_path() -> Path:
+    return data_dir() / "brd.db"
+
+
+def docs_dir() -> Path:
+    return data_dir() / "docs"
+
+
 def project_db_path(root_path: Path) -> Path:
     projects_dir = data_dir() / "projects"
     projects_dir.mkdir(parents=True, exist_ok=True)

@@ -331,7 +331,7 @@ def _rebuild_table(
     conn.execute(f"ALTER TABLE {table}_new RENAME TO {table}")
 
 
-def _migrate_to_v4(conn: sqlite3.Connection, project: Project) -> None:
+def _migrate_to_v4(conn: sqlite3.Connection, project: Project | None) -> None:
     # Drop the register triggers first: ALTER TABLE RENAME re-parses every
     # trigger, and their INSERT INTO entities would break the rebuilds.
     for table, _ in _ENTITY_KINDS:
@@ -340,12 +340,15 @@ def _migrate_to_v4(conn: sqlite3.Connection, project: Project) -> None:
     # replaces it.
     conn.execute("DROP TABLE IF EXISTS projects")
     conn.execute(_PROJECTS_SQL.format(name="projects"))
-    conn.execute(
-        "INSERT INTO projects (id, name, root_path, created_at) VALUES (?, ?, ?, ?)",
-        (project.id, project.name, project.root_path, project.created_at),
-    )
+    # No project: brd.db's empty schema, with no rows to stamp.
+    project_id = project.id if project is not None else None
+    if project is not None:
+        conn.execute(
+            "INSERT INTO projects (id, name, root_path, created_at) VALUES (?, ?, ?, ?)",
+            (project.id, project.name, project.root_path, project.created_at),
+        )
     _rebuild_table(
-        conn, "entities", _ENTITIES_SQL, "id, kind, project_id", "id, kind, ?", (project.id,)
+        conn, "entities", _ENTITIES_SQL, "id, kind, project_id", "id, kind, ?", (project_id,)
     )
     _rebuild_table(
         conn,
@@ -353,7 +356,7 @@ def _migrate_to_v4(conn: sqlite3.Connection, project: Project) -> None:
         _DOCUMENTS_SQL,
         f"id, project_id, {_DOCUMENT_COLUMNS}",
         f"id, ?, {_DOCUMENT_COLUMNS}",
-        (project.id,),
+        (project_id,),
     )
     _rebuild_table(
         conn, "blocked_by", _V4_BLOCKED_BY_SQL, "card_id, blocks_on_id", "card_id, blocks_on_id"
@@ -431,6 +434,17 @@ def migrate_project(conn: sqlite3.Connection, project: Project) -> None:
 
 def init_project_schema(conn: sqlite3.Connection, project: Project) -> None:
     migrate_project(conn, project)
+
+
+def init_brd_schema(conn: sqlite3.Connection) -> None:
+    """Build brd.db's empty v4 schema: the migrations a fresh board runs, so
+    the two cannot drift, but with no projects row. Runs inside the caller's
+    transaction with foreign keys off, as migrate_project runs them; the
+    caller sets user_version and commits."""
+    _migrate_to_v1(conn)
+    _migrate_to_v2(conn)
+    _migrate_to_v3(conn)
+    _migrate_to_v4(conn, None)
 
 
 def docs_dir(conn: sqlite3.Connection) -> Path:
