@@ -548,13 +548,10 @@ def deepest_project(conn: sqlite3.Connection, root_paths: list[str]) -> Project 
 
 
 def delete_project(conn: sqlite3.Connection, project_id: str) -> None:
-    """Delete the project and, through the cascade, everything it owns. Edges
-    from other projects that point at its entities have no foreign key to
-    cascade through, so they go explicitly, in the same transaction."""
-    owned = "SELECT id FROM entities WHERE project_id = ?"
+    """Delete the project and, through the cascade, everything it owns,
+    including its outgoing edges. Edges from other projects that point at
+    its entities stay: they become not-found and reconnect if the ids return."""
     with conn:
-        conn.execute(f"DELETE FROM blocked_by WHERE blocks_on_id IN ({owned})", (project_id,))
-        conn.execute(f"DELETE FROM refs WHERE dst_id IN ({owned})", (project_id,))
         conn.execute("DELETE FROM projects WHERE id = ?", (project_id,))
 
 

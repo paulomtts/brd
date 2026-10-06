@@ -3,7 +3,7 @@ import uuid
 
 import pytest
 
-from brd import core, db, master, paths
+from brd import core, db, entities, master, paths
 from brd.errors import ProjectAlreadyExistsError, ProjectNotFoundError
 from brd.models import Project
 from tests.factories import PROJECT, make_card, make_document, make_issue
@@ -776,17 +776,20 @@ def test_forget_project_by_id_does_not_match_a_root_path(tmp_path, monkeypatch):
     assert len(master.list_all_projects()) == 2
 
 
-def test_forgetting_a_project_removes_edges_other_projects_point_at_it(
+def test_forgetting_a_project_keeps_edges_other_projects_point_at_it(
     tmp_path, monkeypatch
 ):
     project_a, project_b = _two_projects(tmp_path, monkeypatch)
     conn = _brd()
     try:
         make_card(conn, "a1", project_id=project_a.id)
+        make_card(conn, "a0", status="done", project_id=project_a.id)
         make_card(conn, "b1", project_id=project_b.id)
         make_card(conn, "b2", status="done", project_id=project_b.id)
+        make_card(conn, "b3", project_id=project_b.id)
         db.add_blocked_by_edge(conn, "b1", "a1")
         db.add_blocked_by_edge(conn, "b1", "b2")
+        db.add_blocked_by_edge(conn, "b3", "a0")
         with conn:
             for dst in ("a1", "b2"):
                 conn.execute(
@@ -794,6 +797,7 @@ def test_forgetting_a_project_removes_edges_other_projects_point_at_it(
                     (dst,),
                 )
         assert core.resolve_status(conn, db.get_card(conn, "b1")) == "blocked"
+        assert core.resolve_status(conn, db.get_card(conn, "b3")) == "todo"
     finally:
         conn.close()
 
@@ -801,12 +805,42 @@ def test_forgetting_a_project_removes_edges_other_projects_point_at_it(
 
     conn = _brd()
     try:
+        assert set(db.list_blockers_of(conn, "b1")) == {"a1", "b2"}
+        assert core.resolve_status(conn, db.get_card(conn, "b1")) == "blocked"
+        # a0 was done, so b3 was ready; now a0 is not found and b3 fails closed.
+        assert core.resolve_status(conn, db.get_card(conn, "b3")) == "blocked"
+        assert {
+            (r["src_id"], r["dst_id"]) for r in conn.execute("SELECT src_id, dst_id FROM refs")
+        } == {("b1", "a1"), ("b1", "b2")}
         assert conn.execute(
-            "SELECT COUNT(*) FROM blocked_by WHERE blocks_on_id = 'a1'"
+            "SELECT COUNT(*) FROM entities WHERE project_id = ?", (project_a.id,)
         ).fetchone()[0] == 0
-        assert conn.execute("SELECT COUNT(*) FROM refs WHERE dst_id = 'a1'").fetchone()[0] == 0
-        assert db.list_blockers_of(conn, "b1") == ["b2"]
-        assert [r["dst_id"] for r in conn.execute("SELECT dst_id FROM refs")] == ["b2"]
+    finally:
+        conn.close()
+
+
+def test_deleting_an_entity_still_removes_edges_from_other_projects(tmp_path, monkeypatch):
+    project_a, project_b = _two_projects(tmp_path, monkeypatch)
+    conn = _brd()
+    try:
+        make_card(conn, "a1", project_id=project_a.id)
+        make_issue(conn, "ai", project_id=project_a.id)
+        make_card(conn, "b1", project_id=project_b.id)
+        db.add_blocked_by_edge(conn, "b1", "a1")
+        db.add_blocked_by_edge(conn, "b1", "ai")
+        with conn:
+            conn.execute(
+                "INSERT INTO refs (src_id, dst_id, origin) VALUES ('b1', 'a1', 'explicit')"
+            )
+
+        entities.delete(conn, "ai")
+        assert db.list_blockers_of(conn, "b1") == ["a1"]
+
+        db.delete_card(conn, "a1")
+        assert db.list_blockers_of(conn, "b1") == []
+        assert conn.execute(
+            "SELECT COUNT(*) FROM refs WHERE src_id = 'b1' AND dst_id = 'a1'"
+        ).fetchone()[0] == 0
         assert core.resolve_status(conn, db.get_card(conn, "b1")) == "todo"
     finally:
         conn.close()
