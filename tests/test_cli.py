@@ -790,3 +790,22 @@ def test_delete_refuses_a_foreign_card(foreign):
     _refused("delete", foreign)
     _refused("delete", foreign, "--cascade")
     assert ok("show", foreign)["id"] == foreign
+
+
+def test_block_and_unblock_refuse_a_foreign_card(foreign):
+    mine = ok("add", "--title", "mine")["id"]
+    _refused("block", foreign, "--by", mine)
+    _refused("unblock", foreign, "--by", mine)
+    assert ok("show", foreign)["blocked_by"] == []
+
+
+def test_blocker_targets_must_be_in_this_project(foreign):
+    mine = ok("add", "--title", "mine")["id"]
+    _refused("block", mine, "--by", foreign)
+    _refused("add", "--title", "t", "--blocked-by", foreign)
+    assert ok("show", mine)["blocked_by"] == []
+
+
+def test_issue_open_refuses_a_foreign_blocks_card(foreign):
+    _refused("issue", "open", "--title", "q", "--blocks", foreign)
+    assert ok("issue", "list") == []

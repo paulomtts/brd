@@ -7,14 +7,6 @@ from brd import core, db, documents, entities, output, views
 from brd import pretty as pretty_render
 from brd.cli._app import app, pretty_option, run
 from brd.errors import CardNotFoundError
-from brd.models import Card
-
-
-def _require_card(conn: sqlite3.Connection, card_id: str) -> Card:
-    card = db.get_card(conn, card_id)
-    if card is None:
-        raise CardNotFoundError(f"no card with id {card_id}")
-    return card
 
 
 @app.command()
@@ -155,8 +147,8 @@ def block(
     """Mark a card as blocked by another card or an open issue."""
 
     def action(ctx):
-        core.block_card(ctx.conn, card_id, by)
-        return views.card_detail(ctx.conn, _require_card(ctx.conn, card_id))
+        core.block_card(ctx.conn, ctx.project.id, card_id, by)
+        return views.card_detail(ctx.conn, core.require_card(ctx.conn, ctx.project.id, card_id))
 
     run(pretty, action)
 
@@ -170,8 +162,8 @@ def unblock(
     """Remove a blocked-by relationship."""
 
     def action(ctx):
-        core.unblock_card(ctx.conn, card_id, by)
-        return views.card_detail(ctx.conn, _require_card(ctx.conn, card_id))
+        core.unblock_card(ctx.conn, ctx.project.id, card_id, by)
+        return views.card_detail(ctx.conn, core.require_card(ctx.conn, ctx.project.id, card_id))
 
     run(pretty, action)
 

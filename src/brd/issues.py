@@ -5,7 +5,6 @@ from datetime import datetime, timezone
 
 from brd import core, db, entities, refs
 from brd.errors import (
-    CardNotFoundError,
     InvalidCloseReasonError,
     InvalidStatusError,
     IssueNotFoundError,
@@ -83,8 +82,7 @@ def open_issue(
     for ref_id in ref_ids:
         entities.require(conn, ref_id)
     for card_id in blocks:
-        if db.get_card(conn, card_id) is None:
-            raise CardNotFoundError(f"no card with id {card_id}")
+        core.require_card(conn, project_id, card_id)
     now = _now()
     issue = Issue(str(uuid.uuid4()), title, body, "open", None, now, now)
     with conn:
@@ -97,7 +95,7 @@ def open_issue(
     for ref_id in ref_ids:
         refs.add_explicit(conn, issue.id, ref_id)
     for card_id in blocks:
-        core.block_card(conn, card_id, issue.id)
+        core.block_card(conn, project_id, card_id, issue.id)
     if body:
         refs.reindex(conn, issue.id)
     return issue

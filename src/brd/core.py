@@ -127,10 +127,12 @@ def require_card(conn: sqlite3.Connection, project_id: str, card_id: str) -> Car
     return card
 
 
-def _require_blocker(conn: sqlite3.Connection, blocker_id: str) -> None:
+def _require_blocker(conn: sqlite3.Connection, project_id: str, blocker_id: str) -> None:
     kind = entities.kind_of(conn, blocker_id)
     if kind is None:
         raise CardNotFoundError(f"no card or issue with id {blocker_id}")
+    # Ownership before kind: a foreign document is reported as foreign.
+    _require_in_project(conn, project_id, blocker_id, "card or issue")
     if kind not in entities.BLOCKERS:
         raise InvalidBlockerError(f"a {kind} can't block a card; only cards and issues can")
 
@@ -159,7 +161,7 @@ def create_card(
 
     blocked_by = blocked_by or []
     for blocker_id in blocked_by:
-        _require_blocker(conn, blocker_id)
+        _require_blocker(conn, project_id, blocker_id)
 
     now = _now()
     card = Card(
@@ -227,16 +229,20 @@ def update_card(
     return require_card(conn, project_id, card_id)
 
 
-def block_card(conn: sqlite3.Connection, card_id: str, blocker_id: str) -> None:
-    _require_card(conn, card_id)
-    _require_blocker(conn, blocker_id)
+def block_card(
+    conn: sqlite3.Connection, project_id: str, card_id: str, blocker_id: str
+) -> None:
+    require_card(conn, project_id, card_id)
+    _require_blocker(conn, project_id, blocker_id)
     if would_create_block_cycle(conn, card_id, blocker_id):
         raise CycleError(f"blocking {card_id} on {blocker_id} would create a cycle")
     db.add_blocked_by_edge(conn, card_id, blocker_id)
 
 
-def unblock_card(conn: sqlite3.Connection, card_id: str, blocker_id: str) -> None:
-    _require_card(conn, card_id)
+def unblock_card(
+    conn: sqlite3.Connection, project_id: str, card_id: str, blocker_id: str
+) -> None:
+    require_card(conn, project_id, card_id)
     db.remove_blocked_by_edge(conn, card_id, blocker_id)
 
 

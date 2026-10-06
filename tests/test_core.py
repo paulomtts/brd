@@ -241,23 +241,23 @@ def test_update_card_can_clear_parent(conn):
 def test_block_card_adds_edge(conn):
     a = core.create_card(conn, PROJECT.id, title="A")
     b = core.create_card(conn, PROJECT.id, title="B")
-    core.block_card(conn, a.id, b.id)
+    core.block_card(conn, PROJECT.id, a.id, b.id)
     assert db.list_blockers_of(conn, a.id) == [b.id]
 
 
 def test_block_card_rejects_cycle(conn):
     a = core.create_card(conn, PROJECT.id, title="A")
     b = core.create_card(conn, PROJECT.id, title="B")
-    core.block_card(conn, a.id, b.id)
+    core.block_card(conn, PROJECT.id, a.id, b.id)
     with pytest.raises(core.CycleError):
-        core.block_card(conn, b.id, a.id)
+        core.block_card(conn, PROJECT.id, b.id, a.id)
 
 
 def test_unblock_card_removes_edge(conn):
     a = core.create_card(conn, PROJECT.id, title="A")
     b = core.create_card(conn, PROJECT.id, title="B")
-    core.block_card(conn, a.id, b.id)
-    core.unblock_card(conn, a.id, b.id)
+    core.block_card(conn, PROJECT.id, a.id, b.id)
+    core.unblock_card(conn, PROJECT.id, a.id, b.id)
     assert db.list_blockers_of(conn, a.id) == []
 
 
@@ -302,7 +302,7 @@ def test_delete_card_with_cascade_removes_subtree(conn):
 def test_delete_card_removes_blocked_by_edges(conn):
     a = core.create_card(conn, PROJECT.id, title="A")
     b = core.create_card(conn, PROJECT.id, title="B")
-    core.block_card(conn, a.id, b.id)
+    core.block_card(conn, PROJECT.id, a.id, b.id)
 
     core.delete_card(conn, PROJECT.id, b.id)
 
@@ -315,9 +315,9 @@ def test_delete_card_cascade_removes_incoming_edges_of_every_deleted_card(conn):
     grandchild = core.create_card(conn, PROJECT.id, title="G", parent_id=child.id)
     outsider = core.create_card(conn, PROJECT.id, title="O")
     unrelated = core.create_card(conn, PROJECT.id, title="U")
-    core.block_card(conn, outsider.id, child.id)
-    core.block_card(conn, outsider.id, grandchild.id)
-    core.block_card(conn, outsider.id, unrelated.id)
+    core.block_card(conn, PROJECT.id, outsider.id, child.id)
+    core.block_card(conn, PROJECT.id, outsider.id, grandchild.id)
+    core.block_card(conn, PROJECT.id, outsider.id, unrelated.id)
     _refs.add_explicit(conn, outsider.id, parent.id)
     _refs.add_explicit(conn, outsider.id, grandchild.id)
     conn.commit()
@@ -365,25 +365,25 @@ def test_create_card_stamps_equal_created_and_updated_at(conn):
 def test_block_card_rejects_unknown_card(conn):
     blocker = core.create_card(conn, PROJECT.id, title="Blocker")
     with pytest.raises(core.CardNotFoundError):
-        core.block_card(conn, "nope", blocker.id)
+        core.block_card(conn, PROJECT.id, "nope", blocker.id)
 
 
 def test_block_card_rejects_unknown_blocker(conn):
     card = core.create_card(conn, PROJECT.id, title="Card")
     with pytest.raises(core.CardNotFoundError):
-        core.block_card(conn, card.id, "nope")
+        core.block_card(conn, PROJECT.id, card.id, "nope")
 
 
 def test_unblock_card_rejects_unknown_card(conn):
     with pytest.raises(core.CardNotFoundError):
-        core.unblock_card(conn, "nope", "also-nope")
+        core.unblock_card(conn, PROJECT.id, "nope", "also-nope")
 
 
 def test_next_cards_returns_unblocked_todo_oldest_first(conn):
     a = core.create_card(conn, PROJECT.id, title="A")
     b = core.create_card(conn, PROJECT.id, title="B")
     blocker = core.create_card(conn, PROJECT.id, title="Blocker")
-    core.block_card(conn, b.id, blocker.id)
+    core.block_card(conn, PROJECT.id, b.id, blocker.id)
 
     result = core.next_cards(conn)
     assert [c.id for c in result] == [a.id, blocker.id]
@@ -476,7 +476,7 @@ def test_next_cards_with_parent_returns_ready_direct_children(conn):
     milestone = core.create_card(conn, PROJECT.id, title="Milestone")
     story_a = core.create_card(conn, PROJECT.id, title="Story A", parent_id=milestone.id)
     story_b = core.create_card(conn, PROJECT.id, title="Story B", parent_id=milestone.id)
-    core.block_card(conn, story_b.id, story_a.id)
+    core.block_card(conn, PROJECT.id, story_b.id, story_a.id)
     core.create_card(conn, PROJECT.id, title="A.1", parent_id=story_a.id)  # unrelated leaf
 
     result = core.next_cards(conn, parent_id=milestone.id)
@@ -653,7 +653,7 @@ def test_resolve_status_dependent_of_story_with_in_progress_child_is_blocked(con
 def test_resolve_status_dependent_of_story_with_blocked_child_is_blocked(conn):
     _story_with_children(conn, "s", ["done", "todo"])
     issue = issues.open_issue(conn, PROJECT.id, "q")
-    core.block_card(conn, "s-c1", issue.id)
+    core.block_card(conn, PROJECT.id, "s-c1", issue.id)
     dependent = _blocked_on(conn, "d", "s")
     assert core.resolve_status(conn, db.get_card(conn, "s-c1")) == "blocked"
 

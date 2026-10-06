@@ -67,7 +67,7 @@ def test_open_issue_blocks_card_until_closed_any_reason(pconn):
     for reason in issues.CLOSE_REASONS:
         card = core.create_card(pconn, PROJECT.id, title=f"w-{reason}")
         issue = issues.open_issue(pconn, PROJECT.id, "q")
-        core.block_card(pconn, card.id, issue.id)
+        core.block_card(pconn, PROJECT.id, card.id, issue.id)
         assert core.resolve_status(pconn, card) == "blocked"
         assert card.id not in [c.id for c in core.next_cards(pconn)]
         issues.close(pconn, issue.id, reason=reason)
@@ -88,7 +88,7 @@ def test_documents_cannot_block(pconn):
     card = core.create_card(pconn, PROJECT.id, title="w")
     make_document(pconn, "d", "notes")
     with pytest.raises(InvalidBlockerError):
-        core.block_card(pconn, card.id, "d")
+        core.block_card(pconn, PROJECT.id, card.id, "d")
     with pytest.raises(InvalidBlockerError):
         core.create_card(pconn, PROJECT.id, title="w2", blocked_by=["d"])
 
@@ -97,7 +97,7 @@ def test_issue_cannot_be_blocked(pconn):
     issue = issues.open_issue(pconn, PROJECT.id, "q")
     card = core.create_card(pconn, PROJECT.id, title="w")
     with pytest.raises(CardNotFoundError):
-        core.block_card(pconn, issue.id, card.id)
+        core.block_card(pconn, PROJECT.id, issue.id, card.id)
 
 
 def test_deleting_issue_unblocks(pconn):

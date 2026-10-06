@@ -176,6 +176,33 @@ REFUSED = [
     pytest.param(
         lambda c: cli_cards.delete_entity(c, P, "q1", True), "q1", "card", id="delete_entity"
     ),
+    pytest.param(
+        lambda c: core.block_card(c, P, "q1", "p1"), "q1", "card", id="block_card_foreign_source"
+    ),
+    pytest.param(
+        lambda c: core.unblock_card(c, P, "q1", "p2"), "q1", "card",
+        id="unblock_card_foreign_source",
+    ),
+    pytest.param(
+        lambda c: core.block_card(c, P, "p1", "q1"), "q1", "card or issue",
+        id="block_card_foreign_card_target",
+    ),
+    pytest.param(
+        lambda c: core.block_card(c, P, "p1", "qi"), "qi", "card or issue",
+        id="block_card_foreign_issue_target",
+    ),
+    pytest.param(
+        lambda c: core.block_card(c, P, "p1", "qd"), "qd", "card or issue",
+        id="block_card_foreign_document_target",
+    ),
+    pytest.param(
+        lambda c: core.create_card(c, P, "new", blocked_by=["p2", "q1"]), "q1", "card or issue",
+        id="create_card_foreign_blocker",
+    ),
+    pytest.param(
+        lambda c: issues.open_issue(c, P, "t", blocks=["p1", "q1"]), "q1", "card",
+        id="open_issue_foreign_blocks",
+    ),
 ]
 
 
@@ -199,3 +226,14 @@ def test_require_card_on_a_missing_id_is_unchanged(two):
 def test_update_card_on_a_foreign_issue_still_says_no_card(two):
     with pytest.raises(CardNotFoundError, match=r"^no card with id qi$"):
         core.update_card(two, P, "qi", title="x")
+
+
+def test_a_document_of_this_project_still_cannot_block(two):
+    make_document(two, "pd", "pnotes")
+    with pytest.raises(InvalidBlockerError):
+        core.block_card(two, P, "p1", "pd")
+
+
+def test_a_missing_blocker_is_unchanged(two):
+    with pytest.raises(CardNotFoundError, match=r"^no card or issue with id nope$"):
+        core.block_card(two, P, "p1", "nope")
