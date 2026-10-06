@@ -63,6 +63,12 @@ def _rows(conn, table, columns="*"):
 
 REGISTER_TRIGGERS = {"cards_register_entity", "issues_register_entity", "documents_register_entity"}
 V4_INDEXES = {"entities_project", "blocked_by_target", "refs_target"}
+V4_TRIGGERS = {
+    "documents_project_insert",
+    "documents_project_update",
+    "cards_parent_project_insert",
+    "cards_parent_project_update",
+}
 PROJECT_ROW = (PROJECT.id, PROJECT.name, PROJECT.root_path, PROJECT.created_at)
 
 
@@ -117,6 +123,7 @@ def test_fresh_db_gets_current_schema(tmp_path):
     assert V4_INDEXES <= _names(conn, "index")
     assert not {name for name in _names(conn, "trigger") if name.endswith("_register_entity")}
     assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
+    assert _names(conn, "trigger") == V4_TRIGGERS
 
 
 def test_v0_cards_are_backfilled_into_entities(v0_path):
@@ -295,6 +302,7 @@ def test_v3_board_migrates_to_v4_with_project_id(tmp_path):
     assert not _names(conn, "trigger") & REGISTER_TRIGGERS
     assert V4_INDEXES <= _names(conn, "index")
     assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
+    assert _names(conn, "trigger") == V4_TRIGGERS
 
 
 def test_v4_migration_failure_leaves_v3_board_intact(tmp_path, monkeypatch):

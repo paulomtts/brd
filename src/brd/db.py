@@ -216,6 +216,30 @@ _V4_INDEXES = [
     "CREATE INDEX refs_target ON refs(dst_id)",
 ]
 
+_SAME_PROJECT_DOCUMENT = (
+    "WHEN NEW.project_id IS NOT (SELECT project_id FROM entities WHERE id = NEW.id) "
+    "BEGIN SELECT RAISE(ABORT, 'a document must be in the same project as its entity'); END"
+)
+
+# Fires only when the parent's entity exists and sits in another project; a
+# parent that is not a card at all is left to the parent_id foreign key.
+_SAME_PROJECT_PARENT = (
+    "WHEN NEW.parent_id IS NOT NULL "
+    "AND (SELECT project_id FROM entities WHERE id = NEW.parent_id) IS NOT NULL "
+    "AND (SELECT project_id FROM entities WHERE id = NEW.parent_id) "
+    "IS NOT (SELECT project_id FROM entities WHERE id = NEW.id) "
+    "BEGIN SELECT RAISE(ABORT, 'a card''s parent must be in the same project as the card'); END"
+)
+
+_V4_TRIGGERS = [
+    f"CREATE TRIGGER documents_project_insert BEFORE INSERT ON documents {_SAME_PROJECT_DOCUMENT}",
+    "CREATE TRIGGER documents_project_update BEFORE UPDATE OF id, project_id ON documents "
+    f"{_SAME_PROJECT_DOCUMENT}",
+    f"CREATE TRIGGER cards_parent_project_insert BEFORE INSERT ON cards {_SAME_PROJECT_PARENT}",
+    "CREATE TRIGGER cards_parent_project_update BEFORE UPDATE OF parent_id ON cards "
+    f"{_SAME_PROJECT_PARENT}",
+]
+
 _DOCUMENT_COLUMNS = "title, source_path, stem, content_hash, created_at, updated_at"
 
 
@@ -338,6 +362,8 @@ def _migrate_to_v4(conn: sqlite3.Connection, project: Project) -> None:
         conn, "refs", _V4_REFS_SQL, "src_id, dst_id, origin", "src_id, dst_id, origin"
     )
     for statement in _V4_INDEXES:
+        conn.execute(statement)
+    for statement in _V4_TRIGGERS:
         conn.execute(statement)
 
 

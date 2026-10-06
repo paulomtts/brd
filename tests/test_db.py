@@ -726,3 +726,54 @@ def test_deleting_project_row_cascades_its_entities(pconn):
     assert _ids(pconn, "SELECT entity_id FROM tags") == ["d2"]
     # D8: an incoming edge from a row that survives stays.
     assert db.list_blockers_of(pconn, "c2") == ["c1"]
+
+
+_INSERT_DOCUMENT = (
+    "INSERT INTO documents (id, project_id, title, source_path, stem, content_hash, "
+    "created_at, updated_at) VALUES (?, ?, 'T', ?, ?, 'h', 'now', 'now')"
+)
+
+
+def test_document_project_must_match_entity(pconn):
+    add_project(pconn, OTHER_PROJECT)
+    db.insert_entity(pconn, PROJECT.id, "d", "document")
+    with pytest.raises(sqlite3.IntegrityError, match="same project"):
+        pconn.execute(_INSERT_DOCUMENT, ("d", OTHER_PROJECT.id, "docs/d.md", "d"))
+    pconn.rollback()
+    with pytest.raises(sqlite3.IntegrityError, match="same project"):
+        pconn.execute(_INSERT_DOCUMENT, ("ghost", PROJECT.id, "docs/g.md", "g"))
+    pconn.rollback()
+
+    make_document(pconn, "ok", "fine")
+    with pytest.raises(sqlite3.IntegrityError, match="same project"):
+        pconn.execute("UPDATE documents SET project_id = ? WHERE id = 'ok'", (OTHER_PROJECT.id,))
+    pconn.rollback()
+    stored = pconn.execute("SELECT project_id FROM documents WHERE id = 'ok'").fetchone()
+    assert stored[0] == PROJECT.id
+
+
+def test_card_parent_must_be_in_same_project(pconn):
+    add_project(pconn, OTHER_PROJECT)
+    make_card(pconn, "foreign", project_id=OTHER_PROJECT.id)
+    make_card(pconn, "home")
+
+    with pytest.raises(sqlite3.IntegrityError, match="same project"):
+        make_card(pconn, "child", parent_id="foreign")
+    assert db.get_card(pconn, "child") is None
+
+    with pytest.raises(sqlite3.IntegrityError, match="same project"):
+        pconn.execute("UPDATE cards SET parent_id = 'foreign' WHERE id = 'home'")
+    pconn.rollback()
+    assert db.get_card(pconn, "home").parent_id is None
+
+    make_card(pconn, "kid", parent_id="home")
+    assert db.get_card(pconn, "kid").parent_id == "home"
+
+    # A parent that is not a card at all still fails on the FK, not the trigger.
+    db.insert_entity(pconn, PROJECT.id, "orphan", "card")
+    with pytest.raises(sqlite3.IntegrityError, match="FOREIGN KEY"):
+        pconn.execute(
+            "INSERT INTO cards (id, title, status, parent_id, created_at, updated_at) "
+            "VALUES ('orphan', 'o', 'todo', 'ghost', 'now', 'now')"
+        )
+    pconn.rollback()
