@@ -16,6 +16,7 @@ from brd.errors import (
     EntityNotFoundError,
     InvalidBlockerError,
     IssueNotFoundError,
+    SelfReferenceError,
 )
 from brd.models import Card
 from tests.factories import (
@@ -511,24 +512,12 @@ SCOPED_REFUSED = [
         id="issue_reopen",
     ),
     pytest.param(
-        lambda c: issues.open_issue(c, P, "t", ref_ids=["q1"]), CardNotFoundError, "q1", "card",
-        id="open_issue_foreign_ref",
-    ),
-    pytest.param(
-        lambda c: issues.open_issue(c, P, "t", ref_ids=["p1", "qd"]), DocumentNotFoundError,
-        "qd", "document", id="open_issue_mixed_refs",
-    ),
-    pytest.param(
         lambda c: cli_cards.delete_entity(c, P, "qi", False), IssueNotFoundError, "qi", "issue",
         id="delete_entity_issue",
     ),
     pytest.param(
         lambda c: refs.add_explicit(c, P, "q1", "p1"), CardNotFoundError, "q1", "card",
         id="ref_add_foreign_source",
-    ),
-    pytest.param(
-        lambda c: refs.add_explicit(c, P, "p1", "qi"), IssueNotFoundError, "qi", "issue",
-        id="ref_add_foreign_target",
     ),
     pytest.param(
         lambda c: refs.remove_explicit(c, P, "q1", "p1"), CardNotFoundError, "q1", "card",
@@ -815,6 +804,39 @@ def test_ref_remove_checks_only_the_source(two):
         refs.remove_explicit(two, P, "q1", "p1")
     refs.remove_explicit(two, P, "p1", "q1")  # a foreign target: the edge still goes
     assert [tuple(r) for r in two.execute("SELECT src_id, dst_id FROM refs")] == [("q1", "p1")]
+
+
+def test_a_ref_can_target_another_projects_entity(two):
+    refs.add_explicit(two, P, "p1", "qi")
+    refs.add_explicit(two, P, "p1", "qd")
+    assert refs.outgoing(two, "p1") == [
+        {"id": "qd", "kind": "document", "title": "qnotes", "origin": "explicit"},
+        {"id": "qi", "kind": "issue", "title": "qi", "origin": "explicit"},
+    ]
+    assert refs.incoming(two, "qi") == [
+        {"id": "p1", "kind": "card", "title": "p1", "origin": "explicit"}
+    ]
+
+
+def test_ref_add_still_refuses_a_missing_target_and_itself(two):
+    before = _state(two)
+    with pytest.raises(EntityNotFoundError, match=r"^no entity with id nope$"):
+        refs.add_explicit(two, P, "p1", "nope")
+    with pytest.raises(SelfReferenceError):
+        refs.add_explicit(two, P, "p1", "p1")
+    assert _state(two) == before
+
+
+def test_open_issue_refs_may_target_another_project(two):
+    issue = issues.open_issue(two, P, "t", ref_ids=["p1", "qd"])
+    assert [r["id"] for r in refs.outgoing(two, issue.id)] == ["p1", "qd"]
+
+
+def test_open_issue_with_a_missing_ref_writes_nothing(two):
+    before = _state(two)
+    with pytest.raises(EntityNotFoundError, match=r"^no entity with id nope$"):
+        issues.open_issue(two, P, "t", ref_ids=["q1", "nope"])
+    assert _state(two) == before
 
 
 def test_tag_counts_cover_only_the_projects_entities(two):

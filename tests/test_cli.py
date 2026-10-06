@@ -1024,7 +1024,6 @@ def test_issue_commands_are_scoped_to_this_project(foreign_entities):
     _refused("issue", "close", issue, error_type="IssueNotFoundError")
     _refused("issue", "reopen", issue, error_type="IssueNotFoundError")
     _refused("delete", issue, error_type="IssueNotFoundError")
-    _refused("issue", "open", "--title", "q", "--ref", foreign_entities["card"])
     shown = ok("show", issue)
     assert (shown["title"], shown["status"]) == ("Foreign issue", "open")
     assert [i["id"] for i in ok("issue", "list")] == [mine]
@@ -1047,10 +1046,24 @@ def test_document_commands_are_scoped_to_this_project(project, foreign_entities)
 def test_ref_commands_are_scoped_to_this_project(foreign_entities):
     mine = ok("add", "--title", "mine")["id"]
     _refused("ref", "add", foreign_entities["card"], mine)
-    _refused("ref", "add", mine, foreign_entities["issue"], error_type="IssueNotFoundError")
     _refused("ref", "remove", foreign_entities["card"], mine)
     assert ok("show", mine)["refs"] == []
     assert ok("show", foreign_entities["card"])["refs"] == []
+
+
+def test_ref_targets_may_live_in_another_project(foreign_entities):
+    mine = ok("add", "--title", "mine")["id"]
+    added = ok("ref", "add", mine, FOREIGN_ISSUE)
+    assert added == {
+        "id": mine,
+        "refs": [
+            {"id": FOREIGN_ISSUE, "kind": "issue", "title": "Foreign issue", "origin": "explicit"}
+        ],
+    }
+    assert [r["id"] for r in ok("show", mine)["refs"]] == [FOREIGN_ISSUE]
+    assert [r["id"] for r in ok("show", FOREIGN_ISSUE)["referenced_by"]] == [mine]
+    issue = ok("issue", "open", "--title", "q", "--ref", FOREIGN)
+    assert [r["id"] for r in ok("show", issue["id"])["refs"]] == [FOREIGN]
 
 
 def test_tag_commands_are_scoped_to_this_project(foreign_entities):

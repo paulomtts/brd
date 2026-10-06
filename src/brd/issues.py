@@ -83,8 +83,7 @@ def open_issue(
     ref_ids = list(dict.fromkeys(ref_ids or []))
     blocks = list(dict.fromkeys(blocks or []))
     for ref_id in ref_ids:
-        # Ref targets stay in the current project until S4 lifts the check.
-        entities.require_in_project(conn, project_id, ref_id)
+        entities.require(conn, ref_id)
     for card_id in blocks:
         # The new issue is this project's; the card it blocks may be any project's.
         core.require_any_card(conn, card_id)

@@ -106,8 +106,8 @@ def reindex_mentions(conn: sqlite3.Connection, project_id: str, stem: str) -> No
 
 def add_explicit(conn: sqlite3.Connection, project_id: str, src_id: str, dst_id: str) -> None:
     entities.require_in_project(conn, project_id, src_id)
-    # Ref targets stay in the current project until S4 lifts the check.
-    entities.require_in_project(conn, project_id, dst_id)
+    # Like a blocker, a ref target may belong to any project.
+    entities.require(conn, dst_id)
     if src_id == dst_id:
         raise SelfReferenceError(f"{src_id} can't reference itself")
     conn.execute(
