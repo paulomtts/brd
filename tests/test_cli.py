@@ -7,7 +7,7 @@ from typer.testing import CliRunner
 
 from brd import db, paths
 from brd.cli import app
-from tests.cli_helpers import err, invoke, ok
+from tests.cli_helpers import err, human, invoke, ok
 from tests.factories import OTHER_PROJECT, add_project, make_card, make_document, make_issue
 
 runner = CliRunner()
@@ -951,11 +951,27 @@ def test_block_and_unblock_refuse_a_foreign_card(foreign):
     assert ok("show", foreign)["blocked_by"] == []
 
 
-def test_blocker_targets_must_be_in_this_project(foreign):
+def test_blocker_targets_may_live_in_another_project(foreign_entities):
     mine = ok("add", "--title", "mine")["id"]
-    _refused("block", mine, "--by", foreign)
-    _refused("add", "--title", "t", "--blocked-by", foreign)
-    assert ok("show", mine)["blocked_by"] == []
+    ok("block", mine, "--by", FOREIGN)
+    blocked = ok("block", mine, "--by", FOREIGN_ISSUE)
+    assert sorted(blocked["blocked_by"]) == sorted([FOREIGN, FOREIGN_ISSUE])
+    assert blocked["status"] == "blocked"
+    added = ok("add", "--title", "t", "--blocked-by", FOREIGN)
+    assert (added["blocked_by"], added["status"]) == ([FOREIGN], "blocked")
+    assert err("block", mine, "--by", FOREIGN_DOC) == "InvalidBlockerError"
+    next_ids = [c["id"] for c in ok("next")]
+    assert mine not in next_ids and added["id"] not in next_ids
+    ok("unblock", mine, "--by", FOREIGN)
+    unblocked = ok("unblock", mine, "--by", FOREIGN_ISSUE)
+    assert (unblocked["blocked_by"], unblocked["status"]) == ([], "todo")
+    assert mine in [c["id"] for c in ok("next")]
+
+
+def test_show_pretty_renders_a_foreign_blocker(foreign):
+    mine = ok("add", "--title", "mine")["id"]
+    ok("block", mine, "--by", foreign)
+    assert "Foreign" in human("show", mine)
 
 
 def test_issue_open_refuses_a_foreign_blocks_card(foreign):

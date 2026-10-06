@@ -9,6 +9,7 @@ from brd.cli import cards as cli_cards
 from brd.errors import (
     CardNotFoundError,
     CommentNotFoundError,
+    CycleError,
     DocumentNotFoundError,
     DuplicatePathError,
     DuplicateStemError,
@@ -197,20 +198,8 @@ REFUSED = [
         id="unblock_card_foreign_source",
     ),
     pytest.param(
-        lambda c: core.block_card(c, P, "p1", "q1"), "q1", "card or issue",
-        id="block_card_foreign_card_target",
-    ),
-    pytest.param(
-        lambda c: core.block_card(c, P, "p1", "qi"), "qi", "card or issue",
-        id="block_card_foreign_issue_target",
-    ),
-    pytest.param(
-        lambda c: core.block_card(c, P, "p1", "qd"), "qd", "card or issue",
-        id="block_card_foreign_document_target",
-    ),
-    pytest.param(
-        lambda c: core.create_card(c, P, "new", blocked_by=["p2", "q1"]), "q1", "card or issue",
-        id="create_card_foreign_blocker",
+        lambda c: core.block_card(c, P, "q1", "qi"), "q1", "card",
+        id="block_card_foreign_source_foreign_target",
     ),
     pytest.param(
         lambda c: issues.open_issue(c, P, "t", blocks=["p1", "q1"]), "q1", "card",
@@ -262,6 +251,100 @@ def test_a_document_of_this_project_still_cannot_block(two):
 def test_a_missing_blocker_is_unchanged(two):
     with pytest.raises(CardNotFoundError, match=r"^no card or issue with id nope$"):
         core.block_card(two, P, "p1", "nope")
+
+
+def _status(conn, card_id):
+    return core.resolve_status(conn, db.get_card(conn, card_id))
+
+
+def _next(conn, project_id):
+    return {card.id for card in core.next_cards(conn, project_id)}
+
+
+def test_a_card_or_issue_of_another_project_can_block(two):
+    core.block_card(two, P, "p1", "q1")
+    core.block_card(two, P, "p1", "qi")
+    assert sorted(db.list_blockers_of(two, "p1")) == ["q1", "qi"]
+
+
+def test_a_new_card_can_be_blocked_by_another_projects_issue(two):
+    card = core.create_card(two, P, "new", blocked_by=["p2", "qi"])
+    assert db.owner_of(two, card.id).id == P
+    assert sorted(db.list_blockers_of(two, card.id)) == ["p2", "qi"]
+
+
+def test_a_foreign_document_is_refused_for_its_kind(two):
+    before = _state(two)
+    message = r"^a document can't block a card; only cards and issues can$"
+    with pytest.raises(InvalidBlockerError, match=message):
+        core.block_card(two, P, "p1", "qd")
+    with pytest.raises(InvalidBlockerError, match=message):
+        core.create_card(two, P, "n", blocked_by=["qd"])
+    assert _state(two) == before
+
+
+def test_a_card_still_cannot_block_itself(two):
+    before = _state(two)
+    with pytest.raises(CycleError, match=r"^blocking p1 on p1 would create a cycle$"):
+        core.block_card(two, P, "p1", "p1")
+    assert _state(two) == before
+
+
+def test_a_repeated_foreign_block_fails_like_a_repeated_local_one(two):
+    core.block_card(two, P, "p1", "p2")
+    core.block_card(two, P, "p1", "q1")
+    with pytest.raises(sqlite3.IntegrityError):
+        core.block_card(two, P, "p1", "p2")
+    with pytest.raises(sqlite3.IntegrityError):
+        core.block_card(two, P, "p1", "q1")
+
+
+def test_a_card_is_released_when_a_foreign_blocker_chain_releases(two):
+    core.block_card(two, P, "p1", "q1")
+    assert _status(two, "p1") == "blocked"
+    # q1 is itself blocked by p2 (fixture): releasing p2 frees q1, not p1.
+    core.update_card(two, P, "p2", status="done")
+    assert _status(two, "q1") == "todo"
+    assert _status(two, "p1") == "blocked"
+    core.update_card(two, Q, "q1", status="done")
+    assert _status(two, "p1") == "todo"
+    assert "p1" in _next(two, P)
+
+
+def test_a_foreign_issue_blocks_while_open_whatever_the_close_reason(two):
+    core.block_card(two, P, "p1", "qi")
+    assert _status(two, "p1") == "blocked"
+    assert "p1" not in _next(two, P)
+    issues.close(two, Q, "qi", reason="wontfix")
+    assert _status(two, "p1") == "todo"
+    assert "p1" in _next(two, P)
+    issues.reopen(two, Q, "qi")
+    assert _status(two, "p1") == "blocked"
+
+
+def test_a_foreign_container_releases_when_every_child_releases(two):
+    make_card(two, "qs", project_id=Q)
+    make_card(two, "qs1", parent_id="qs", project_id=Q)
+    make_card(two, "qs2", parent_id="qs", project_id=Q)
+    core.block_card(two, P, "p1", "qs")
+    assert _status(two, "p1") == "blocked"
+    core.update_card(two, Q, "qs1", status="done")
+    assert _status(two, "p1") == "blocked"
+    core.update_card(two, Q, "qs2", status="canceled")
+    assert _status(two, "p1") == "todo"
+    assert _status(two, "qs") == "todo"
+
+
+def test_a_cycle_through_another_project_is_refused(two):
+    core.block_card(two, P, "p1", "q1")
+    before = _state(two)
+    with pytest.raises(CycleError, match=r"^blocking q1 on p1 would create a cycle$"):
+        core.block_card(two, Q, "q1", "p1")
+    assert _state(two) == before
+    # q1 is blocked by p2 (fixture), so p2 -> p1 would close p2 -> p1 -> q1 -> p2.
+    with pytest.raises(CycleError, match=r"^blocking p2 on p1 would create a cycle$"):
+        core.block_card(two, P, "p2", "p1")
+    assert _state(two) == before
 
 
 def test_list_cards_returns_only_the_projects_cards(two):
