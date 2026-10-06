@@ -5,7 +5,7 @@ import uuid
 import pytest
 from typer.testing import CliRunner
 
-from brd import db, paths
+from brd import db, paths, prompt
 from brd.cli import app
 from brd.models import Project
 from tests.cli_helpers import err, human, invoke, ok
@@ -45,6 +45,7 @@ def test_prompt_prints_plain_markdown_not_json():
     assert result.exit_code == 0
     assert "## Task tracking with brd" in result.output
     assert "brd --help" in result.output
+    assert result.output == prompt.render()
     with pytest.raises(json.JSONDecodeError):
         json.loads(result.output)
 

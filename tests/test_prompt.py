@@ -58,3 +58,18 @@ def test_help_names_every_releasing_status():
     text = _help_text()
     for status in sorted(core._RELEASING_STATUSES):
         assert status in text, status
+
+
+def test_prompt_states_the_blocking_contract():
+    snippet = prompt.render()
+    for phrase in (
+        "authoritative",
+        "other projects",
+        "not-found",
+        "brd next",
+        "blocked_by",
+        "blockers",
+        "released",
+        "all of its children",
+    ):
+        assert phrase in snippet, phrase
