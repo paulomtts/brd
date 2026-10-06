@@ -43,9 +43,9 @@ def list_cmd(
 
     def action(ctx):
         wanted = [tags.normalize(tag) for tag in tag_list]
-        results = documents.sync_all(ctx.conn, Path(ctx.project.root_path))
+        results = documents.sync_all(ctx.conn, ctx.project.id, Path(ctx.project.root_path))
         items = []
-        for doc in documents.list_all(ctx.conn):
+        for doc in documents.list_all(ctx.conn, ctx.project.id):
             state = results[doc.id].source_state
             if missing and state not in ("missing", "lost"):
                 continue
@@ -68,7 +68,12 @@ def update(
 
     def action(ctx):
         doc, result = documents.update(
-            ctx.conn, Path(ctx.project.root_path), doc_id, new_path=path, title=title
+            ctx.conn,
+            ctx.project.id,
+            Path(ctx.project.root_path),
+            doc_id,
+            new_path=path,
+            title=title,
         )
         return views.document_summary(ctx.conn, doc, result.source_state)
 
@@ -84,7 +89,9 @@ def restore(
     """Write brd's backup back to the document's source path."""
 
     def action(ctx):
-        doc = documents.restore(ctx.conn, Path(ctx.project.root_path), doc_id, force=force)
+        doc = documents.restore(
+            ctx.conn, ctx.project.id, Path(ctx.project.root_path), doc_id, force=force
+        )
         return views.document_summary(ctx.conn, doc, "ok")
 
     run(pretty, action)

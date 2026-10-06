@@ -1,5 +1,6 @@
 import re
 import sqlite3
+from pathlib import Path
 
 import pytest
 
@@ -8,6 +9,8 @@ from brd.cli import cards as cli_cards
 from brd.errors import (
     CardNotFoundError,
     DocumentNotFoundError,
+    DuplicatePathError,
+    DuplicateStemError,
     EntityNotFoundError,
     InvalidBlockerError,
     IssueNotFoundError,
@@ -303,28 +306,30 @@ def test_export_cards_hold_only_the_projects_cards(two, tmp_path):
 @pytest.mark.parametrize(
     ("entity_id", "owner", "expected"),
     [
-        ("p1", PROJECT, lambda c, root: views.card_detail(c, db.get_card(c, "p1"))),
-        ("q1", OTHER_PROJECT, lambda c, root: views.card_detail(c, db.get_card(c, "q1"))),
-        ("qi", OTHER_PROJECT, lambda c, root: views.issue_detail(c, issues.require(c, Q, "qi"))),
+        ("p1", PROJECT, lambda c: views.card_detail(c, db.get_card(c, "p1"))),
+        ("q1", OTHER_PROJECT, lambda c: views.card_detail(c, db.get_card(c, "q1"))),
+        ("qi", OTHER_PROJECT, lambda c: views.issue_detail(c, issues.require(c, Q, "qi"))),
         (
             "qd",
             OTHER_PROJECT,
-            lambda c, root: views.document_detail(
-                c, documents.require(c, "qd"), documents.sync(c, root, documents.require(c, "qd"))
+            lambda c: views.document_detail(
+                c,
+                documents.require(c, Q, "qd"),
+                documents.sync(c, Path(OTHER_PROJECT.root_path), documents.require(c, Q, "qd")),
             ),
         ),
     ],
     ids=["own_card", "foreign_card", "foreign_issue", "foreign_document"],
 )
-def test_detail_is_global_and_names_the_owner(two, tmp_path, entity_id, owner, expected):
-    shown = views.detail(two, tmp_path, entity_id)
+def test_detail_is_global_and_names_the_owner(two, entity_id, owner, expected):
+    shown = views.detail(two, entity_id)
     assert shown.pop("project") == {"id": owner.id, "name": owner.name}
-    assert shown == expected(two, tmp_path)
+    assert shown == expected(two)
 
 
-def test_detail_of_a_missing_id_is_unchanged(two, tmp_path):
+def test_detail_of_a_missing_id_is_unchanged(two):
     with pytest.raises(CardNotFoundError, match=r"^no card, issue, or document with id nope$"):
-        views.detail(two, tmp_path, "nope")
+        views.detail(two, "nope")
 
 
 def test_card_detail_has_no_project_key(two):
@@ -419,3 +424,111 @@ def test_scoped_refusal_names_the_owner_and_writes_nothing(two, call, error, for
     with pytest.raises(error, match=_foreign(foreign_id, what)):
         call(two)
     assert _state(two) == before
+
+
+@pytest.fixture
+def root(tmp_path):
+    repo = tmp_path / "repo"
+    (repo / "docs").mkdir(parents=True)
+    return repo
+
+
+def _write(root, rel, text):
+    path = root / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+    return path
+
+
+def _doc_state(conn, doc_id):
+    row = conn.execute("SELECT * FROM documents WHERE id = ?", (doc_id,)).fetchone()
+    backup = documents.backup_path(conn, doc_id)
+    return (tuple(row) if row else None, backup.read_text() if backup.is_file() else None)
+
+
+def test_require_document_on_a_missing_or_non_document_id_is_unchanged(two):
+    for missing in ("nope", "p1"):
+        with pytest.raises(DocumentNotFoundError, match=rf"^no document with id {missing}$"):
+            documents.require(two, P, missing)
+
+
+def test_list_and_sync_all_cover_only_the_projects_documents(two, root):
+    make_document(two, "pd", "pnotes", content="old")
+    _write(root, "docs/pnotes.md", "new")
+    _write(root, "docs/qnotes.md", "changed")  # Q's source path, under P's root
+    q_before = _doc_state(two, "qd")
+    assert [d.id for d in documents.list_all(two, P)] == ["pd"]
+    assert [d.id for d in documents.list_all(two, Q)] == ["qd"]
+    results = documents.sync_all(two, P, root)
+    assert {k: v.source_state for k, v in results.items()} == {"pd": "updated"}
+    assert _doc_state(two, "qd") == q_before
+
+
+def test_document_uniqueness_is_per_project(two, root):
+    make_document(two, "qn", "notes", project_id=Q)  # Q's docs/notes.md
+    mine = documents.add(two, P, root, _write(root, "docs/notes.md", "p"))
+    assert (mine.source_path, mine.stem) == ("docs/notes.md", "notes")
+    with pytest.raises(DuplicateStemError):
+        documents.add(two, P, root, _write(root, "other/Notes.md", ""))
+    with pytest.raises(DuplicatePathError):
+        documents.add(two, P, root, root / "docs" / "notes.md")
+    second = documents.add(two, P, root, _write(root, "docs/second.md", ""))
+    moved, _ = documents.update(
+        two, P, root, second.id, new_path=_write(root, "elsewhere/qnotes.md", "")
+    )
+    assert moved.stem == "qnotes"  # Q's qd has this stem too
+
+
+DOC_REFUSED = [
+    pytest.param(
+        lambda c, root: documents.update(c, P, root, "qd", title="x"), id="update_title"
+    ),
+    pytest.param(
+        lambda c, root: documents.update(c, P, root, "qd", new_path=root / "docs" / "moved.md"),
+        id="update_path",
+    ),
+    pytest.param(lambda c, root: documents.update(c, P, root, "qd"), id="update_sync_only"),
+    pytest.param(
+        lambda c, root: documents.restore(c, P, root, "qd", force=True), id="restore"
+    ),
+    pytest.param(lambda c, root: documents.delete(c, P, "qd"), id="delete"),
+    pytest.param(
+        lambda c, root: cli_cards.delete_entity(c, P, "qd", False), id="delete_entity"
+    ),
+]
+
+
+@pytest.mark.parametrize("call", DOC_REFUSED)
+def test_a_foreign_document_is_refused_and_untouched(two, root, call):
+    _write(root, "docs/moved.md", "moved")
+    _write(root, "docs/qnotes.md", "changed")
+    before = _doc_state(two, "qd")
+    with pytest.raises(DocumentNotFoundError, match=_foreign("qd", "document")):
+        call(two, root)
+    assert _doc_state(two, "qd") == before
+    assert (root / "docs" / "qnotes.md").read_text() == "changed"
+
+
+def test_show_syncs_only_the_owning_projects_documents(two, root):
+    two.execute("UPDATE projects SET root_path = ? WHERE id = ?", (str(root), P))
+    two.commit()
+    make_document(two, "pd", "pnotes", content="old")
+    _write(root, "docs/pnotes.md", "new")
+    _write(root, "docs/qnotes.md", "changed")
+    p_before, q_before = _doc_state(two, "pd"), _doc_state(two, "qd")
+    assert views.detail(two, "qd")["source_state"] == "missing"  # nothing under /other
+    assert _doc_state(two, "pd") == p_before
+    views.detail(two, "p1")
+    assert _doc_state(two, "qd") == q_before
+    assert _doc_state(two, "pd") != p_before  # P's own documents are synced
+
+
+def test_export_holds_only_the_projects_issues_and_documents(two, root):
+    make_issue(two, "pi")
+    make_document(two, "pd", "pnotes")
+    _write(root, "docs/qnotes.md", "changed")
+    q_before = _doc_state(two, "qd")
+    data = snapshot.export(two, P, root)
+    assert [i["id"] for i in data["issues"]] == ["pi"]
+    assert [d["id"] for d in data["documents"]] == ["pd"]
+    assert _doc_state(two, "qd") == q_before

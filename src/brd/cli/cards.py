@@ -1,5 +1,4 @@
 import sqlite3
-from pathlib import Path
 
 import typer
 
@@ -45,7 +44,7 @@ def show(
     """Show a card, issue, or document in full."""
     run(
         pretty,
-        lambda ctx: views.detail(ctx.conn, Path(ctx.project.root_path), entity_id),
+        lambda ctx: views.detail(ctx.conn, entity_id),
         render=lambda ctx, data: pretty_render.render_detail(ctx.conn, data),
     )
 
@@ -120,7 +119,7 @@ def delete_entity(
     if kind == "card":
         return core.delete_card(conn, project_id, entity_id, cascade=cascade)
     if kind == "document":
-        documents.delete(conn, entity_id)
+        documents.delete(conn, project_id, entity_id)
         return [entity_id]
     issues.require(conn, project_id, entity_id)
     entities.delete(conn, entity_id)

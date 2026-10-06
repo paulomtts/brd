@@ -877,3 +877,17 @@ def test_issue_commands_are_scoped_to_this_project(foreign_entities):
     shown = ok("show", issue)
     assert (shown["title"], shown["status"]) == ("Foreign issue", "open")
     assert [i["id"] for i in ok("issue", "list")] == [mine]
+
+
+def test_document_commands_are_scoped_to_this_project(project, foreign_entities):
+    doc = foreign_entities["document"]
+    (project / "docs").mkdir()
+    (project / "docs" / "notes.md").write_text("mine")
+    mine = ok("doc", "add", "docs/notes.md")["id"]  # the other project also has `notes`
+    assert [d["id"] for d in ok("doc", "list")] == [mine]
+    _refused("doc", "update", doc, "--title", "x", error_type="DocumentNotFoundError")
+    _refused("doc", "restore", doc, error_type="DocumentNotFoundError")
+    _refused("delete", doc, error_type="DocumentNotFoundError")
+    assert ok("show", doc)["title"] == "notes"
+    assert (project / "docs" / "notes.md").read_text() == "mine"
+    assert [d["id"] for d in ok("export")["documents"]] == [mine]

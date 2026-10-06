@@ -9,7 +9,7 @@ FORMAT_VERSION = 1
 
 
 def export(conn: sqlite3.Connection, project_id: str, root: Path) -> dict:
-    results = documents.sync_all(conn, root)
+    results = documents.sync_all(conn, project_id, root)
     return {
         "brd_export": FORMAT_VERSION,
         "cards": core.build_tree(conn, project_id),
@@ -24,7 +24,7 @@ def export(conn: sqlite3.Connection, project_id: str, root: Path) -> dict:
                 "created_at": d.created_at,
                 "updated_at": d.updated_at,
             }
-            for d in documents.list_all(conn)
+            for d in documents.list_all(conn, project_id)
         ],
         "comments": [
             dict(row)
@@ -105,7 +105,9 @@ def _load_export(conn: sqlite3.Connection, project_id: str, snap: dict) -> dict:
     for doc in doc_rows:
         _check_source_path(doc["source_path"])
     for doc in doc_rows:
-        documents._check_unique(conn, doc["source_path"], PurePosixPath(doc["source_path"]).stem)
+        documents._check_unique(
+            conn, project_id, doc["source_path"], PurePosixPath(doc["source_path"]).stem
+        )
 
     snapshot_ids = set(entity_ids)
     for node, _ in flattened:
