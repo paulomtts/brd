@@ -144,23 +144,6 @@ def test_init_project_migrates_in_repo_format_preserving_cards(tmp_path, monkeyp
     assert ".brd" in gitignore_lines
 
 
-def test_find_marker_walks_up_from_nested_dir(tmp_path, monkeypatch):
-    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
-    repo = tmp_path / "myrepo"
-    nested = repo / "a" / "b"
-    nested.mkdir(parents=True)
-    master.init_project(repo)
-
-    found = master.find_marker(nested)
-    assert found == repo / ".brd"
-
-
-def test_find_marker_returns_none_when_absent(tmp_path):
-    somewhere = tmp_path / "nowhere"
-    somewhere.mkdir()
-    assert master.find_marker(somewhere) is None
-
-
 def test_list_all_projects(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
     repo1 = tmp_path / "repo1"

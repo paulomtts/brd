@@ -149,34 +149,6 @@ def init_project(root_path: Path, name: str | None = None) -> Project:
     return project
 
 
-def find_marker(start: Path) -> Path | None:
-    current = start.resolve()
-    while True:
-        candidate = current / MARKER_FILENAME
-        if candidate.is_file():
-            return candidate
-        if current.parent == current:
-            return None
-        current = current.parent
-
-
-def resolve_project_root(start: Path) -> Path:
-    marker = find_marker(start)
-    if marker is None:
-        raise ProjectNotFoundError(f"no {MARKER_FILENAME} marker found above {start}")
-    return marker.parent
-
-
-def registered_project(conn: sqlite3.Connection, root_path: Path) -> Project:
-    project = db.get_project(conn, str(root_path))
-    if project is None:
-        raise ProjectNotFoundError(
-            f"{root_path} has a {MARKER_FILENAME} marker but is not a registered "
-            "project; run `brd init` there"
-        )
-    return project
-
-
 def resolve_project(conn: sqlite3.Connection, start: Path) -> Project:
     """The registered project whose root is start or its deepest ancestor."""
     resolved = start.resolve()

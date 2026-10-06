@@ -66,8 +66,7 @@ def open_project() -> Ctx:
     # install migrates, even one run outside a project.
     conn = master.connect()
     try:
-        root = master.resolve_project_root(Path.cwd())
-        project = master.registered_project(conn, root)
+        project = master.resolve_project(conn, Path.cwd())
     except BaseException:
         conn.close()
         raise

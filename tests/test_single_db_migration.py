@@ -561,7 +561,6 @@ def test_unreadable_board_is_a_migration_error_envelope(data, tmp_path, monkeypa
     owner = register(tmp_path, "owner")
     board_path(owner).write_bytes(b"not a database " * 100)
     root = Path(owner.root_path)
-    (root / ".brd").write_text("")
     monkeypatch.chdir(root)
 
     result = invoke(*args)
@@ -577,7 +576,6 @@ def test_unreadable_board_is_a_migration_error_envelope(data, tmp_path, monkeypa
 
 def test_shared_ids_fail_the_command_and_a_retry_succeeds(data, tmp_path, monkeypatch):
     first, second = seed_shared_ids(tmp_path)
-    (Path(first.root_path) / ".brd").write_text("")
     monkeypatch.chdir(first.root_path)
 
     result = invoke("list")
@@ -624,7 +622,6 @@ def test_commands_read_backups_from_the_shared_docs_dir(data, tmp_path, monkeypa
     add_document(conn, owner, "doc-1", "notes", "# Notes\nbody\n")
     conn.close()
     root = Path(owner.root_path)
-    (root / ".brd").write_text("")
     monkeypatch.chdir(root)
 
     ok("doc", "restore", "doc-1")
@@ -641,7 +638,6 @@ def test_notice_goes_to_stderr_and_stdout_stays_one_envelope(data, tmp_path, mon
         make_card(conn, f"{name}-card", project_id=project.id)
         conn.close()
     root = tmp_path / "one"
-    (root / ".brd").write_text("")
     monkeypatch.chdir(root)
 
     first = invoke("list")
