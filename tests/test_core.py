@@ -3,7 +3,7 @@ import pytest
 from brd import core, db, issues
 from brd import refs as _refs
 from brd.models import Card
-from tests.factories import OTHER_PROJECT, PROJECT, add_project, make_issue
+from tests.factories import OTHER_PROJECT, PROJECT, add_project, make_document, make_issue
 
 
 @pytest.fixture
@@ -861,3 +861,105 @@ def test_import_tree_records_its_project(conn):
 
     projects = {r[0] for r in fresh_conn.execute("SELECT project_id FROM entities")}
     assert projects == {OTHER_PROJECT.id}
+
+
+def _entry(id_, kind, title, status, released, project=PROJECT):
+    return {
+        "id": id_,
+        "kind": kind,
+        "project": {"id": project.id, "name": project.name},
+        "title": title,
+        "status": status,
+        "released": released,
+    }
+
+
+def test_blockers_of_a_same_project_card(conn):
+    db.insert_card(conn, PROJECT.id, _card("b"))
+    _blocked_on(conn, "c", "b")
+    assert core.blockers_of(conn, "c") == [_entry("b", "card", "b", "todo", False)]
+
+    db.update_card_fields(conn, "b", status="done")
+    assert core.blockers_of(conn, "c") == [_entry("b", "card", "b", "done", True)]
+
+
+def test_blockers_of_a_container_whose_children_finished(conn):
+    _story_with_children(conn, "s", ["done", "merged"])
+    dependent = _blocked_on(conn, "c", "s")
+    # Its own status stays todo; only release changes (D1).
+    assert core.blockers_of(conn, "c") == [_entry("s", "card", "s", "todo", True)]
+    assert core.resolve_status(conn, dependent) == "todo"
+
+
+def test_blockers_of_a_milestone_whose_stories_released(conn):
+    db.insert_card(conn, PROJECT.id, _card("m"))
+    db.insert_card(conn, PROJECT.id, _card("s", parent_id="m"))
+    db.insert_card(conn, PROJECT.id, _card("s-c0", status="done", parent_id="s"))
+    db.insert_card(conn, PROJECT.id, _card("s2", status="canceled", parent_id="m"))
+    dependent = _blocked_on(conn, "c", "m")
+    assert core.blockers_of(conn, "c") == [_entry("m", "card", "m", "todo", True)]
+    assert core.resolve_status(conn, dependent) == "todo"
+
+    db.insert_card(conn, PROJECT.id, _card("s-c1", parent_id="s"))
+    assert core.blockers_of(conn, "c") == [_entry("m", "card", "m", "todo", False)]
+    assert core.resolve_status(conn, dependent) == "blocked"
+
+
+def test_blockers_of_a_blocked_card(conn):
+    make_issue(conn, "i")
+    _blocked_on(conn, "b", "i")
+    _blocked_on(conn, "c", "b")
+    # The resolved status, not the stored todo.
+    assert core.blockers_of(conn, "c") == [_entry("b", "card", "b", "blocked", False)]
+
+
+def test_blockers_of_issues(conn):
+    make_issue(conn, "i1", title="Open one")
+    make_issue(conn, "i2", title="Closed one", status="closed")
+    _blocked_on(conn, "c", "i1")
+    db.add_blocked_by_edge(conn, "c", "i2")
+    expected = {
+        "i1": _entry("i1", "issue", "Open one", "open", False),
+        "i2": _entry("i2", "issue", "Closed one", "closed", True),
+    }
+    blocked_by = db.list_blockers_of(conn, "c")
+    assert sorted(blocked_by) == ["i1", "i2"]
+    assert core.blockers_of(conn, "c") == [expected[i] for i in blocked_by]
+
+
+def test_blockers_of_a_not_found_id(conn):
+    _blocked_on(conn, "c", "ghost")
+    assert core.blockers_of(conn, "c") == [
+        {
+            "id": "ghost",
+            "kind": None,
+            "project": None,
+            "title": None,
+            "status": "not-found",
+            "released": False,
+        }
+    ]
+
+
+def test_blockers_of_a_foreign_card(conn):
+    add_project(conn, OTHER_PROJECT)
+    db.insert_card(conn, OTHER_PROJECT.id, _card("f"))
+    _blocked_on(conn, "c", "f")
+    assert core.blockers_of(conn, "c") == [
+        _entry("f", "card", "f", "todo", False, project=OTHER_PROJECT)
+    ]
+
+
+def test_blockers_of_a_document(conn):
+    # Only an imported snapshot can store this edge; a document never blocks.
+    make_document(conn, "d", "notes", title="Notes")
+    dependent = _blocked_on(conn, "c", "d")
+    assert core.blockers_of(conn, "c") == [_entry("d", "document", "Notes", None, True)]
+    assert core.resolve_status(conn, dependent) == "todo"
+
+
+def test_blockers_of_a_stored_cycle_terminates(conn):
+    db.insert_card(conn, PROJECT.id, _card("a"))
+    _blocked_on(conn, "b", "a")
+    db.add_blocked_by_edge(conn, "a", "b")
+    assert core.blockers_of(conn, "a") == [_entry("b", "card", "b", "blocked", False)]

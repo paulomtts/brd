@@ -73,6 +73,49 @@ def _is_released(conn: sqlite3.Connection, card: Card, seen: set[str]) -> bool:
     return bool(children) and all(_is_released(conn, child, seen) for child in children)
 
 
+def blockers_of(conn: sqlite3.Connection, card_id: str) -> list[dict]:
+    # Each blocker in blocked_by order, with what a reader needs to judge it
+    # without another query. `released` is the rule resolve_status applies,
+    # so a container can show `todo` and still be released.
+    return [_blocker_entry(conn, blocker_id) for blocker_id in db.list_blockers_of(conn, card_id)]
+
+
+def _blocker_entry(conn: sqlite3.Connection, blocker_id: str) -> dict:
+    kind = entities.kind_of(conn, blocker_id)
+    if kind is None:
+        # Not found: it blocks, and there is nothing else to say about it.
+        return {
+            "id": blocker_id,
+            "kind": None,
+            "project": None,
+            "title": None,
+            "status": "not-found",
+            "released": False,
+        }
+    if kind == "card":
+        card = db.get_card(conn, blocker_id)
+        status: str | None = resolve_status(conn, card)
+        # A fresh seen set: each entry is computed on its own.
+        released = _is_released(conn, card, set())
+    elif kind == "issue":
+        status = conn.execute(
+            "SELECT status FROM issues WHERE id = ?", (blocker_id,)
+        ).fetchone()["status"]
+        released = status != "open"
+    else:
+        # A document never blocks; only an imported snapshot can store one.
+        status, released = None, True
+    owner = db.owner_of(conn, blocker_id)
+    return {
+        "id": blocker_id,
+        "kind": kind,
+        "project": {"id": owner.id, "name": owner.name},
+        "title": entities.title_of(conn, blocker_id),
+        "status": status,
+        "released": released,
+    }
+
+
 def would_create_parent_cycle(conn: sqlite3.Connection, card_id: str, new_parent_id: str) -> bool:
     current_id: str | None = new_parent_id
     while current_id is not None:
