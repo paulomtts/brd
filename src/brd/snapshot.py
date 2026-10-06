@@ -372,6 +372,28 @@ def _check_source_path(source_path) -> None:
         )
 
 
+def _nocase(text: str) -> str:
+    """Fold text the way SQLite's NOCASE does: ASCII letters only."""
+    return "".join(c.lower() if c.isascii() else c for c in text)
+
+
+def _check_distinct_documents(docs: list[dict]) -> None:
+    """Two documents of one entry can't share a path or a stem: they land in
+    one project, whose schema keeps both unique. Checked here so a doomed
+    import never reaches the confirmation."""
+    paths: set[str] = set()
+    stems: set[str] = set()
+    for doc in docs:
+        path = doc["source_path"]
+        stem = PurePosixPath(path).stem
+        if path in paths:
+            raise ImportFormatError(f"snapshot has two documents with path {path}")
+        if _nocase(stem) in stems:
+            raise ImportFormatError(f"snapshot has two documents with stem {stem}")
+        paths.add(path)
+        stems.add(_nocase(stem))
+
+
 def _validate(
     conn: sqlite3.Connection, entries: list[_Entry], targets: list[_Target], replaced: set[str]
 ) -> None:
@@ -386,7 +408,9 @@ def _validate(
     for entity_id in entity_ids:
         owner = db.owner_of(conn, entity_id)
         if owner is not None and owner.id not in replaced:
-            raise EntityAlreadyExistsError(f"entity {entity_id} already exists in another project")
+            raise EntityAlreadyExistsError(
+                f"entity {entity_id} already exists in project {owner.name} ({owner.id})"
+            )
     for entry in entries:
         for comment in entry.comments:
             row = conn.execute(
@@ -396,10 +420,12 @@ def _validate(
                 continue
             owner = db.owner_of(conn, row["entity_id"])
             if owner is None or owner.id not in replaced:
-                raise EntityAlreadyExistsError(f"comment {comment['id']} already exists")
+                where = f" in project {owner.name} ({owner.id})" if owner else ""
+                raise EntityAlreadyExistsError(f"comment {comment['id']} already exists{where}")
     for entry, target in zip(entries, targets):
         for doc in entry.documents:
             _check_source_path(doc["source_path"])
+        _check_distinct_documents(entry.documents)
         if target.project.id in replaced:
             continue
         for doc in entry.documents:

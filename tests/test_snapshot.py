@@ -607,22 +607,26 @@ def test_importing_the_missing_project_later_reconnects_edges(project, tmp_path,
 
 
 def test_id_owned_by_another_project_is_refused(populated, tmp_path, monkeypatch):
+    (owner,) = ok("projects")
     snapshot = _snapshot_file(tmp_path, ok("export"))
     _another_project(tmp_path, monkeypatch, "second")
     error = _import_error(snapshot)
     assert error["type"] == "EntityAlreadyExistsError"
     assert populated["card"]["id"] in error["message"]
+    assert f"in project {owner['name']} ({owner['id']})" in error["message"]
     assert ok("list") == [] and ok("issue", "list") == [] and ok("doc", "list") == []
     assert len(ok("projects")) == 2
 
 
 def test_tree_id_owned_by_another_project_is_refused(project, tmp_path, monkeypatch):
+    (owner,) = ok("projects")
     card_id = ok("add", "--title", "A")["id"]
     snapshot = _snapshot_file(tmp_path, ok("tree"))
     _another_project(tmp_path, monkeypatch, "second")
     error = _import_error(snapshot)
     assert error["type"] == "EntityAlreadyExistsError"
     assert card_id in error["message"]
+    assert f"in project {owner['name']} ({owner['id']})" in error["message"]
     assert ok("list") == []
 
 
@@ -1038,3 +1042,59 @@ def test_replace_of_a_registered_but_empty_target_does_not_ask(project, tmp_path
     _another_project(tmp_path, monkeypatch, "second")
     text = human("import", _snapshot_file(tmp_path, [_card_node(CARD_2)], "second.json"))
     assert "[replaced]" not in text
+
+
+def test_id_owned_by_a_project_not_being_replaced_is_refused_naming_the_owner(
+    project, tmp_path, monkeypatch
+):
+    a1 = ok("add", "--title", "a1")["id"]
+    a_entry = _entry(ok("export"))
+    c_root, c = _another_project(tmp_path, monkeypatch, "cproj")
+    c1 = ok("add", "--title", "c1")["id"]
+    ok("comment", "add", c1, "c note")
+    c_entry = _entry(ok("export"))
+    before_c, backups = _board(), _backups()
+    monkeypatch.chdir(project)
+    before_a = _board()
+
+    with_card = copy.deepcopy(a_entry)
+    with_card["cards"].append(c_entry["cards"][0])
+    c_comment = c_entry["comments"][0]
+    with_comment = copy.deepcopy(a_entry)
+    with_comment["comments"].append({**c_comment, "entity_id": a1})
+    for entry, owned_id, what in (
+        (with_card, c1, "entity"),
+        (with_comment, c_comment["id"], "comment"),
+    ):
+        snapshot = _snapshot_file(tmp_path, _v2(entry))
+        result = invoke("import", snapshot, "--yes")
+        assert result.exit_code == 1, result.output
+        error = json.loads(result.stdout)["error"]
+        assert error["type"] == "EntityAlreadyExistsError"
+        assert f"{what} {owned_id} already exists in project {c['name']} ({c['id']})" in (
+            error["message"]
+        )
+        assert result.stderr == ""
+        assert _board() == before_a and _backups() == backups
+    monkeypatch.chdir(c_root)
+    assert _board() == before_c
+
+
+@pytest.mark.parametrize("clash", ["path", "stem"])
+def test_duplicate_document_paths_in_a_replacing_entry_refuse_before_the_prompt(
+    populated, tmp_path, monkeypatch, clash
+):
+    data = ok("export")
+    docs = _entry(data)["documents"]
+    twin = {**docs[0], "id": "d0c00000-0000-4000-8000-000000000001"}
+    if clash == "stem":
+        twin["source_path"] = "other/NOTES.md"  # stem `NOTES`, same as `notes` ignoring case
+    docs.append(twin)
+    snapshot = _snapshot_file(tmp_path, data)
+    before, backups = _board(), _backups()
+    code, envelope, stderr = _import_on_tty(monkeypatch, snapshot, "y\n")
+    assert code == 1
+    assert envelope["error"]["type"] == "ImportFormatError"
+    assert clash in envelope["error"]["message"]
+    assert stderr == ""
+    assert _board() == before and _backups() == backups
