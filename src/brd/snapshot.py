@@ -447,12 +447,24 @@ def _write(
         for d in entry.documents
         if d.get("content") is not None
     }
-    # Write backups before touching the DB, so a DB failure never leaves a
-    # document row with no backup: if the transaction below fails, we delete
-    # exactly the backups we just wrote.
-    for doc_id, data in contents.items():
-        documents._write_backup(conn, doc_id, data)
+    old_doc_ids = [
+        row["id"]
+        for project_id in replaced
+        for row in conn.execute(
+            "SELECT id FROM entities WHERE project_id = ? AND kind = 'document'", (project_id,)
+        )
+    ]
+    # Backups go first, so a DB failure never leaves a document row with no
+    # backup. An incoming document may share a replaced one's id and so
+    # overwrite its backup: keep those bytes to put back if anything fails.
+    previous = {}
+    for doc_id in contents:
+        path = documents.backup_path(conn, doc_id)
+        if path.exists():
+            previous[doc_id] = path.read_bytes()
     try:
+        for doc_id, data in contents.items():
+            documents._write_backup(conn, doc_id, data)
         with conn:  # one transaction: commits on success, rolls back on error
             for target in targets:
                 if target.registered:
@@ -468,10 +480,18 @@ def _write(
                 _insert_links(conn, entry)
     except BaseException as exc:
         for doc_id in contents:
-            documents.backup_path(conn, doc_id).unlink(missing_ok=True)
+            if doc_id in previous:
+                documents._write_backup(conn, doc_id, previous[doc_id])
+            else:
+                documents.backup_path(conn, doc_id).unlink(missing_ok=True)
         if isinstance(exc, sqlite3.IntegrityError):
             raise ImportFormatError(f"snapshot is internally inconsistent: {exc}") from exc
         raise
+    # Committed: the replaced projects' old backups go, except the ones this
+    # import just wrote, as if it had imported into an empty database.
+    for doc_id in old_doc_ids:
+        if doc_id not in contents:
+            documents.backup_path(conn, doc_id).unlink(missing_ok=True)
 
 
 def _insert_entities(

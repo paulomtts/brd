@@ -1098,3 +1098,77 @@ def test_duplicate_document_paths_in_a_replacing_entry_refuse_before_the_prompt(
     assert clash in envelope["error"]["message"]
     assert stderr == ""
     assert _board() == before and _backups() == backups
+
+
+def test_replace_removes_old_document_backups_after_commit(
+    project, populated, tmp_path, monkeypatch
+):
+    d1 = populated["doc"]["id"]
+    write(project, "docs/second.md", "# Second")
+    d2 = ok("doc", "add", "docs/second.md")["id"]
+    data = ok("export")
+    entry = _entry(data)
+    entry["documents"] = [d for d in entry["documents"] if d["id"] != d2]
+    (d1_doc,) = entry["documents"]
+    snapshot = _snapshot_file(tmp_path, data)
+    keeper_root, _ = _another_project(tmp_path, monkeypatch, "keeper")
+    write(keeper_root, "docs/kept.md", "# Kept")
+    kept = ok("doc", "add", "docs/kept.md")["id"]
+    monkeypatch.chdir(project)
+    backups = _backups()
+    assert {f"{d1}.md", f"{d2}.md", f"{kept}.md"} <= set(backups)
+
+    ok("import", snapshot, "--yes")
+    after = _backups()
+    assert f"{d2}.md" not in after
+    assert after[f"{d1}.md"] == d1_doc["content"].encode()
+    assert after[f"{kept}.md"] == b"# Kept"
+
+    # An entry with no content writes no backup, so d1's old one goes too.
+    del d1_doc["content"]
+    ok("import", _snapshot_file(tmp_path, data, "no-content.json"), "--yes")
+    after = _backups()
+    assert f"{d1}.md" not in after
+    assert after[f"{kept}.md"] == b"# Kept"
+
+
+def test_failed_replace_leaves_old_state_and_backups_intact(populated, tmp_path):
+    data = ok("export")
+    entry = _entry(data)
+    d1 = populated["doc"]["id"]
+    next(d for d in entry["documents"] if d["id"] == d1)["content"] = "# Notes\nchanged"
+    d9 = "d9000000-0000-4000-8000-000000000009"
+    entry["documents"].append(
+        {"id": d9, "title": "Nine", "source_path": "docs/nine.md", "content": "nine",
+         "content_hash": "h", "created_at": T, "updated_at": T}
+    )
+    entry["comments"].append(
+        {"id": "00000000-0000-0000-0000-000000000000", "entity_id": "does-not-exist",
+         "author": "x", "body": "y", "created_at": T}
+    )
+    snapshot = _snapshot_file(tmp_path, data)
+    before, backups = _board(), _backups()
+    assert f"{d1}.md" in backups
+    result = invoke("import", snapshot, "--yes")
+    assert result.exit_code == 1, result.output
+    error = json.loads(result.stdout)["error"]
+    assert error["type"] == "ImportFormatError"
+    assert "internally inconsistent" in error["message"]
+    assert _backups() == backups
+    assert _board() == before
+
+
+def test_malformed_entity_in_a_replace_leaves_old_state_and_backups_intact(populated, tmp_path):
+    data = ok("export")
+    entry = _entry(data)
+    next(d for d in entry["documents"])["content"] = "# Notes\nchanged"
+    del entry["issues"][0]["title"]  # only the insert inside the transaction reads it
+    snapshot = _snapshot_file(tmp_path, data)
+    before, backups = _board(), _backups()
+    result = invoke("import", snapshot, "--yes")
+    assert result.exit_code == 1, result.output
+    error = json.loads(result.stdout)["error"]
+    assert error["type"] == "ImportFormatError"
+    assert error["message"].startswith("malformed snapshot: ")
+    assert _backups() == backups
+    assert _board() == before
