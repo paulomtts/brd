@@ -6,8 +6,10 @@ from brd import core, db, documents, entities, issues, master, refs
 from brd.errors import (
     EntityAlreadyExistsError,
     ImportFormatError,
+    ProjectAlreadyExistsError,
     ProjectNotEmptyError,
     ProjectNotFoundError,
+    ProjectRootNotFoundError,
 )
 from brd.models import Project
 
@@ -189,6 +191,13 @@ def _v2_entries(snap: dict) -> list[_Entry]:
     entries = [_v2_entry(item) for item in items]
     if not entries:
         raise ImportFormatError("snapshot has no project entries")
+    for key in ("id", "root_path"):
+        seen: set[str] = set()
+        for entry in entries:
+            value = entry.project[key]
+            if value in seen:
+                raise ImportFormatError(f"snapshot has two project entries with {key} {value}")
+            seen.add(value)
     return entries
 
 
@@ -212,10 +221,7 @@ def _v2_entry(item) -> _Entry:
 def _place(conn: sqlite3.Connection, cwd: Path, entries: list[_Entry]) -> list[_Target]:
     if len(entries) == 1:
         return [_place_in_cwd(conn, cwd, entries[0].project)]
-    raise ImportFormatError(
-        f"snapshot has {len(entries)} project entries; importing more than one "
-        "project is not supported yet"
-    )
+    return _place_by_record(conn, [entry.project for entry in entries])
 
 
 def _place_in_cwd(conn: sqlite3.Connection, cwd: Path, recorded: dict | None) -> _Target:
@@ -241,6 +247,39 @@ def _place_in_cwd(conn: sqlite3.Connection, cwd: Path, recorded: dict | None) ->
         created_at=recorded["created_at"],
     )
     return _Target(project, registered=True)
+
+
+def _place_by_record(conn: sqlite3.Connection, recorded: list[dict]) -> list[_Target]:
+    """A multi-entry snapshot ignores the cwd: each entry goes to the project
+    with its id, else to a new project at its recorded root. A root held by
+    another id refuses at once; otherwise every missing root is listed."""
+    targets: list[_Target] = []
+    missing: list[dict] = []
+    for project in recorded:
+        existing = db.get_project_by_id(conn, project["id"])
+        if existing is not None:
+            targets.append(_Target(existing, registered=False))
+            continue
+        holder = db.get_project(conn, project["root_path"])
+        if holder is not None:
+            raise ProjectAlreadyExistsError(
+                f"{project['root_path']} is already the root of project {holder.name} "
+                f"({holder.id}), not of the snapshot's {project['name']} ({project['id']}); "
+                "import that entry alone from its directory"
+            )
+        root = Path(project["root_path"])
+        if not (root.is_absolute() and root.is_dir()):
+            missing.append(project)
+            continue
+        new = Project(**{key: project[key] for key in PROJECT_KEYS})
+        targets.append(_Target(new, registered=True))
+    if missing:
+        raise ProjectRootNotFoundError(
+            "no directory at the recorded root of "
+            + ", ".join(f"{p['name']} ({p['root_path']})" for p in missing)
+            + "; create those directories, or import each entry alone from its directory"
+        )
+    return targets
 
 
 def _require_empty(conn: sqlite3.Connection, targets: list[_Target]) -> None:

@@ -341,10 +341,11 @@ def test_export_all_lists_every_project_in_creation_order(project, tmp_path, mon
     # Without --all, still only the current project.
     assert ok("export")["projects"] == [a_entry]
 
-    # A two-project snapshot does not import yet (5.2), and writes nothing.
+    # Re-importing places both entries back in their (non-empty) projects:
+    # refused, and nothing is written.
     snapshot = tmp_path / "all.json"
     snapshot.write_text(json.dumps(from_a))
-    assert err("import", snapshot) == "ImportFormatError"
+    assert err("import", snapshot) == "ProjectNotEmptyError"
     assert [c["id"] for c in ok("list")] == [a_card]
 
 
@@ -678,3 +679,183 @@ def test_import_refuses_a_snapshot_with_no_entries(project, tmp_path, monkeypatc
     assert error["type"] == "ImportFormatError"
     assert "no project entries" in error["message"]
     _assert_nothing_imported(other)
+
+
+def test_multi_entry_import_matches_registered_projects_by_id(project, tmp_path, monkeypatch):
+    (a,) = ok("projects")
+    new_root = tmp_path / "new-root"
+    new_root.mkdir()
+    snapshot = _snapshot_file(tmp_path, _v2(
+        _hand_entry(a["id"], tmp_path / "gone", name="a", cards=[_card_node(CARD_1)]),
+        _hand_entry(PROJECT_X, new_root.resolve(), name="x", cards=[_card_node(CARD_2)]),
+    ))
+    _unregistered_dir(tmp_path, monkeypatch, "elsewhere")
+    result = ok("import", snapshot)
+    first, second = result["projects"]
+    assert first["project"] == a and first["registered"] is False and first["cards"] == 1
+    assert second["project"] == {
+        "id": PROJECT_X, "name": "x", "root_path": str(new_root.resolve()), "created_at": T
+    }
+    assert second["registered"] is True and second["cards"] == 1
+    assert {p["id"]: p for p in ok("projects")} == {a["id"]: a, PROJECT_X: second["project"]}
+    monkeypatch.chdir(project)
+    assert [c["id"] for c in ok("list")] == [CARD_1]
+    monkeypatch.chdir(new_root)
+    assert [c["id"] for c in ok("list")] == [CARD_2]
+
+
+def test_multi_entry_import_registers_at_recorded_roots(project, tmp_path, monkeypatch):
+    a_card = ok("add", "--title", "A card")["id"]
+    second, _ = _another_project(tmp_path, monkeypatch, "second")
+    b_card = ok("add", "--title", "B card")["id"]
+    data = ok("export", "--all")
+    snapshot = _snapshot_file(tmp_path, data)
+    _unregistered_dir(tmp_path, monkeypatch, "elsewhere", data_home="other-data")
+    result = ok("import", snapshot)
+    recorded = [e["project"] for e in data["projects"]]
+    assert ok("projects") == recorded
+    assert [item["project"] for item in result["projects"]] == recorded
+    assert [item["registered"] for item in result["projects"]] == [True, True]
+    monkeypatch.chdir(project)
+    assert [c["id"] for c in ok("list")] == [a_card]
+    monkeypatch.chdir(second)
+    assert [c["id"] for c in ok("list")] == [b_card]
+
+
+def test_multi_entry_import_lists_every_missing_root(tmp_path, monkeypatch):
+    gone_a, gone_b = tmp_path / "gone-a", tmp_path / "gone-b"
+    a_file = tmp_path / "a-file"
+    a_file.write_text("not a directory")
+    snapshot = _snapshot_file(tmp_path, _v2(
+        _hand_entry(PROJECT_X, gone_a, name="x", cards=[_card_node(CARD_1)]),
+        _hand_entry(PROJECT_Y, gone_b, name="y", cards=[_card_node(CARD_2)]),
+        _hand_entry("cccccccc-0000-4000-8000-00000000000c", a_file, name="f"),
+        _hand_entry("dddddddd-0000-4000-8000-00000000000d", "relative/dir", name="r"),
+    ))
+    _unregistered_dir(tmp_path, monkeypatch, "elsewhere", data_home="data")
+    error = _import_error(snapshot)
+    assert error["type"] == "ProjectRootNotFoundError"
+    for root in (str(gone_a), str(gone_b), str(a_file), "relative/dir"):
+        assert root in error["message"]
+    assert ok("projects") == []
+
+
+def test_multi_entry_import_succeeds_once_the_roots_exist(tmp_path, monkeypatch):
+    gone_a, gone_b = tmp_path / "gone-a", tmp_path / "gone-b"
+    snapshot = _snapshot_file(tmp_path, _v2(
+        _hand_entry(PROJECT_X, gone_a, name="x", cards=[_card_node(CARD_1)]),
+        _hand_entry(PROJECT_Y, gone_b, name="y", cards=[_card_node(CARD_2)]),
+    ))
+    _unregistered_dir(tmp_path, monkeypatch, "elsewhere", data_home="data")
+    assert _import_error(snapshot)["type"] == "ProjectRootNotFoundError"
+    gone_a.mkdir()
+    gone_b.mkdir()
+    result = ok("import", snapshot)
+    assert [item["registered"] for item in result["projects"]] == [True, True]
+    assert {p["id"] for p in ok("projects")} == {PROJECT_X, PROJECT_Y}
+
+
+def test_multi_entry_import_ignores_the_cwd_project(project, tmp_path, monkeypatch):
+    (a,) = ok("projects")
+    root_x, root_y = tmp_path / "x", tmp_path / "y"
+    root_x.mkdir()
+    root_y.mkdir()
+    snapshot = _snapshot_file(tmp_path, _v2(
+        _hand_entry(PROJECT_X, root_x.resolve(), name="x", cards=[_card_node(CARD_1)]),
+        _hand_entry(PROJECT_Y, root_y.resolve(), name="y", cards=[_card_node(CARD_2)]),
+    ))
+    result = ok("import", snapshot)  # cwd is project's root
+    assert [item["project"]["id"] for item in result["projects"]] == [PROJECT_X, PROJECT_Y]
+    assert ok("list") == []
+    assert {p["id"] for p in ok("projects")} == {a["id"], PROJECT_X, PROJECT_Y}
+
+
+def test_multi_entry_import_refuses_a_root_registered_under_another_id(
+    project, tmp_path, monkeypatch
+):
+    ok("add", "--title", "A")
+    _another_project(tmp_path, monkeypatch, "second")
+    ok("add", "--title", "B")
+    data = ok("export", "--all")
+    snapshot = _snapshot_file(tmp_path, data)
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "other-data"))
+    monkeypatch.chdir(project)
+    squatter = ok("init")
+    error = _import_error(snapshot)
+    assert error["type"] == "ProjectAlreadyExistsError"
+    assert data["projects"][0]["project"]["root_path"] in error["message"]
+    assert squatter["id"] in error["message"]
+    assert "alone" in error["message"]
+    assert ok("projects") == [squatter]
+    assert ok("list") == []
+
+
+@pytest.mark.parametrize("entries", [1, 2])
+def test_import_refuses_a_non_empty_target(project, tmp_path, monkeypatch, entries):
+    (a,) = ok("projects")
+    if entries == 1:
+        ok("add", "--title", "existing")
+    else:
+        ok("issue", "open", "--title", "existing")
+    before = (ok("list"), ok("issue", "list"))
+    new_root = tmp_path / "new-root"
+    new_root.mkdir()
+    hand = [
+        _hand_entry(a["id"], project, cards=[_card_node(CARD_1)]),
+        _hand_entry(PROJECT_X, new_root.resolve(), cards=[_card_node(CARD_2)]),
+    ]
+    snapshot = _snapshot_file(tmp_path, _v2(*hand[:entries]))
+    if entries == 2:
+        _unregistered_dir(tmp_path, monkeypatch, "elsewhere")
+    error = _import_error(snapshot)
+    assert error["type"] == "ProjectNotEmptyError"
+    assert a["id"] in error["message"] and a["name"] in error["message"]
+    assert ok("projects") == [a]
+    monkeypatch.chdir(project)
+    assert (ok("list"), ok("issue", "list")) == before
+
+
+def test_cross_entry_edges_connect_in_either_order(project, tmp_path, monkeypatch):
+    a_issue = ok("issue", "open", "--title", "A issue")["id"]
+    a1 = ok("add", "--title", "a1")["id"]
+    second, _ = _another_project(tmp_path, monkeypatch, "second")
+    b1 = ok("add", "--title", "b1")["id"]
+    b_issue = ok("issue", "open", "--title", "B issue")["id"]
+    ok("block", b1, "--by", a_issue)
+    monkeypatch.chdir(project)
+    ok("block", a1, "--by", b1)
+    ok("ref", "add", a1, b_issue)
+    data = ok("export", "--all")
+    data["projects"].reverse()
+    snapshot = _snapshot_file(tmp_path, data)
+    _unregistered_dir(tmp_path, monkeypatch, "elsewhere", data_home="other-data")
+    assert ok("import", snapshot)["not_found_edges"] == 0
+    monkeypatch.chdir(project)
+    shown = ok("show", a1)
+    assert [(b["id"], b["status"]) for b in shown["blockers"]] == [(b1, "blocked")]
+    explicit = [r for r in shown["refs"] if r["origin"] == "explicit"]
+    assert [(r["id"], r["kind"]) for r in explicit] == [(b_issue, "issue")]
+    monkeypatch.chdir(second)
+    assert [(b["id"], b["status"]) for b in ok("show", b1)["blockers"]] == [(a_issue, "open")]
+
+
+def test_duplicate_ids_across_entries_are_refused(tmp_path, monkeypatch):
+    root_x, root_y = tmp_path / "x", tmp_path / "y"
+    root_x.mkdir()
+    root_y.mkdir()
+    x = _hand_entry(PROJECT_X, root_x.resolve(), name="x", cards=[_card_node(CARD_1)])
+    y = _hand_entry(PROJECT_Y, root_y.resolve(), name="y", cards=[_card_node(CARD_2)])
+    same_card = _hand_entry(PROJECT_Y, root_y.resolve(), name="y", cards=[_card_node(CARD_1)])
+    same_id = {**y, "project": {**y["project"], "id": PROJECT_X}}
+    same_root = {**y, "project": {**y["project"], "root_path": x["project"]["root_path"]}}
+    _unregistered_dir(tmp_path, monkeypatch, "elsewhere", data_home="data")
+    for second, words in [
+        (same_card, "duplicate ids"),
+        (same_id, PROJECT_X),
+        (same_root, x["project"]["root_path"]),
+    ]:
+        snapshot = _snapshot_file(tmp_path, _v2(x, second))
+        error = _import_error(snapshot)
+        assert error["type"] == "ImportFormatError"
+        assert words in error["message"]
+        assert ok("projects") == []

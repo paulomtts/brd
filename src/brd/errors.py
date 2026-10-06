@@ -120,3 +120,7 @@ class ImportReadError(BrdError):
 
 class ProjectNotEmptyError(BrdError):
     pass
+
+
+class ProjectRootNotFoundError(BrdError):
+    pass
