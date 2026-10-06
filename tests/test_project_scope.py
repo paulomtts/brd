@@ -588,6 +588,22 @@ def test_export_holds_only_the_projects_issues_and_documents(two, root):
     assert _doc_state(two, "qd") == q_before
 
 
+def test_import_checks_document_uniqueness_per_project(two, root):
+    def snap(doc_id):
+        return {
+            "brd_export": 1,
+            "documents": [
+                {"id": doc_id, "title": "N", "source_path": "docs/qnotes.md", "content": "x",
+                 "content_hash": "h", "created_at": NOW, "updated_at": NOW}
+            ],
+        }
+
+    snapshot.load(two, P, root, snap("pn"))  # Q's qd has this path and stem
+    assert [d.id for d in documents.list_all(two, P)] == ["pn"]
+    with pytest.raises(DuplicatePathError):
+        snapshot.load(two, P, root, snap("pn2"))
+
+
 Q_UUID = "abababab-abab-4bab-8bab-abababababab"
 
 
