@@ -615,6 +615,16 @@ def test_id_owned_by_another_project_is_refused(populated, tmp_path, monkeypatch
     assert len(ok("projects")) == 2
 
 
+def test_tree_id_owned_by_another_project_is_refused(project, tmp_path, monkeypatch):
+    card_id = ok("add", "--title", "A")["id"]
+    snapshot = _snapshot_file(tmp_path, ok("tree"))
+    _another_project(tmp_path, monkeypatch, "second")
+    error = _import_error(snapshot)
+    assert error["type"] == "EntityAlreadyExistsError"
+    assert card_id in error["message"]
+    assert ok("list") == []
+
+
 def test_import_report_shape_and_pretty(populated, tmp_path, monkeypatch):
     snapshot = _snapshot_file(tmp_path, ok("export"))
     _fresh_project(tmp_path, monkeypatch)
@@ -738,6 +748,8 @@ def test_multi_entry_import_lists_every_missing_root(tmp_path, monkeypatch):
     assert error["type"] == "ProjectRootNotFoundError"
     for root in (str(gone_a), str(gone_b), str(a_file), "relative/dir"):
         assert root in error["message"]
+    for name, root in (("x", gone_a), ("y", gone_b)):
+        assert f"{name} ({root})" in error["message"]
     assert ok("projects") == []
 
 
