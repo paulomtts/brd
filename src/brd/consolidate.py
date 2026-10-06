@@ -47,12 +47,17 @@ def _backups_path(project: Project) -> Path:
 
 
 def _registered() -> list[Project]:
-    conn = db.connect(paths.master_db_path())
+    path = paths.master_db_path()
+    conn = None
     try:
+        conn = db.connect(path)
         db.init_master_schema(conn)
         return db.list_projects(conn)
+    except sqlite3.DatabaseError as exc:
+        raise MigrationError(f"cannot migrate the registry at {path}: {exc}") from exc
     finally:
-        conn.close()
+        if conn is not None:
+            conn.close()
 
 
 def _label(project: Project) -> str:

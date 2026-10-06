@@ -702,3 +702,19 @@ def test_commands_without_data_do_not_migrate(data, tmp_path, args):
     assert result.stderr == ""
     assert paths.master_db_path().is_file()
     assert not paths.brd_db_path().exists()
+
+
+def test_unreadable_master_db_is_a_migration_error_envelope(data, tmp_path, monkeypatch):
+    data.mkdir(parents=True)
+    paths.master_db_path().write_bytes(b"not a database " * 100)
+    monkeypatch.chdir(tmp_path)
+
+    result = invoke("projects")
+
+    assert result.exit_code == 1
+    assert isinstance(result.exception, SystemExit)  # an envelope, not a traceback
+    error = json.loads(result.stdout)["error"]
+    assert error["type"] == "MigrationError"
+    assert str(paths.master_db_path()) in error["message"]
+    assert paths.master_db_path().is_file()
+    assert not migrated(paths.master_db_path()).exists()
