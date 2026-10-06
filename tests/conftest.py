@@ -1,12 +1,13 @@
 import pytest
 
 from brd import db
+from tests.factories import PROJECT
 
 
 @pytest.fixture
 def pconn(tmp_path):
     connection = db.connect(tmp_path / "project.db")
-    db.migrate_project(connection)
+    db.migrate_project(connection, PROJECT)
     yield connection
     connection.close()
 

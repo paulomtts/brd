@@ -2,18 +2,18 @@ import dataclasses
 import sqlite3
 from pathlib import Path, PurePosixPath
 
-from brd import core, documents, entities, issues, refs
+from brd import core, db, documents, entities, issues, refs
 from brd.errors import EntityAlreadyExistsError, ImportFormatError
 
 FORMAT_VERSION = 1
 
 
-def export(conn: sqlite3.Connection, root: Path) -> dict:
-    results = documents.sync_all(conn, root)
+def export(conn: sqlite3.Connection, project_id: str, root: Path) -> dict:
+    results = documents.sync_all(conn, project_id, root)
     return {
         "brd_export": FORMAT_VERSION,
-        "cards": core.build_tree(conn),
-        "issues": [dataclasses.asdict(i) for i in issues.list_issues(conn)],
+        "cards": core.build_tree(conn, project_id),
+        "issues": [dataclasses.asdict(i) for i in issues.list_issues(conn, project_id)],
         "documents": [
             {
                 "id": d.id,
@@ -24,7 +24,7 @@ def export(conn: sqlite3.Connection, root: Path) -> dict:
                 "created_at": d.created_at,
                 "updated_at": d.updated_at,
             }
-            for d in documents.list_all(conn)
+            for d in documents.list_all(conn, project_id)
         ],
         "comments": [
             dict(row)
@@ -47,27 +47,27 @@ def export(conn: sqlite3.Connection, root: Path) -> dict:
     }
 
 
-def load(conn: sqlite3.Connection, root: Path, raw) -> dict:
+def load(conn: sqlite3.Connection, project_id: str, root: Path, raw) -> dict:
     try:
-        return _load(conn, raw)
+        return _load(conn, project_id, raw)
     except (KeyError, TypeError, AttributeError, sqlite3.ProgrammingError) as exc:
         # Missing keys or wrong value types in the snapshot. Any backups the
         # import wrote were already cleaned up by the time this is caught.
         raise ImportFormatError(f"malformed snapshot: {type(exc).__name__}: {exc}") from exc
 
 
-def _load(conn: sqlite3.Connection, raw) -> dict:
+def _load(conn: sqlite3.Connection, project_id: str, raw) -> dict:
     # `brd export > file` writes the whole envelope; accept it unwrapped too.
     if isinstance(raw, dict) and isinstance(raw.get("data"), dict):
         raw = raw["data"]
     if isinstance(raw, dict) and "brd_export" in raw:
         if raw["brd_export"] != FORMAT_VERSION:
             raise ImportFormatError(f"unsupported brd_export version {raw['brd_export']!r}")
-        return _load_export(conn, raw)
+        return _load_export(conn, project_id, raw)
     nodes = raw["data"] if isinstance(raw, dict) and "data" in raw else raw
     if not isinstance(nodes, list):
         raise ImportFormatError("expected a `brd export` object or a `brd tree` snapshot list")
-    return {"imported": core.import_tree(conn, nodes)}
+    return {"imported": core.import_tree(conn, project_id, nodes)}
 
 
 def _check_source_path(source_path) -> None:
@@ -83,7 +83,7 @@ def _check_source_path(source_path) -> None:
         )
 
 
-def _load_export(conn: sqlite3.Connection, snap: dict) -> dict:
+def _load_export(conn: sqlite3.Connection, project_id: str, snap: dict) -> dict:
     flattened = core._flatten_tree(snap.get("cards", []))
     issue_rows = snap.get("issues", [])
     doc_rows = snap.get("documents", [])
@@ -105,7 +105,17 @@ def _load_export(conn: sqlite3.Connection, snap: dict) -> dict:
     for doc in doc_rows:
         _check_source_path(doc["source_path"])
     for doc in doc_rows:
-        documents._check_unique(conn, doc["source_path"], PurePosixPath(doc["source_path"]).stem)
+        documents._check_unique(
+            conn, project_id, doc["source_path"], PurePosixPath(doc["source_path"]).stem
+        )
+
+    snapshot_ids = set(entity_ids)
+    for node, _ in flattened:
+        for blocker_id in node.get("blocked_by", []):
+            core._require_import_target(conn, snapshot_ids, blocker_id, "blocker")
+    for r in snap.get("refs", []):
+        if r.get("origin", "explicit") == "explicit":
+            core._require_import_target(conn, snapshot_ids, r["dst_id"], "ref target")
 
     contents = {
         d["id"]: d["content"].encode("utf-8") for d in doc_rows if d.get("content") is not None
@@ -119,6 +129,7 @@ def _load_export(conn: sqlite3.Connection, snap: dict) -> dict:
         with conn:  # one transaction: commits on success, rolls back on error
             for node, parent_id in flattened:
                 status = "todo" if node["status"] == "blocked" else node["status"]
+                db.insert_entity(conn, project_id, node["id"], "card")
                 conn.execute(
                     "INSERT INTO cards (id, title, description, status, parent_id, "
                     "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -126,6 +137,7 @@ def _load_export(conn: sqlite3.Connection, snap: dict) -> dict:
                      parent_id, node["created_at"], node["updated_at"]),
                 )
             for i in issue_rows:
+                db.insert_entity(conn, project_id, i["id"], "issue")
                 conn.execute(
                     "INSERT INTO issues (id, title, body, status, close_reason, created_at, "
                     "updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -134,11 +146,13 @@ def _load_export(conn: sqlite3.Connection, snap: dict) -> dict:
                 )
             for d in doc_rows:
                 digest = documents._hash(contents[d["id"]]) if d["id"] in contents else d["content_hash"]
+                db.insert_entity(conn, project_id, d["id"], "document")
                 conn.execute(
-                    "INSERT INTO documents (id, title, source_path, stem, content_hash, "
-                    "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    (d["id"], d["title"], d["source_path"], PurePosixPath(d["source_path"]).stem,
-                     digest, d["created_at"], d["updated_at"]),
+                    "INSERT INTO documents (id, project_id, title, source_path, stem, "
+                    "content_hash, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (d["id"], project_id, d["title"], d["source_path"],
+                     PurePosixPath(d["source_path"]).stem, digest, d["created_at"],
+                     d["updated_at"]),
                 )
             for node, _ in flattened:
                 for blocker_id in node.get("blocked_by", []):

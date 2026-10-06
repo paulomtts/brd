@@ -8,6 +8,7 @@ import typer
 
 from brd import db, master, output, paths
 from brd.errors import BrdError
+from brd.models import Project
 
 GUIDE = """\
 Cards are units of work. There are no Epic/Story/Task types: a card with children \
@@ -52,7 +53,7 @@ def pretty_option():
 @dataclass
 class Ctx:
     conn: sqlite3.Connection
-    root: Path
+    project: Project
 
 
 def fail(exc: BrdError, pretty: bool) -> NoReturn:
@@ -62,13 +63,14 @@ def fail(exc: BrdError, pretty: bool) -> NoReturn:
 
 def open_project() -> Ctx:
     root = master.resolve_project_root(Path.cwd())
+    project = master.registered_project(root)
     conn = db.connect(paths.project_db_path(root))
     try:
-        db.migrate_project(conn)
+        db.migrate_project(conn, project)
     except BaseException:
         conn.close()
         raise
-    return Ctx(conn=conn, root=root)
+    return Ctx(conn=conn, project=project)
 
 
 def run(

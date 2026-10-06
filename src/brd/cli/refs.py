@@ -16,7 +16,7 @@ def add(
     """Add an explicit reference."""
 
     def action(ctx):
-        refs.add_explicit(ctx.conn, src_id, dst_id)
+        refs.add_explicit(ctx.conn, ctx.project.id, src_id, dst_id)
         return {"id": src_id, "refs": refs.outgoing(ctx.conn, src_id)}
 
     run(pretty, action)
@@ -31,7 +31,7 @@ def remove(
     """Remove an explicit reference ([[links]] are managed by editing text)."""
 
     def action(ctx):
-        refs.remove_explicit(ctx.conn, src_id, dst_id)
+        refs.remove_explicit(ctx.conn, ctx.project.id, src_id, dst_id)
         return {"id": src_id, "refs": refs.outgoing(ctx.conn, src_id)}
 
     run(pretty, action)

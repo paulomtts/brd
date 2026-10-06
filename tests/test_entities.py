@@ -1,8 +1,8 @@
 import pytest
 
-from brd import entities
+from brd import core, db, entities, issues, refs
 from brd.errors import EntityNotFoundError, NotTaggableError
-from tests.factories import make_card, make_document, make_issue
+from tests.factories import PROJECT, make_card, make_document, make_issue
 
 
 def test_kind_of_each_kind(pconn):
@@ -51,3 +51,23 @@ def test_capability_map():
     assert entities.TAGGABLE == {"document"}
     assert entities.BLOCKERS == {"card", "issue"}
     assert entities.REF_SOURCES == {"card", "issue", "document"}
+
+
+def test_delete_issue_removes_incoming_edges_without_fk_cascade(pconn):
+    make_card(pconn, "blocked")
+    make_card(pconn, "citer")
+    issue = issues.open_issue(pconn, PROJECT.id, "Q", blocks=["blocked"])
+    refs.add_explicit(pconn, PROJECT.id, "citer", issue.id)
+    pconn.commit()
+    pconn.execute("PRAGMA foreign_keys=OFF")
+
+    entities.delete(pconn, issue.id)
+
+    assert pconn.execute(
+        "SELECT COUNT(*) FROM blocked_by WHERE blocks_on_id = ?", (issue.id,)
+    ).fetchone()[0] == 0
+    assert pconn.execute(
+        "SELECT COUNT(*) FROM refs WHERE dst_id = ?", (issue.id,)
+    ).fetchone()[0] == 0
+    assert core.resolve_status(pconn, db.get_card(pconn, "blocked")) == "todo"
+    assert refs.outgoing(pconn, "citer") == []

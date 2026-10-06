@@ -1,6 +1,14 @@
 import sqlite3
 
-from brd.errors import BrdError, EntityNotFoundError
+from brd import db
+from brd.errors import (
+    BrdError,
+    CardNotFoundError,
+    DocumentNotFoundError,
+    EntityNotFoundError,
+    IssueNotFoundError,
+)
+from brd.models import Project
 
 # Which kinds support which shared feature. Enabling a feature for another
 # kind is a one-word change here.
@@ -10,6 +18,12 @@ BLOCKERS = frozenset({"card", "issue"})
 REF_SOURCES = frozenset({"card", "issue", "document"})
 
 _KIND_TABLES = {"card": "cards", "issue": "issues", "document": "documents"}
+
+_NOT_FOUND = {
+    "card": CardNotFoundError,
+    "issue": IssueNotFoundError,
+    "document": DocumentNotFoundError,
+}
 
 
 def kind_of(conn: sqlite3.Connection, entity_id: str) -> str | None:
@@ -21,6 +35,24 @@ def require(conn: sqlite3.Connection, entity_id: str) -> str:
     kind = kind_of(conn, entity_id)
     if kind is None:
         raise EntityNotFoundError(f"no entity with id {entity_id}")
+    return kind
+
+
+def foreign_message(what: str, item_id: str, owner: Project) -> str:
+    return (
+        f"no {what} with id {item_id} in this project; "
+        f"it belongs to project {owner.name} ({owner.id})"
+    )
+
+
+def require_in_project(conn: sqlite3.Connection, project_id: str, entity_id: str) -> str:
+    """The entity's kind, refusing one another project owns. Commands act on
+    the current project only; the error names the owner, so an id copied
+    from another project's board says where it lives."""
+    kind = require(conn, entity_id)
+    owner = db.owner_of(conn, entity_id)
+    if owner is not None and owner.id != project_id:
+        raise _NOT_FOUND[kind](foreign_message(kind, entity_id, owner))
     return kind
 
 
@@ -55,5 +87,6 @@ def summary(conn: sqlite3.Connection, entity_id: str) -> dict | None:
 
 
 def delete(conn: sqlite3.Connection, entity_id: str) -> None:
+    db.delete_incoming_edges(conn, entity_id)
     conn.execute("DELETE FROM entities WHERE id = ?", (entity_id,))
     conn.commit()

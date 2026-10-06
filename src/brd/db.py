@@ -1,4 +1,5 @@
 import sqlite3
+import uuid
 from pathlib import Path
 
 from brd.errors import MigrationError
@@ -15,44 +16,66 @@ def connect(db_path: Path) -> sqlite3.Connection:
     return conn
 
 
+_PROJECTS_SQL = """
+CREATE TABLE {name} (
+    id TEXT PRIMARY KEY NOT NULL,
+    name TEXT NOT NULL,
+    root_path TEXT NOT NULL UNIQUE,
+    created_at TEXT NOT NULL
+)
+"""
+
+
+def new_project_id() -> str:
+    return str(uuid.uuid4())
+
+
+def _project_columns(conn: sqlite3.Connection) -> set[str]:
+    return {row[1] for row in conn.execute("PRAGMA table_info(projects)")}
+
+
+def _is_target_projects(columns: set[str]) -> bool:
+    # Key the legacy check on db_path: the original legacy table also had an
+    # id column, so "id" alone cannot tell it apart from the target.
+    return "id" in columns and "db_path" not in columns
+
+
+def _rebuild_projects(conn: sqlite3.Connection) -> None:
+    """Rebuild a legacy or pre-id projects table into the target shape,
+    keeping root_path, name and created_at and assigning fresh ids."""
+    rows = conn.execute("SELECT root_path, name, created_at FROM projects").fetchall()
+    conn.execute(_PROJECTS_SQL.format(name="projects_new"))
+    for row in rows:
+        # OR REPLACE collapses duplicate legacy root_paths: last row read wins.
+        conn.execute(
+            "INSERT OR REPLACE INTO projects_new (id, name, root_path, created_at) "
+            "VALUES (?, ?, ?, ?)",
+            (new_project_id(), row["name"], row["root_path"], row["created_at"]),
+        )
+    conn.execute("DROP TABLE projects")
+    conn.execute("ALTER TABLE projects_new RENAME TO projects")
+
+
 def init_master_schema(conn: sqlite3.Connection) -> None:
-    columns = {row[1] for row in conn.execute("PRAGMA table_info(projects)")}
-    if "id" in columns:
-        # Legacy schema (id PK, unique name, db_path): migrate in place,
-        # preserving what still applies (root_path, name, created_at).
-        old_rows = conn.execute(
-            "SELECT name, root_path, created_at FROM projects"
-        ).fetchall()
-        conn.execute("DROP TABLE projects")
-        conn.execute(
-            """
-            CREATE TABLE projects (
-                root_path TEXT PRIMARY KEY,
-                name TEXT NOT NULL,
-                created_at TEXT NOT NULL
-            )
-            """
-        )
-        for row in old_rows:
-            conn.execute(
-                "INSERT OR REPLACE INTO projects (root_path, name, created_at) "
-                "VALUES (?, ?, ?)",
-                (row["root_path"], row["name"], row["created_at"]),
-            )
-    else:
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS projects (
-                root_path TEXT PRIMARY KEY,
-                name TEXT NOT NULL,
-                created_at TEXT NOT NULL
-            )
-            """
-        )
+    if _is_target_projects(_project_columns(conn)):
+        return
     conn.commit()
+    try:
+        # IMMEDIATE takes the write lock up front, so a concurrent first run
+        # waits here and then sees the migrated table instead of re-migrating.
+        conn.execute("BEGIN IMMEDIATE")
+        columns = _project_columns(conn)
+        if not columns:
+            conn.execute(_PROJECTS_SQL.format(name="projects"))
+        elif not _is_target_projects(columns):
+            _rebuild_projects(conn)
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 # Stored card statuses ('blocked' is derived, never stored).
 CARD_STATUSES = ("todo", "in_progress", "done", "merged", "canceled", "archived")
@@ -145,6 +168,81 @@ def _register_trigger(table: str, kind: str) -> str:
     )
 
 
+_ENTITIES_SQL = """
+CREATE TABLE {name} (
+    id TEXT PRIMARY KEY,
+    kind TEXT NOT NULL CHECK (kind IN ('card', 'issue', 'document')),
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE
+)
+"""
+
+_DOCUMENTS_SQL = """
+CREATE TABLE {name} (
+    id TEXT PRIMARY KEY REFERENCES entities(id) ON DELETE CASCADE,
+    project_id TEXT NOT NULL,
+    title TEXT NOT NULL,
+    source_path TEXT NOT NULL,
+    stem TEXT NOT NULL COLLATE NOCASE,
+    content_hash TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE (project_id, source_path),
+    UNIQUE (project_id, stem COLLATE NOCASE)
+)
+"""
+
+# From v4 on, edge targets have no foreign key: a target may live in another
+# project, and deleting an entity removes its incoming edges explicitly.
+_V4_BLOCKED_BY_SQL = """
+CREATE TABLE {name} (
+    card_id TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+    blocks_on_id TEXT NOT NULL,
+    PRIMARY KEY (card_id, blocks_on_id)
+)
+"""
+
+_V4_REFS_SQL = """
+CREATE TABLE {name} (
+    src_id TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+    dst_id TEXT NOT NULL,
+    origin TEXT NOT NULL CHECK (origin IN ('explicit', 'link')),
+    PRIMARY KEY (src_id, dst_id, origin)
+)
+"""
+
+_V4_INDEXES = [
+    "CREATE INDEX entities_project ON entities(project_id, kind)",
+    "CREATE INDEX blocked_by_target ON blocked_by(blocks_on_id)",
+    "CREATE INDEX refs_target ON refs(dst_id)",
+]
+
+_SAME_PROJECT_DOCUMENT = (
+    "WHEN NEW.project_id IS NOT (SELECT project_id FROM entities WHERE id = NEW.id) "
+    "BEGIN SELECT RAISE(ABORT, 'a document must be in the same project as its entity'); END"
+)
+
+# Fires only when the parent's entity exists and sits in another project; a
+# parent that is not a card at all is left to the parent_id foreign key.
+_SAME_PROJECT_PARENT = (
+    "WHEN NEW.parent_id IS NOT NULL "
+    "AND (SELECT project_id FROM entities WHERE id = NEW.parent_id) IS NOT NULL "
+    "AND (SELECT project_id FROM entities WHERE id = NEW.parent_id) "
+    "IS NOT (SELECT project_id FROM entities WHERE id = NEW.id) "
+    "BEGIN SELECT RAISE(ABORT, 'a card''s parent must be in the same project as the card'); END"
+)
+
+_V4_TRIGGERS = [
+    f"CREATE TRIGGER documents_project_insert BEFORE INSERT ON documents {_SAME_PROJECT_DOCUMENT}",
+    "CREATE TRIGGER documents_project_update BEFORE UPDATE OF id, project_id ON documents "
+    f"{_SAME_PROJECT_DOCUMENT}",
+    f"CREATE TRIGGER cards_parent_project_insert BEFORE INSERT ON cards {_SAME_PROJECT_PARENT}",
+    "CREATE TRIGGER cards_parent_project_update BEFORE UPDATE OF parent_id ON cards "
+    f"{_SAME_PROJECT_PARENT}",
+]
+
+_DOCUMENT_COLUMNS = "title, source_path, stem, content_hash, created_at, updated_at"
+
+
 def _migrate_to_v1(conn: sqlite3.Connection) -> None:
     tables = {
         row[0]
@@ -217,9 +315,84 @@ def _migrate_to_v3(conn: sqlite3.Connection) -> None:
     conn.execute(_register_trigger("cards", "card"))
 
 
-def migrate_project(conn: sqlite3.Connection) -> None:
+def _rebuild_table(
+    conn: sqlite3.Connection,
+    table: str,
+    create_sql: str,
+    columns: str,
+    values: str,
+    params: tuple = (),
+) -> None:
+    # SQLite's usual rebuild: create the new shape, copy, drop, rename.
+    # Child foreign keys name the table, so they follow the rename.
+    conn.execute(create_sql.format(name=f"{table}_new"))
+    conn.execute(f"INSERT INTO {table}_new ({columns}) SELECT {values} FROM {table}", params)
+    conn.execute(f"DROP TABLE {table}")
+    conn.execute(f"ALTER TABLE {table}_new RENAME TO {table}")
+
+
+def _migrate_to_v4(conn: sqlite3.Connection, project: Project) -> None:
+    # Drop the register triggers first: ALTER TABLE RENAME re-parses every
+    # trigger, and their INSERT INTO entities would break the rebuilds.
+    for table, _ in _ENTITY_KINDS:
+        conn.execute(f"DROP TRIGGER IF EXISTS {table}_register_entity")
+    # A legacy board may carry a stray projects table; the board's own row
+    # replaces it.
+    conn.execute("DROP TABLE IF EXISTS projects")
+    conn.execute(_PROJECTS_SQL.format(name="projects"))
+    conn.execute(
+        "INSERT INTO projects (id, name, root_path, created_at) VALUES (?, ?, ?, ?)",
+        (project.id, project.name, project.root_path, project.created_at),
+    )
+    _rebuild_table(
+        conn, "entities", _ENTITIES_SQL, "id, kind, project_id", "id, kind, ?", (project.id,)
+    )
+    _rebuild_table(
+        conn,
+        "documents",
+        _DOCUMENTS_SQL,
+        f"id, project_id, {_DOCUMENT_COLUMNS}",
+        f"id, ?, {_DOCUMENT_COLUMNS}",
+        (project.id,),
+    )
+    _rebuild_table(
+        conn, "blocked_by", _V4_BLOCKED_BY_SQL, "card_id, blocks_on_id", "card_id, blocks_on_id"
+    )
+    _rebuild_table(
+        conn, "refs", _V4_REFS_SQL, "src_id, dst_id, origin", "src_id, dst_id, origin"
+    )
+    for statement in _V4_INDEXES:
+        conn.execute(statement)
+    for statement in _V4_TRIGGERS:
+        conn.execute(statement)
+
+
+def board_projects(conn: sqlite3.Connection) -> list[Project]:
+    """The projects rows a board records; [] below v4, where a projects
+    table, if any, is a legacy leftover."""
+    if conn.execute("PRAGMA user_version").fetchone()[0] < 4:
+        return []
+    rows = conn.execute("SELECT * FROM projects ORDER BY created_at").fetchall()
+    return [_row_to_project(row) for row in rows]
+
+
+def _require_board_project(conn: sqlite3.Connection, project: Project) -> None:
+    # Without this, a registry/board mismatch surfaces later as a raw FK
+    # error on the first insert.
+    stored = [row.id for row in board_projects(conn)]
+    if project.id in stored:
+        return
+    held = f"project {', '.join(stored)}" if stored else "no project"
+    raise MigrationError(
+        f"this board records {held}, not project {project.id}; "
+        "the registry and the board disagree"
+    )
+
+
+def migrate_project(conn: sqlite3.Connection, project: Project) -> None:
     version = conn.execute("PRAGMA user_version").fetchone()[0]
     if version >= SCHEMA_VERSION:
+        _require_board_project(conn, project)
         return
     conn.commit()
     # Must be issued outside a transaction; SQLite ignores it inside one.
@@ -232,6 +405,7 @@ def migrate_project(conn: sqlite3.Connection) -> None:
         version = conn.execute("PRAGMA user_version").fetchone()[0]
         if version >= SCHEMA_VERSION:
             conn.rollback()
+            _require_board_project(conn, project)
             return
         if version < 1:
             _migrate_to_v1(conn)
@@ -239,6 +413,8 @@ def migrate_project(conn: sqlite3.Connection) -> None:
             _migrate_to_v2(conn)
         if version < 3:
             _migrate_to_v3(conn)
+        if version < 4:
+            _migrate_to_v4(conn, project)
         violations = conn.execute("PRAGMA foreign_key_check").fetchall()
         if violations:
             raise MigrationError(
@@ -253,8 +429,8 @@ def migrate_project(conn: sqlite3.Connection) -> None:
         conn.execute("PRAGMA foreign_keys=ON")
 
 
-def init_project_schema(conn: sqlite3.Connection) -> None:
-    migrate_project(conn)
+def init_project_schema(conn: sqlite3.Connection, project: Project) -> None:
+    migrate_project(conn, project)
 
 
 def docs_dir(conn: sqlite3.Connection) -> Path:
@@ -265,19 +441,23 @@ def docs_dir(conn: sqlite3.Connection) -> Path:
 
 def _row_to_project(row: sqlite3.Row) -> Project:
     return Project(
-        root_path=row["root_path"],
+        id=row["id"],
         name=row["name"],
+        root_path=row["root_path"],
         created_at=row["created_at"],
     )
 
 
-def upsert_project(conn: sqlite3.Connection, project: Project) -> None:
+def upsert_project(conn: sqlite3.Connection, project: Project) -> Project:
+    """Register project, or rename the one already at its root_path. An
+    existing row keeps its id and created_at; returns the stored row."""
     conn.execute(
-        "INSERT INTO projects (root_path, name, created_at) VALUES (?, ?, ?) "
+        "INSERT INTO projects (id, name, root_path, created_at) VALUES (?, ?, ?, ?) "
         "ON CONFLICT(root_path) DO UPDATE SET name = excluded.name",
-        (project.root_path, project.name, project.created_at),
+        (project.id, project.name, project.root_path, project.created_at),
     )
     conn.commit()
+    return get_project(conn, project.root_path)
 
 
 def list_projects(conn: sqlite3.Connection) -> list[Project]:
@@ -297,6 +477,21 @@ def delete_project(conn: sqlite3.Connection, root_path: str) -> None:
     conn.commit()
 
 
+def in_project(id_column: str) -> str:
+    """The one join that scopes a query to a project: keeps rows whose
+    `id_column` is an entity owned by the project bound to its single `?`."""
+    return f"JOIN entities AS scope ON scope.id = {id_column} AND scope.project_id = ?"
+
+
+def owner_of(conn: sqlite3.Connection, entity_id: str) -> Project | None:
+    row = conn.execute(
+        "SELECT projects.* FROM entities "
+        "JOIN projects ON projects.id = entities.project_id WHERE entities.id = ?",
+        (entity_id,),
+    ).fetchone()
+    return _row_to_project(row) if row else None
+
+
 def _row_to_card(row: sqlite3.Row) -> Card:
     return Card(
         id=row["id"],
@@ -309,21 +504,33 @@ def _row_to_card(row: sqlite3.Row) -> Card:
     )
 
 
-def insert_card(conn: sqlite3.Connection, card: Card) -> None:
+def insert_entity(
+    conn: sqlite3.Connection, project_id: str, entity_id: str, kind: str
+) -> None:
+    # No commit: callers insert the kind row in the same transaction, so the
+    # two land together or not at all.
     conn.execute(
-        "INSERT INTO cards (id, title, description, status, parent_id, "
-        "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (
-            card.id,
-            card.title,
-            card.description,
-            card.status,
-            card.parent_id,
-            card.created_at,
-            card.updated_at,
-        ),
+        "INSERT INTO entities (id, kind, project_id) VALUES (?, ?, ?)",
+        (entity_id, kind, project_id),
     )
-    conn.commit()
+
+
+def insert_card(conn: sqlite3.Connection, project_id: str, card: Card) -> None:
+    with conn:
+        insert_entity(conn, project_id, card.id, "card")
+        conn.execute(
+            "INSERT INTO cards (id, title, description, status, parent_id, "
+            "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                card.id,
+                card.title,
+                card.description,
+                card.status,
+                card.parent_id,
+                card.created_at,
+                card.updated_at,
+            ),
+        )
 
 
 def get_card(conn: sqlite3.Connection, card_id: str) -> Card | None:
@@ -343,21 +550,23 @@ _UNSET = "__unset__"
 
 def list_cards(
     conn: sqlite3.Connection,
+    project_id: str,
     status: str | None = None,
     parent_id: str | None = _UNSET,
 ) -> list[Card]:
-    query = "SELECT * FROM cards WHERE 1=1"
-    params: list[str | None] = []
+    # cards.* only: the scope join brings entities' own id column along.
+    query = f"SELECT cards.* FROM cards {in_project('cards.id')} WHERE 1=1"
+    params: list[str | None] = [project_id]
     if status is not None:
-        query += " AND status = ?"
+        query += " AND cards.status = ?"
         params.append(status)
     if parent_id is not _UNSET:
         if parent_id is None:
-            query += " AND parent_id IS NULL"
+            query += " AND cards.parent_id IS NULL"
         else:
-            query += " AND parent_id = ?"
+            query += " AND cards.parent_id = ?"
             params.append(parent_id)
-    query += " ORDER BY created_at"
+    query += " ORDER BY cards.created_at"
     rows = conn.execute(query, params).fetchall()
     return [_row_to_card(row) for row in rows]
 
@@ -396,7 +605,17 @@ def list_children(conn: sqlite3.Connection, parent_id: str) -> list[Card]:
     return [_row_to_card(row) for row in rows]
 
 
+def delete_incoming_edges(conn: sqlite3.Connection, entity_id: str) -> None:
+    # Edges pointing at entity_id. Explicit rather than an FK cascade so it
+    # holds without one; no commit, so callers delete the entity in the same
+    # transaction.
+    conn.execute("DELETE FROM blocked_by WHERE blocks_on_id = ?", (entity_id,))
+    conn.execute("DELETE FROM refs WHERE dst_id = ?", (entity_id,))
+
+
 def delete_card(conn: sqlite3.Connection, card_id: str) -> None:
-    # Cascades to the cards row, its block edges, comments, tags, and refs.
+    # Incoming edges are deleted explicitly; the entities cascade takes the
+    # cards row, its outgoing block edges and refs, comments, and tags.
+    delete_incoming_edges(conn, card_id)
     conn.execute("DELETE FROM entities WHERE id = ?", (card_id,))
     conn.commit()

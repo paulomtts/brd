@@ -1,8 +1,8 @@
 import pytest
 
-from brd import refs
+from brd import entities, refs
 from brd.errors import EntityNotFoundError, SelfReferenceError
-from tests.factories import make_card, make_document
+from tests.factories import PROJECT, make_card, make_document
 
 A = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 B = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
@@ -16,9 +16,9 @@ def out(conn, entity_id):
 
 def test_resolve_uuid(pconn):
     make_card(pconn, A)
-    assert refs.resolve(pconn, A) == A
-    assert refs.resolve(pconn, A.upper()) == A
-    assert refs.resolve(pconn, B) is None
+    assert refs.resolve(pconn, PROJECT.id, A) == A
+    assert refs.resolve(pconn, PROJECT.id, A.upper()) == A
+    assert refs.resolve(pconn, PROJECT.id, B) is None
 
 
 @pytest.mark.parametrize(
@@ -27,11 +27,11 @@ def test_resolve_uuid(pconn):
 )
 def test_resolve_stem_forms(pconn, target):
     make_document(pconn, D, "Design Notes")
-    assert refs.resolve(pconn, target) == D
+    assert refs.resolve(pconn, PROJECT.id, target) == D
 
 
 def test_resolve_unknown_stem(pconn):
-    assert refs.resolve(pconn, "nowhere") is None
+    assert refs.resolve(pconn, PROJECT.id, "nowhere") is None
 
 
 def test_reindex_creates_link_refs_and_skips_unresolved(pconn):
@@ -53,7 +53,7 @@ def test_reindex_is_idempotent(pconn):
 def test_reindex_preserves_explicit_refs(pconn):
     make_card(pconn, B)
     make_card(pconn, A, description=f"[[{B}]]")
-    refs.add_explicit(pconn, A, B)
+    refs.add_explicit(pconn, PROJECT.id, A, B)
     pconn.execute("UPDATE cards SET description = NULL WHERE id = ?", (A,))
     refs.reindex(pconn, A)
     assert out(pconn, A) == {(B, "explicit")}
@@ -96,26 +96,26 @@ def test_deleted_target_disappears_from_refs(pconn):
     make_card(pconn, B)
     make_card(pconn, A, description=f"[[{B}]]")
     refs.reindex(pconn, A)
-    pconn.execute("DELETE FROM entities WHERE id = ?", (B,))
+    entities.delete(pconn, B)
     assert refs.outgoing(pconn, A) == []
 
 
 def test_add_explicit_validates(pconn):
     make_card(pconn, A)
     with pytest.raises(SelfReferenceError):
-        refs.add_explicit(pconn, A, A)
+        refs.add_explicit(pconn, PROJECT.id, A, A)
     with pytest.raises(EntityNotFoundError):
-        refs.add_explicit(pconn, A, B)
+        refs.add_explicit(pconn, PROJECT.id, A, B)
     with pytest.raises(EntityNotFoundError):
-        refs.add_explicit(pconn, B, A)
+        refs.add_explicit(pconn, PROJECT.id, B, A)
 
 
 def test_remove_explicit(pconn):
     make_card(pconn, A)
     make_card(pconn, B)
-    refs.add_explicit(pconn, A, B)
-    refs.add_explicit(pconn, A, B)  # idempotent
-    refs.remove_explicit(pconn, A, B)
+    refs.add_explicit(pconn, PROJECT.id, A, B)
+    refs.add_explicit(pconn, PROJECT.id, A, B)  # idempotent
+    refs.remove_explicit(pconn, PROJECT.id, A, B)
     assert refs.outgoing(pconn, A) == []
 
 
@@ -124,7 +124,7 @@ def test_reindex_mentions_resolves_forward_links_in_cards(pconn):
     refs.reindex(pconn, A)
     assert refs.outgoing(pconn, A) == []
     make_document(pconn, D, "later")
-    refs.reindex_mentions(pconn, "later")
+    refs.reindex_mentions(pconn, PROJECT.id, "later")
     assert out(pconn, A) == {(D, "link")}
 
 
@@ -132,5 +132,5 @@ def test_reindex_mentions_scans_document_backups(pconn):
     make_document(pconn, D, "hub", content="see [[Later]]")
     refs.reindex(pconn, D)
     make_document(pconn, E, "later")
-    refs.reindex_mentions(pconn, "later")
+    refs.reindex_mentions(pconn, PROJECT.id, "later")
     assert out(pconn, D) == {(E, "link")}

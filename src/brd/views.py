@@ -30,7 +30,7 @@ def card_detail(conn: sqlite3.Connection, card: Card) -> dict:
         "updated_at": card.updated_at,
         "blocked_by": db.list_blockers_of(conn, card.id),
         "children": [child.id for child in db.list_children(conn, card.id)],
-        "comments": [comment_dict(c) for c in comments.list_for(conn, card.id)],
+        "comments": [comment_dict(c) for c in comments.for_entity(conn, card.id)],
         **links_of(conn, card.id),
     }
 
@@ -46,7 +46,7 @@ def issue_detail(conn: sqlite3.Connection, issue: issues.Issue) -> dict:
         "blocks": issues.blocks_of(conn, issue.id),
         "created_at": issue.created_at,
         "updated_at": issue.updated_at,
-        "comments": [comment_dict(c) for c in comments.list_for(conn, issue.id)],
+        "comments": [comment_dict(c) for c in comments.for_entity(conn, issue.id)],
         **links_of(conn, issue.id),
     }
 
@@ -58,7 +58,7 @@ def document_summary(conn: sqlite3.Connection, doc: documents.Document, source_s
         "title": doc.title,
         "source_path": doc.source_path,
         "source_state": source_state,
-        "tags": tags.list_for(conn, doc.id),
+        "tags": tags.for_entity(conn, doc.id),
         "created_at": doc.created_at,
         "updated_at": doc.updated_at,
     }
@@ -74,15 +74,22 @@ def document_detail(
     }
 
 
-def detail(conn: sqlite3.Connection, root: Path, entity_id: str) -> dict:
+def detail(conn: sqlite3.Connection, entity_id: str) -> dict:
     kind = entities.kind_of(conn, entity_id)
     if kind is None:
         raise CardNotFoundError(f"no card, issue, or document with id {entity_id}")
-    # Documents may have been edited on disk; sync them all so backlinks
-    # (referenced_by) reflect their current content.
-    results = documents.sync_all(conn, root)
+    # show is global: any project's entity, labelled with the project owning it.
+    owner = db.owner_of(conn, entity_id)
+    # Documents may have been edited on disk; sync the owning project's
+    # documents against its own root so backlinks (referenced_by) reflect
+    # their current content.
+    results = documents.sync_all(conn, owner.id, Path(owner.root_path))
     if kind == "document":
-        return document_detail(conn, documents.require(conn, entity_id), results[entity_id])
-    if kind == "issue":
-        return issue_detail(conn, issues.require(conn, entity_id))
-    return card_detail(conn, db.get_card(conn, entity_id))
+        shown = document_detail(
+            conn, documents.require(conn, owner.id, entity_id), results[entity_id]
+        )
+    elif kind == "issue":
+        shown = issue_detail(conn, issues.require(conn, owner.id, entity_id))
+    else:
+        shown = card_detail(conn, db.get_card(conn, entity_id))
+    return {**shown, "project": {"id": owner.id, "name": owner.name}}

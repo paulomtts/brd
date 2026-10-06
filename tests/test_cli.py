@@ -1,10 +1,13 @@
 import json
+import uuid
 
 import pytest
 from typer.testing import CliRunner
 
-from brd import paths
+from brd import db, paths
 from brd.cli import app
+from tests.cli_helpers import err, invoke, ok
+from tests.factories import OTHER_PROJECT, add_project, make_card, make_document, make_issue
 
 runner = CliRunner()
 
@@ -706,3 +709,224 @@ def test_end_to_end_workflow(isolated_env):
 
     projects_payload = json.loads(runner.invoke(app, ["projects"]).stdout)
     assert projects_payload["data"][0]["name"] == "myrepo"
+
+
+def _is_uuid4(value):
+    return uuid.UUID(value).version == 4 and str(uuid.UUID(value)) == value
+
+
+def test_init_reports_project_with_id_first(isolated_env):
+    result = runner.invoke(app, ["init"])
+    assert result.exit_code == 0
+    data = json.loads(result.stdout)["data"]
+    assert list(data) == ["id", "name", "root_path", "created_at"]
+    assert _is_uuid4(data["id"])
+    assert data["root_path"] == str(isolated_env)
+
+
+def test_projects_reports_the_id_init_assigned_and_rerun_keeps_it(isolated_env):
+    first = json.loads(runner.invoke(app, ["init"]).stdout)["data"]
+    second = json.loads(runner.invoke(app, ["init", "--name", "renamed"]).stdout)["data"]
+
+    listed = json.loads(runner.invoke(app, ["projects"]).stdout)["data"]
+
+    assert second["id"] == first["id"]
+    assert second["created_at"] == first["created_at"]
+    assert listed == [second]
+    assert list(listed[0]) == ["id", "name", "root_path", "created_at"]
+
+
+def test_projects_pretty_includes_the_id(isolated_env):
+    project_id = json.loads(runner.invoke(app, ["init"]).stdout)["data"]["id"]
+    result = runner.invoke(app, ["projects", "--pretty"])
+    assert result.exit_code == 0
+    assert project_id in result.stdout
+
+
+def test_forget_reports_the_forgotten_project_id(isolated_env):
+    project_id = json.loads(runner.invoke(app, ["init"]).stdout)["data"]["id"]
+    result = runner.invoke(app, ["forget"])
+    assert result.exit_code == 0
+    assert json.loads(result.stdout)["data"]["id"] == project_id
+
+
+FOREIGN = "f0f0f0f0-0000-4000-8000-000000000000"
+
+
+@pytest.fixture
+def foreign(project):
+    """Seed another project and its card FOREIGN into the current board file.
+    No command can do this until every project shares one database."""
+    conn = db.connect(paths.project_db_path(project))
+    try:
+        add_project(conn, OTHER_PROJECT)
+        make_card(conn, FOREIGN, title="Foreign", project_id=OTHER_PROJECT.id)
+    finally:
+        conn.close()
+    return FOREIGN
+
+
+FOREIGN_ISSUE = "f1f1f1f1-0000-4000-8000-000000000000"
+FOREIGN_DOC = "f2f2f2f2-0000-4000-8000-000000000000"
+
+
+@pytest.fixture
+def foreign_entities(project, foreign):
+    """Besides card FOREIGN, the other project owns the open issue
+    FOREIGN_ISSUE and the document FOREIGN_DOC (stem `notes`, tag `t`)."""
+    conn = db.connect(paths.project_db_path(project))
+    try:
+        make_issue(conn, FOREIGN_ISSUE, title="Foreign issue", project_id=OTHER_PROJECT.id)
+        make_document(
+            conn, FOREIGN_DOC, "notes", content="foreign body", project_id=OTHER_PROJECT.id
+        )
+        conn.execute("INSERT INTO tags (entity_id, tag) VALUES (?, 't')", (FOREIGN_DOC,))
+        conn.commit()
+    finally:
+        conn.close()
+    return {"card": foreign, "issue": FOREIGN_ISSUE, "document": FOREIGN_DOC}
+
+
+def _refused(*args, error_type: str = "CardNotFoundError") -> None:
+    result = invoke(*args)
+    assert result.exit_code == 1, result.output
+    error = json.loads(result.stdout)["error"]
+    assert error["type"] == error_type
+    assert f"belongs to project {OTHER_PROJECT.name} ({OTHER_PROJECT.id})" in error["message"]
+
+
+def test_update_refuses_a_foreign_card(foreign):
+    _refused("update", foreign, "--title", "x")
+    assert ok("show", foreign)["title"] == "Foreign"
+
+
+def test_add_and_update_refuse_a_foreign_parent(foreign):
+    _refused("add", "--title", "t", "--parent", foreign)
+    mine = ok("add", "--title", "mine")["id"]
+    _refused("update", mine, "--parent", foreign)
+    assert ok("show", mine)["parent_id"] is None
+
+
+def test_delete_refuses_a_foreign_card(foreign):
+    _refused("delete", foreign)
+    _refused("delete", foreign, "--cascade")
+    assert ok("show", foreign)["id"] == foreign
+
+
+def test_block_and_unblock_refuse_a_foreign_card(foreign):
+    mine = ok("add", "--title", "mine")["id"]
+    _refused("block", foreign, "--by", mine)
+    _refused("unblock", foreign, "--by", mine)
+    assert ok("show", foreign)["blocked_by"] == []
+
+
+def test_blocker_targets_must_be_in_this_project(foreign):
+    mine = ok("add", "--title", "mine")["id"]
+    _refused("block", mine, "--by", foreign)
+    _refused("add", "--title", "t", "--blocked-by", foreign)
+    assert ok("show", mine)["blocked_by"] == []
+
+
+def test_issue_open_refuses_a_foreign_blocks_card(foreign):
+    _refused("issue", "open", "--title", "q", "--blocks", foreign)
+    assert ok("issue", "list") == []
+
+
+def test_comment_add_refuses_a_foreign_card(foreign):
+    _refused("comment", "add", foreign, "hi")
+    assert ok("show", foreign)["comments"] == []
+
+
+def test_listings_exclude_a_foreign_card(foreign):
+    mine = ok("add", "--title", "mine")["id"]
+    assert [c["id"] for c in ok("list")] == [mine]
+    assert [c["id"] for c in ok("list", "--status", "todo")] == [mine]
+    assert ok("list", "--parent", foreign) == []
+    assert [c["id"] for c in ok("next")] == [mine]
+    assert [node["id"] for node in ok("tree")] == [mine]
+    assert [node["id"] for node in ok("export")["cards"]] == [mine]
+
+
+def test_next_and_tree_refuse_a_foreign_root(foreign):
+    _refused("next", "--parent", foreign)
+    _refused("tree", foreign)
+
+
+def test_show_is_global_and_names_the_owner(foreign):
+    mine = ok("add", "--title", "mine")["id"]
+    assert ok("show", foreign)["project"] == {
+        "id": OTHER_PROJECT.id,
+        "name": OTHER_PROJECT.name,
+    }
+    registered = ok("projects")[0]
+    assert ok("show", mine)["project"] == {"id": registered["id"], "name": registered["name"]}
+    assert "project" not in ok("list")[0]
+    assert err("show", "nope") == "CardNotFoundError"
+
+
+def test_issue_commands_are_scoped_to_this_project(foreign_entities):
+    issue = foreign_entities["issue"]
+    mine = ok("issue", "open", "--title", "mine")["id"]
+    assert [i["id"] for i in ok("issue", "list")] == [mine]
+    assert [i["id"] for i in ok("issue", "list", "--status", "open")] == [mine]
+    _refused("issue", "update", issue, "--title", "x", error_type="IssueNotFoundError")
+    _refused("issue", "close", issue, error_type="IssueNotFoundError")
+    _refused("issue", "reopen", issue, error_type="IssueNotFoundError")
+    _refused("delete", issue, error_type="IssueNotFoundError")
+    _refused("issue", "open", "--title", "q", "--ref", foreign_entities["card"])
+    shown = ok("show", issue)
+    assert (shown["title"], shown["status"]) == ("Foreign issue", "open")
+    assert [i["id"] for i in ok("issue", "list")] == [mine]
+
+
+def test_document_commands_are_scoped_to_this_project(project, foreign_entities):
+    doc = foreign_entities["document"]
+    (project / "docs").mkdir()
+    (project / "docs" / "notes.md").write_text("mine")
+    mine = ok("doc", "add", "docs/notes.md")["id"]  # the other project also has `notes`
+    assert [d["id"] for d in ok("doc", "list")] == [mine]
+    _refused("doc", "update", doc, "--title", "x", error_type="DocumentNotFoundError")
+    _refused("doc", "restore", doc, error_type="DocumentNotFoundError")
+    _refused("delete", doc, error_type="DocumentNotFoundError")
+    assert ok("show", doc)["title"] == "notes"
+    assert (project / "docs" / "notes.md").read_text() == "mine"
+    assert [d["id"] for d in ok("export")["documents"]] == [mine]
+
+
+def test_ref_commands_are_scoped_to_this_project(foreign_entities):
+    mine = ok("add", "--title", "mine")["id"]
+    _refused("ref", "add", foreign_entities["card"], mine)
+    _refused("ref", "add", mine, foreign_entities["issue"], error_type="IssueNotFoundError")
+    _refused("ref", "remove", foreign_entities["card"], mine)
+    assert ok("show", mine)["refs"] == []
+    assert ok("show", foreign_entities["card"])["refs"] == []
+
+
+def test_tag_commands_are_scoped_to_this_project(foreign_entities):
+    doc = foreign_entities["document"]
+    assert ok("tag", "list") == []
+    _refused("tag", "add", doc, "x", error_type="DocumentNotFoundError")
+    _refused("tag", "remove", doc, "t", error_type="DocumentNotFoundError")
+    _refused("tag", "list", doc, error_type="DocumentNotFoundError")
+    assert ok("show", doc)["tags"] == ["t"]
+
+
+def test_comment_commands_are_scoped_to_this_project(project, foreign_entities):
+    conn = db.connect(paths.project_db_path(project))
+    try:
+        conn.execute(
+            "INSERT INTO comments (id, entity_id, author, body, created_at) "
+            "VALUES ('k-foreign', ?, 'them', 'theirs', '2026-09-24T00:00:00+00:00')",
+            (foreign_entities["card"],),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    _refused("comment", "list", foreign_entities["card"])
+    _refused("comment", "add", foreign_entities["issue"], "hi", error_type="IssueNotFoundError")
+    _refused(
+        "comment", "add", foreign_entities["document"], "hi", error_type="DocumentNotFoundError"
+    )
+    _refused("comment", "delete", "k-foreign", error_type="CommentNotFoundError")
+    assert ok("show", foreign_entities["issue"])["comments"] == []
+    assert [c["id"] for c in ok("show", foreign_entities["card"])["comments"]] == ["k-foreign"]

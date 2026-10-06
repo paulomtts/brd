@@ -3,7 +3,7 @@ import json
 import pytest
 
 from brd import paths
-from tests.cli_helpers import err, ok
+from tests.cli_helpers import err, invoke, ok
 
 
 def write(root, rel, text):
@@ -55,6 +55,13 @@ def test_round_trip_into_fresh_project(populated, tmp_path, monkeypatch):
     assert after[populated["doc"]["id"]]["source_state"] == "missing"
     for data in (before, after):
         data[populated["doc"]["id"]].pop("source_state")
+    # `show` names the owning project, which differs between the two boards.
+    assert {s["project"]["id"] for s in before.values()}.isdisjoint(
+        {s["project"]["id"] for s in after.values()}
+    )
+    for data in (before, after):
+        for shown in data.values():
+            shown.pop("project")
     assert before == after
     ok("doc", "restore", populated["doc"]["id"])
     assert (other / "docs" / "notes.md").read_text().startswith("# Notes")
@@ -191,3 +198,86 @@ def test_malformed_snapshot_is_an_envelope(project, tmp_path, monkeypatch, raw):
     other, error = _import_into_fresh(tmp_path, monkeypatch, raw)
     assert error == "ImportFormatError"
     assert ok("list") == [] and ok("issue", "list") == [] and ok("doc", "list") == []
+
+
+GHOST = "0b6f4c1e-dead-4222-8333-444455556666"
+
+
+def _import_error_into_fresh(tmp_path, monkeypatch, data):
+    snapshot = tmp_path / "snapshot.json"
+    snapshot.write_text(json.dumps(data))
+    other = tmp_path / "other"
+    other.mkdir()
+    monkeypatch.chdir(other)
+    ok("init")
+    result = invoke("import", snapshot)
+    assert result.exit_code == 1, result.output
+    return other, json.loads(result.stdout)["error"]
+
+
+def _assert_nothing_imported(other):
+    assert ok("list") == [] and ok("issue", "list") == [] and ok("doc", "list") == []
+    docs_dir = paths.project_docs_dir(other)
+    assert not docs_dir.exists() or list(docs_dir.iterdir()) == []
+
+
+def test_import_rejects_unknown_blocker(populated, tmp_path, monkeypatch):
+    data = ok("export")
+    data["cards"][0]["blocked_by"].append(GHOST)
+    other, error = _import_error_into_fresh(tmp_path, monkeypatch, data)
+    assert error["type"] == "ImportFormatError"
+    assert GHOST in error["message"]
+    _assert_nothing_imported(other)
+
+
+def test_import_rejects_unknown_ref_target(populated, tmp_path, monkeypatch):
+    data = ok("export")
+    data["refs"].append({"src_id": populated["card"]["id"], "dst_id": GHOST, "origin": "explicit"})
+    other, error = _import_error_into_fresh(tmp_path, monkeypatch, data)
+    assert error["type"] == "ImportFormatError"
+    assert GHOST in error["message"]
+    _assert_nothing_imported(other)
+
+
+def test_old_tree_snapshot_names_the_unknown_blocker(project, tmp_path, monkeypatch):
+    a = ok("add", "--title", "A")
+    issue = ok("issue", "open", "--title", "Q", "--blocks", a["id"])
+    tree = ok("tree")
+    other, error = _import_error_into_fresh(tmp_path, monkeypatch, tree)
+    assert error["type"] == "ImportFormatError"
+    assert issue["id"] in error["message"]
+    assert ok("list") == []
+
+
+@pytest.mark.parametrize("fmt", ["export", "tree"])
+def test_import_blocker_already_on_board_is_accepted(project, tmp_path, fmt):
+    issue = ok("issue", "open", "--title", "Q")
+    card_id = "5d0f6a52-7c55-4a8e-9d0b-0c1f2e3a4b5c"
+    node = {
+        "id": card_id,
+        "title": "Imported",
+        "description": None,
+        "status": "todo",
+        "blocked_by": [issue["id"]],
+        "created_at": "2026-01-01T00:00:00+00:00",
+        "updated_at": "2026-01-01T00:00:00+00:00",
+        "children": [],
+    }
+    data = {"brd_export": 1, "cards": [node]} if fmt == "export" else [node]
+    snapshot = tmp_path / "snapshot.json"
+    snapshot.write_text(json.dumps(data))
+    ok("import", snapshot)
+    assert ok("show", card_id)["blocked_by"] == [issue["id"]]
+
+
+def test_round_trip_keeps_refs_between_snapshot_entities(populated, tmp_path, monkeypatch):
+    data = ok("export")
+    assert data["refs"], "populated has an explicit issue -> document ref"
+    snapshot = tmp_path / "snapshot.json"
+    snapshot.write_text(json.dumps(data))
+    other = tmp_path / "other"
+    other.mkdir()
+    monkeypatch.chdir(other)
+    ok("init")
+    ok("import", snapshot)
+    assert ok("export")["refs"] == data["refs"]
