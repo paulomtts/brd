@@ -326,6 +326,7 @@ def test_forget_project_returns_project_with_its_id(tmp_path, monkeypatch):
 
     assert master.forget_project(repo) == project
 
+
 def _resolve(start):
     conn = master.connect()
     try:
