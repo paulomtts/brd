@@ -163,7 +163,7 @@ def add(
              doc.created_at, doc.updated_at),
         )
     if normalized_tags:
-        tags.add(conn, doc.id, normalized_tags)
+        tags.add(conn, project_id, doc.id, normalized_tags)
     refs.reindex(conn, doc.id)
     refs.reindex_mentions(conn, project_id, stem)
     return doc

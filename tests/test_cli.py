@@ -900,3 +900,12 @@ def test_ref_commands_are_scoped_to_this_project(foreign_entities):
     _refused("ref", "remove", foreign_entities["card"], mine)
     assert ok("show", mine)["refs"] == []
     assert ok("show", foreign_entities["card"])["refs"] == []
+
+
+def test_tag_commands_are_scoped_to_this_project(foreign_entities):
+    doc = foreign_entities["document"]
+    assert ok("tag", "list") == []
+    _refused("tag", "add", doc, "x", error_type="DocumentNotFoundError")
+    _refused("tag", "remove", doc, "t", error_type="DocumentNotFoundError")
+    _refused("tag", "list", doc, error_type="DocumentNotFoundError")
+    assert ok("show", doc)["tags"] == ["t"]

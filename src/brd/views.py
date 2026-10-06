@@ -58,7 +58,7 @@ def document_summary(conn: sqlite3.Connection, doc: documents.Document, source_s
         "title": doc.title,
         "source_path": doc.source_path,
         "source_state": source_state,
-        "tags": tags.list_for(conn, doc.id),
+        "tags": tags.for_entity(conn, doc.id),
         "created_at": doc.created_at,
         "updated_at": doc.updated_at,
     }

@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from brd import comments, core, db, documents, entities, issues, pretty, refs, snapshot, views
+from brd import comments, core, db, documents, entities, issues, pretty, refs, snapshot, tags, views
 from brd.cli import cards as cli_cards
 from brd.errors import (
     CardNotFoundError,
@@ -117,7 +117,7 @@ def test_snapshot_load_records_its_project(pconn, tmp_path):
 def two(pconn):
     """P owns cards p1 and p2. Q owns card q1 (parent of q-child, blocked by
     p2 through a directly seeded cross-project edge), issue qi and
-    document qd."""
+    document qd (tagged qtag)."""
     add_project(pconn, OTHER_PROJECT)
     make_card(pconn, "p1")
     make_card(pconn, "p2")
@@ -125,6 +125,7 @@ def two(pconn):
     make_card(pconn, "q-child", parent_id="q1", project_id=Q)
     make_issue(pconn, "qi", project_id=Q)
     make_document(pconn, "qd", "qnotes", content="q body", project_id=Q)
+    pconn.execute("INSERT INTO tags (entity_id, tag) VALUES ('qd', 'qtag')")
     db.add_blocked_by_edge(pconn, "q1", "p2")
     return pconn
 
@@ -427,6 +428,26 @@ SCOPED_REFUSED = [
         lambda c: refs.remove_explicit(c, P, "q1", "p1"), CardNotFoundError, "q1", "card",
         id="ref_remove_foreign_source",
     ),
+    pytest.param(
+        lambda c: tags.add(c, P, "qd", ["x"]), DocumentNotFoundError, "qd", "document",
+        id="tag_add",
+    ),
+    pytest.param(
+        lambda c: tags.add(c, P, "qd", ["bad tag"]), DocumentNotFoundError, "qd", "document",
+        id="tag_add_invalid_tag",
+    ),
+    pytest.param(
+        lambda c: tags.remove(c, P, "qd", ["qtag"]), DocumentNotFoundError, "qd", "document",
+        id="tag_remove",
+    ),
+    pytest.param(
+        lambda c: tags.list_for(c, P, "qd"), DocumentNotFoundError, "qd", "document",
+        id="tag_list_for",
+    ),
+    pytest.param(
+        lambda c: tags.add(c, P, "q1", ["x"]), CardNotFoundError, "q1", "card",
+        id="tag_add_foreign_card",
+    ),
 ]
 
 
@@ -652,3 +673,19 @@ def test_ref_remove_checks_only_the_source(two):
         refs.remove_explicit(two, P, "q1", "p1")
     refs.remove_explicit(two, P, "p1", "q1")  # a foreign target: the edge still goes
     assert [tuple(r) for r in two.execute("SELECT src_id, dst_id FROM refs")] == [("q1", "p1")]
+
+
+def test_tag_counts_cover_only_the_projects_entities(two):
+    make_document(two, "pd", "pnotes")
+    make_document(two, "qd2", "qother", project_id=Q)
+    two.executemany(
+        "INSERT INTO tags (entity_id, tag) VALUES (?, ?)",
+        [("pd", "x"), ("qd", "x"), ("qd2", "x"), ("qd2", "y")],
+    )
+    two.commit()
+    assert tags.counts(two, P) == [{"tag": "x", "count": 1}]
+
+
+def test_show_lists_a_foreign_documents_tags(two):
+    assert views.detail(two, "qd")["tags"] == ["qtag"]
+    assert tags.for_entity(two, "qd") == ["qtag"]

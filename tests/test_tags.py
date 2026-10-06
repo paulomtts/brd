@@ -2,7 +2,7 @@ import pytest
 
 from brd import tags
 from brd.errors import InvalidTagError, NotTaggableError
-from tests.factories import make_card, make_document
+from tests.factories import PROJECT, make_card, make_document
 
 
 @pytest.mark.parametrize(
@@ -21,27 +21,27 @@ def test_normalize_rejects(raw):
 
 def test_add_remove_list(pconn):
     make_document(pconn, "d", "notes")
-    assert tags.add(pconn, "d", ["B", "a", "b"]) == ["a", "b"]
-    assert tags.remove(pconn, "d", ["a", "missing"]) == ["b"]
-    assert tags.list_for(pconn, "d") == ["b"]
+    assert tags.add(pconn, PROJECT.id, "d", ["B", "a", "b"]) == ["a", "b"]
+    assert tags.remove(pconn, PROJECT.id, "d", ["a", "missing"]) == ["b"]
+    assert tags.list_for(pconn, PROJECT.id, "d") == ["b"]
 
 
 def test_invalid_tag_writes_nothing(pconn):
     make_document(pconn, "d", "notes")
     with pytest.raises(InvalidTagError):
-        tags.add(pconn, "d", ["good", "bad tag"])
-    assert tags.list_for(pconn, "d") == []
+        tags.add(pconn, PROJECT.id, "d", ["good", "bad tag"])
+    assert tags.list_for(pconn, PROJECT.id, "d") == []
 
 
 def test_cards_not_taggable(pconn):
     make_card(pconn, "c")
     with pytest.raises(NotTaggableError, match="cards can't be tagged"):
-        tags.add(pconn, "c", ["x"])
+        tags.add(pconn, PROJECT.id, "c", ["x"])
 
 
 def test_counts(pconn):
     make_document(pconn, "d1", "one")
     make_document(pconn, "d2", "two")
-    tags.add(pconn, "d1", ["x", "y"])
-    tags.add(pconn, "d2", ["x"])
-    assert tags.counts(pconn) == [{"tag": "x", "count": 2}, {"tag": "y", "count": 1}]
+    tags.add(pconn, PROJECT.id, "d1", ["x", "y"])
+    tags.add(pconn, PROJECT.id, "d2", ["x"])
+    assert tags.counts(pconn, PROJECT.id) == [{"tag": "x", "count": 2}, {"tag": "y", "count": 1}]

@@ -40,7 +40,7 @@ def test_add_registers_and_backs_up(pconn, root):
 def test_add_with_title_and_tags(pconn, root):
     doc = documents.add(pconn, PROJECT.id, root, write(root, "docs/a.md", ""), title="Alpha", tag_list=["#Design"])
     assert doc.title == "Alpha"
-    assert tags.list_for(pconn, doc.id) == ["design"]
+    assert tags.list_for(pconn, PROJECT.id, doc.id) == ["design"]
 
 
 def test_add_rejects_outside_root(pconn, root, tmp_path):
