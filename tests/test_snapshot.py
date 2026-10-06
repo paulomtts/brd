@@ -895,6 +895,10 @@ def test_import_help_describes_placement():
     assert "current project" in text
     assert "multi-project" in text
     assert "already has entities" in text
+    assert "--yes" in text
+    assert "is replaced" in text
+    assert "without asking" in text
+    assert "Refuses, writing nothing, if a target" not in text
 
 
 def _board():

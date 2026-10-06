@@ -130,8 +130,10 @@ def import_cmd(
     """Restore a snapshot. A one-project snapshot lands in the current project,
     registering the current directory if it is not in one. A multi-project
     snapshot places each entry in the registered project with its id, else
-    registers it at its recorded root; it works from any directory. Refuses,
-    writing nothing, if a target project already has entities."""
+    registers it at its recorded root; it works from any directory. A target
+    project that already has entities is replaced after a y/N confirmation;
+    --yes skips it, and without a terminal and without --yes import refuses,
+    writing nothing."""
 
     def action(conn: sqlite3.Connection) -> dict:
         try:
