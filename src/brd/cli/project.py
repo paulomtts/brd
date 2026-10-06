@@ -19,11 +19,21 @@ def init(
     name: str | None = typer.Option(
         None, "--name", help="Override the default project name."
     ),
+    relink: str | None = typer.Option(
+        None,
+        "--relink",
+        metavar="OLD-ROOT-OR-ID",
+        help="Point an existing project (by id or old root path) at the current "
+        "directory instead of registering a new one, e.g. after moving the repo.",
+    ),
     pretty: bool = pretty_option(),
 ) -> None:
     """Register the current directory as a brd project."""
     try:
-        project = master.init_project(Path.cwd(), name=name)
+        if relink is not None:
+            project = master.relink_project(Path.cwd(), relink, name=name)
+        else:
+            project = master.init_project(Path.cwd(), name=name)
     except BrdError as exc:
         fail(exc, pretty)
     output.print_result(output.ok_envelope(dataclasses.asdict(project)), pretty)
@@ -44,15 +54,34 @@ def projects(pretty: bool = pretty_option()) -> None:
 def forget(
     path: Path | None = typer.Argument(
         None,
-        help="Root path of the project to forget (defaults to the current "
-        "directory).",
+        help="Root path of the project to forget, matched exactly (defaults to "
+        "the project the current directory belongs to).",
+    ),
+    project_id: str | None = typer.Option(
+        None,
+        "--project",
+        help="Id of the project to forget (see `brd projects`), e.g. one whose "
+        "directory is gone.",
     ),
     pretty: bool = pretty_option(),
 ) -> None:
-    """Un-register a project and delete its stored data."""
-    root_path = path if path is not None else Path.cwd()
+    """Un-register a project and delete its stored data. Forgets the current
+    project unless a path or --project is given."""
+    if path is not None and project_id is not None:
+        output.print_result(
+            output.error_envelope(
+                "UsageError", "give either a path or --project, not both"
+            ),
+            pretty,
+        )
+        raise typer.Exit(code=1)
     try:
-        project = master.forget_project(root_path)
+        if project_id is not None:
+            project = master.forget_project_by_id(project_id)
+        elif path is not None:
+            project = master.forget_project(path)
+        else:
+            project = master.forget_current_project(Path.cwd())
     except BrdError as exc:
         fail(exc, pretty)
     output.print_result(output.ok_envelope(dataclasses.asdict(project)), pretty)

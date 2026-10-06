@@ -1,4 +1,5 @@
 import json
+import shutil
 import uuid
 
 import pytest
@@ -96,6 +97,80 @@ def test_init_pretty_flag_switches_off_json(isolated_env, flag):
     assert "myrepo" in result.stdout
 
 
+def _moved(tmp_path, monkeypatch):
+    """init + one card in old/, then old/ renamed to new/ and the cwd moved there."""
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    old = tmp_path / "old"
+    new = tmp_path / "new"
+    old.mkdir()
+    monkeypatch.chdir(old)
+    project = ok("init")
+    ok("add", "--title", "Moved card")
+    old.rename(new)
+    monkeypatch.chdir(new)
+    return project, old, new
+
+
+def test_init_relink_by_old_root_brings_the_board_along(tmp_path, monkeypatch):
+    project, old, new = _moved(tmp_path, monkeypatch)
+    assert err("list") == "ProjectNotFoundError"
+
+    relinked = ok("init", "--relink", old)
+
+    assert relinked == {**project, "root_path": str(new)}
+    assert [card["title"] for card in ok("list")] == ["Moved card"]
+
+
+def test_init_relink_by_id_brings_the_board_along(tmp_path, monkeypatch):
+    project, old, new = _moved(tmp_path, monkeypatch)
+
+    relinked = ok("init", "--relink", project["id"], "--name", "renamed")
+
+    assert relinked == {**project, "root_path": str(new), "name": "renamed"}
+    assert [card["title"] for card in ok("list")] == ["Moved card"]
+    assert ok("projects") == [relinked]
+
+
+def test_init_relink_with_an_unknown_id_is_not_found(tmp_path, monkeypatch):
+    project, old, new = _moved(tmp_path, monkeypatch)
+
+    assert err("init", "--relink", str(uuid.uuid4())) == "ProjectNotFoundError"
+    assert ok("projects") == [project]
+
+
+def test_init_relink_onto_another_projects_root_is_refused(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    a = tmp_path / "a"
+    b = tmp_path / "b"
+    a.mkdir()
+    b.mkdir()
+    monkeypatch.chdir(a)
+    project_a = ok("init")
+    monkeypatch.chdir(b)
+    ok("init")
+    before = ok("projects")
+
+    assert err("init", "--relink", project_a["id"]) == "ProjectAlreadyExistsError"
+    assert ok("projects") == before
+
+
+def test_init_relink_pretty_flag_switches_off_json(tmp_path, monkeypatch):
+    project, old, new = _moved(tmp_path, monkeypatch)
+
+    result = invoke("init", "--relink", old, "--pretty")
+
+    assert result.exit_code == 0, result.output
+    with pytest.raises(json.JSONDecodeError):
+        json.loads(result.stdout)
+    assert str(new) in result.stdout
+
+
+def test_init_help_mentions_relink():
+    result = invoke("init", "--help")
+    assert result.exit_code == 0
+    assert "--relink" in result.output
+
+
 def test_projects_lists_registered_projects(isolated_env):
     runner.invoke(app, ["init"])
     result = runner.invoke(app, ["projects"])
@@ -168,6 +243,49 @@ def test_forget_pretty_flag_switches_off_json(isolated_env, flag):
     with pytest.raises(json.JSONDecodeError):
         json.loads(result.stdout)
     assert "myrepo" in result.stdout
+
+
+def test_forget_project_option_works_after_the_repo_is_deleted(
+    isolated_env, tmp_path, monkeypatch
+):
+    project = ok("init")
+    monkeypatch.chdir(tmp_path)
+    shutil.rmtree(isolated_env)
+
+    assert ok("forget", "--project", project["id"]) == project
+    assert ok("projects") == []
+
+
+def test_forget_project_option_with_an_unknown_id_is_not_found(isolated_env):
+    project = ok("init")
+
+    assert err("forget", "--project", str(uuid.uuid4())) == "ProjectNotFoundError"
+    assert ok("projects") == [project]
+
+
+def test_forget_from_a_subdirectory_forgets_the_enclosing_project(
+    isolated_env, monkeypatch
+):
+    project = ok("init")
+    sub = isolated_env / "sub"
+    sub.mkdir()
+    monkeypatch.chdir(sub)
+
+    assert ok("forget") == project
+    assert ok("projects") == []
+
+
+def test_forget_refuses_both_a_path_and_project(isolated_env):
+    project = ok("init")
+
+    assert err("forget", isolated_env, "--project", project["id"]) == "UsageError"
+    assert ok("projects") == [project]
+
+
+def test_forget_help_mentions_project_option():
+    result = invoke("forget", "--help")
+    assert result.exit_code == 0
+    assert "--project" in result.output
 
 
 def _last_json_line(output: str) -> dict:

@@ -46,6 +46,11 @@ a nested project, its own root wins. Nothing project-specific is
 committed to git; a board doesn't automatically travel with a clone to
 another machine.
 
+If you move a repo, run `brd init --relink <old-path-or-id>` in its new
+location: the existing project, with its id and board, now lives at the
+current directory. `brd forget --project <id>` removes a project whose
+directory is gone; `brd projects` lists the ids.
+
 Older versions of brd wrote a `.brd` marker file and added `.brd` to
 `.gitignore`. brd now ignores both; delete them by hand if you like.
 Boards stored in the very old in-repo `.brd/` directory or UUID-marker
