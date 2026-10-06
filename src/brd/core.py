@@ -114,6 +114,17 @@ def _require_blocker(conn: sqlite3.Connection, blocker_id: str) -> None:
         raise InvalidBlockerError(f"a {kind} can't block a card; only cards and issues can")
 
 
+def _require_import_target(
+    conn: sqlite3.Connection, snapshot_ids: set[str], target_id: str, what: str
+) -> None:
+    # Edge targets carry no foreign key, so an import checks them itself:
+    # each must be in the snapshot or already on this board.
+    if target_id not in snapshot_ids and entities.kind_of(conn, target_id) is None:
+        raise ImportFormatError(
+            f"snapshot {what} {target_id} is neither in the snapshot nor on this board"
+        )
+
+
 def create_card(
     conn: sqlite3.Connection,
     project_id: str,
@@ -288,6 +299,11 @@ def import_tree(conn: sqlite3.Connection, project_id: str, nodes: list[dict]) ->
             raise CardAlreadyExistsError(
                 f"card {node['id']} already exists in this board"
             )
+
+    snapshot_ids = {node["id"] for node, _ in flattened}
+    for node, _ in flattened:
+        for blocker_id in node.get("blocked_by", []):
+            _require_import_target(conn, snapshot_ids, blocker_id, "blocker")
 
     try:
         with conn:  # one transaction: all cards and edges, or nothing

@@ -107,6 +107,14 @@ def _load_export(conn: sqlite3.Connection, project_id: str, snap: dict) -> dict:
     for doc in doc_rows:
         documents._check_unique(conn, doc["source_path"], PurePosixPath(doc["source_path"]).stem)
 
+    snapshot_ids = set(entity_ids)
+    for node, _ in flattened:
+        for blocker_id in node.get("blocked_by", []):
+            core._require_import_target(conn, snapshot_ids, blocker_id, "blocker")
+    for r in snap.get("refs", []):
+        if r.get("origin", "explicit") == "explicit":
+            core._require_import_target(conn, snapshot_ids, r["dst_id"], "ref target")
+
     contents = {
         d["id"]: d["content"].encode("utf-8") for d in doc_rows if d.get("content") is not None
     }
