@@ -24,6 +24,7 @@ def _copy_cards(old_db_path: Path, new_db_path: Path, project: Project) -> None:
     new_conn = db.connect(new_db_path)
     try:
         db.init_project_schema(new_conn, project)
+        copied: set[str] = set()
         for row in old_conn.execute("SELECT * FROM cards"):
             db.insert_entity(new_conn, project.id, row["id"], "card")
             new_conn.execute(
@@ -32,11 +33,15 @@ def _copy_cards(old_db_path: Path, new_db_path: Path, project: Project) -> None:
                 "VALUES (?, ?, ?, ?, ?, ?, ?)",
                 tuple(row),
             )
-        for row in old_conn.execute("SELECT * FROM blocked_by"):
-            new_conn.execute(
-                "INSERT INTO blocked_by (card_id, blocks_on_id) VALUES (?, ?)",
-                tuple(row),
-            )
+            copied.add(row["id"])
+        for row in old_conn.execute("SELECT card_id, blocks_on_id FROM blocked_by"):
+            # Same rule as _migrate_to_v1: keep only edges between copied
+            # cards. Edge targets have no FK, so nothing else would stop one.
+            if row["card_id"] in copied and row["blocks_on_id"] in copied:
+                new_conn.execute(
+                    "INSERT INTO blocked_by (card_id, blocks_on_id) VALUES (?, ?)",
+                    tuple(row),
+                )
         new_conn.commit()
     finally:
         old_conn.close()
@@ -61,22 +66,35 @@ def _migrate_legacy_uuid_marker(marker_file: Path, new_db_path: Path, project: P
         _copy_cards(old_db_path, new_db_path, project)
 
 
+def _board_project(db_path: Path) -> Project | None:
+    """The project a board file records, when it records exactly one."""
+    if not db_path.is_file():
+        return None
+    conn = db.connect(db_path)
+    try:
+        rows = db.board_projects(conn)
+    finally:
+        conn.close()
+    return rows[0] if len(rows) == 1 else None
+
+
 def _settle_project(root_path: Path, name: str | None) -> Project:
     """The project this root is, settled before any board file is touched so
-    the board and the registry agree on its id: the registered row when
-    there is one, else a new project."""
+    the board and the registry agree on its id: the registered row, else the
+    one project the board already records, else a new project."""
     project_name = name or root_path.name
     conn = _master_conn()
     try:
         stored = db.get_project(conn, str(root_path))
     finally:
         conn.close()
-    if stored is not None:
+    known = stored or _board_project(paths.project_db_path(root_path))
+    if known is not None:
         return Project(
-            id=stored.id,
+            id=known.id,
             name=project_name,
             root_path=str(root_path),
-            created_at=stored.created_at,
+            created_at=known.created_at,
         )
     return Project(
         id=db.new_project_id(),

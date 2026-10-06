@@ -4,6 +4,7 @@ import uuid
 import pytest
 
 from brd import db, master, paths
+from brd.cli import _app
 from tests.factories import PROJECT, make_card
 
 
@@ -337,3 +338,64 @@ def test_registered_project_raises_when_root_is_not_registered(tmp_path, monkeyp
 
     with pytest.raises(master.ProjectNotFoundError, match="brd init"):
         master.registered_project(repo)
+
+
+def test_copy_cards_drops_dangling_legacy_edges(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    repo = tmp_path / "myrepo"
+    brd_dir = repo / ".brd"
+    brd_dir.mkdir(parents=True)
+    old_conn = db.connect(brd_dir / "board.db")
+    db.init_project_schema(old_conn, PROJECT)
+    make_card(old_conn, "c1")
+    make_card(old_conn, "c2")
+    db.add_blocked_by_edge(old_conn, "c2", "c1")
+    db.add_blocked_by_edge(old_conn, "c1", "ghost")  # the legacy board's dangling edge
+    old_conn.close()
+
+    project = master.init_project(repo)
+
+    conn = db.connect(paths.project_db_path(repo))
+    try:
+        entities = conn.execute("SELECT id, project_id FROM entities ORDER BY id").fetchall()
+        edges = conn.execute("SELECT card_id, blocks_on_id FROM blocked_by").fetchall()
+    finally:
+        conn.close()
+    assert [tuple(r) for r in entities] == [("c1", project.id), ("c2", project.id)]
+    assert [tuple(r) for r in edges] == [("c2", "c1")]
+
+
+def _board_project_ids(repo):
+    conn = db.connect(paths.project_db_path(repo))
+    try:
+        return [row[0] for row in conn.execute("SELECT id FROM projects")]
+    finally:
+        conn.close()
+
+
+def test_init_project_board_row_matches_registry(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    repo = tmp_path / "myrepo"
+    repo.mkdir()
+
+    first = master.init_project(repo)
+    assert _board_project_ids(repo) == [first.id]
+
+    renamed = master.init_project(repo, name="x")
+    assert renamed.id == first.id
+    assert _board_project_ids(repo) == [first.id]
+
+    # The registry is lost; the board still knows its project.
+    for suffix in ("", "-wal", "-shm"):
+        paths.master_db_path().with_name(f"master.db{suffix}").unlink(missing_ok=True)
+    again = master.init_project(repo)
+    assert again.id == first.id
+    assert again.created_at == first.created_at
+    assert master.list_all_projects() == [again]
+
+    monkeypatch.chdir(repo)
+    ctx = _app.open_project()
+    try:
+        assert ctx.project.id == first.id
+    finally:
+        ctx.conn.close()
