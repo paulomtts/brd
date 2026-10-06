@@ -73,3 +73,7 @@ def test_prompt_states_the_blocking_contract():
         "all of its children",
     ):
         assert phrase in snippet, phrase
+
+
+def test_block_help_says_the_blocker_may_be_in_another_project():
+    assert "another project" in _help_text("block")
