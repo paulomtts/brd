@@ -62,10 +62,15 @@ machines, commit a snapshot and restore from it:
 
 ```bash
 brd export > docs/board/snapshot.json   # commit this
-brd import docs/board/snapshot.json     # on another machine/clone, after brd init
+brd import docs/board/snapshot.json     # on another machine/clone
 ```
 
-`import` preserves the original ids, content, and timestamps — including document backups (restore a missing file with `brd doc restore <id>`) — and refuses to run (touching nothing) if any id in the snapshot already exists in the target board. Older `brd tree` snapshots still import.
+A snapshot is a list of project entries: each one is a project (id, name,
+root path) with its cards, issues, documents, comments, tags and refs.
+`brd export` writes the current project; `brd export --all` writes every
+registered project and works from any directory.
+
+`brd import` restores a snapshot, preserving the original ids, content, and timestamps — including document backups (restore a missing file with `brd doc restore <id>`). A one-project snapshot lands in the current project; outside any project, the current directory is registered first (keeping the snapshot's project id when no project has it), so no `brd init` is needed. A multi-project snapshot (from `brd export --all`) places each entry in the registered project with the same id, else registers it at its recorded root path if that directory exists, and works from any directory. A target project that already has entities is replaced: import prints what it will remove and add, asks y/N, then deletes that project's cards, issues, documents and comments and loads the snapshot's in their place. `--yes` skips the question; without a terminal and without `--yes`, import refuses. Edges from other projects into a replaced project are kept: they show as not-found until their ids return, and reconnect when they do. Import never writes or deletes documents' source files in the repo; use `brd doc restore <id>` for that. So `brd export --all > board.json` on one machine and `brd import --yes board.json` on another restores every project whose root exists, with ids, hierarchy and edges intact, and re-importing a project's own export changes nothing. Import refuses, touching nothing, when an id in the snapshot belongs to a project it is not replacing, or when an entry cannot be placed. Edges to ids that are not in the database are kept and counted as not-found; importing the missing project later reconnects them. Older one-object `brd export` snapshots and `brd tree` snapshots still import.
 
 ## Documents
 

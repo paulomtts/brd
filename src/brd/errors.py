@@ -116,3 +116,16 @@ class ImportFormatError(BrdError):
 
 class ImportReadError(BrdError):
     pass
+
+
+class ProjectNotEmptyError(BrdError):
+    pass
+
+
+class ProjectRootNotFoundError(BrdError):
+    pass
+
+
+class Aborted(BrdError):
+    """The user declined a confirmation; the class name is the envelope type,
+    the same one `brd purge` reports."""

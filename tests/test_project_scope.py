@@ -1,3 +1,4 @@
+import dataclasses
 import re
 import sqlite3
 from pathlib import Path
@@ -7,6 +8,7 @@ import pytest
 from brd import comments, core, db, documents, entities, issues, pretty, refs, snapshot, tags, views
 from brd.cli import cards as cli_cards
 from brd.errors import (
+    Aborted,
     CardNotFoundError,
     CommentNotFoundError,
     CycleError,
@@ -14,11 +16,13 @@ from brd.errors import (
     DuplicatePathError,
     DuplicateStemError,
     EntityNotFoundError,
+    ImportFormatError,
     InvalidBlockerError,
     IssueNotFoundError,
+    ProjectNotEmptyError,
     SelfReferenceError,
 )
-from brd.models import Card
+from brd.models import Card, Project
 from tests.factories import (
     NOW,
     OTHER_PROJECT,
@@ -54,9 +58,8 @@ def test_migrate_project_requires_the_project(tmp_path):
         lambda conn, root, source: core.import_tree(conn, []),
         lambda conn, root, source: issues.open_issue(conn, title="i"),
         lambda conn, root, source: documents.add(conn, root, source),
-        lambda conn, root, source: snapshot.load(conn, root, []),
     ],
-    ids=["insert_card", "create_card", "import_tree", "open_issue", "documents.add", "snapshot.load"],
+    ids=["insert_card", "create_card", "import_tree", "open_issue", "documents.add"],
 )
 def test_insert_paths_require_a_project_id(pconn, tmp_path, call):
     root = tmp_path / "repo"
@@ -93,7 +96,8 @@ def test_failed_document_insert_leaves_no_entity_row(pconn, tmp_path, monkeypatc
 
 
 def test_snapshot_load_records_its_project(pconn, tmp_path):
-    add_project(pconn, OTHER_PROJECT)
+    other = dataclasses.replace(OTHER_PROJECT, root_path=str(tmp_path.resolve()))
+    add_project(pconn, other)
     snap = {
         "brd_export": 1,
         "cards": [
@@ -109,11 +113,59 @@ def test_snapshot_load_records_its_project(pconn, tmp_path):
              "content_hash": "h", "created_at": NOW, "updated_at": NOW}
         ],
     }
-    snapshot.load(pconn, OTHER_PROJECT.id, tmp_path, snap)
+    snapshot.load(pconn, tmp_path, snap)
     rows = {r[0]: r[1] for r in pconn.execute("SELECT id, project_id FROM entities")}
-    assert rows == {"c": OTHER_PROJECT.id, "i": OTHER_PROJECT.id, "d": OTHER_PROJECT.id}
+    assert rows == {"c": other.id, "i": other.id, "d": other.id}
     stored = pconn.execute("SELECT project_id FROM documents WHERE id = 'd'").fetchone()
-    assert stored[0] == OTHER_PROJECT.id
+    assert stored[0] == other.id
+
+
+def test_load_confirm_contract(pconn, tmp_path):
+    other = dataclasses.replace(OTHER_PROJECT, root_path=str(tmp_path.resolve()))
+    add_project(pconn, other)
+    snap = {
+        "brd_export": 1,
+        "cards": [
+            {"id": "e", "title": "E", "description": None, "status": "todo", "blocked_by": [],
+             "created_at": NOW, "updated_at": NOW, "children": []}
+        ],
+        "documents": [
+            {"id": "dd", "title": "D", "source_path": "docs/d.md", "content": "x",
+             "content_hash": "h", "created_at": NOW, "updated_at": NOW}
+        ],
+        "comments": [
+            {"id": "m", "entity_id": "e", "author": "a", "body": "b", "created_at": NOW}
+        ],
+    }
+
+    def owned():
+        return {
+            row[0]
+            for row in pconn.execute("SELECT id FROM entities WHERE project_id = ?", (other.id,))
+        }
+
+    def never(replacements):
+        raise AssertionError("confirm was called for an empty target")
+
+    # A registered but empty target is not replaced: confirm is never called.
+    snapshot.load(pconn, tmp_path, snap, confirm=never)
+    make_card(pconn, "old", project_id=other.id)
+
+    # The same ids again: owned by the project being replaced, so allowed.
+    with pytest.raises(ProjectNotEmptyError, match="pass --yes"):
+        snapshot.load(pconn, tmp_path, snap)
+    calls = []
+    with pytest.raises(Aborted, match="nothing was written"):
+        snapshot.load(pconn, tmp_path, snap, confirm=lambda reps: calls.append(reps) or False)
+    assert owned() == {"e", "dd", "old"}
+    ((replacement,),) = calls
+    assert replacement.project.id == other.id
+    assert replacement.removed == {"cards": 2, "issues": 0, "documents": 1, "comments": 1}
+    assert replacement.added == {"cards": 1, "issues": 0, "documents": 1, "comments": 1}
+
+    result = snapshot.load(pconn, tmp_path, snap, confirm=lambda reps: True)
+    assert owned() == {"e", "dd"}
+    assert result["projects"][0]["removed"] == replacement.removed
 
 
 @pytest.fixture
@@ -407,8 +459,13 @@ def _tree_ids(nodes):
     ]
 
 
+def _export(conn, project, root):
+    """One project's export entry, with its documents rooted at `root`."""
+    return snapshot.export_project(conn, dataclasses.replace(project, root_path=str(root)))
+
+
 def test_export_cards_hold_only_the_projects_cards(two, tmp_path):
-    assert set(_tree_ids(snapshot.export(two, P, tmp_path)["cards"])) == {"p1", "p2"}
+    assert set(_tree_ids(_export(two, PROJECT, tmp_path)["cards"])) == {"p1", "p2"}
 
 
 @pytest.mark.parametrize(
@@ -676,26 +733,31 @@ def test_export_holds_only_the_projects_issues_and_documents(two, root):
     make_document(two, "pd", "pnotes")
     _write(root, "docs/qnotes.md", "changed")
     q_before = _doc_state(two, "qd")
-    data = snapshot.export(two, P, root)
+    data = _export(two, PROJECT, root)
     assert [i["id"] for i in data["issues"]] == ["pi"]
     assert [d["id"] for d in data["documents"]] == ["pd"]
     assert _doc_state(two, "qd") == q_before
 
 
 def test_import_checks_document_uniqueness_per_project(two, root):
-    def snap(doc_id):
-        return {
-            "brd_export": 1,
-            "documents": [
-                {"id": doc_id, "title": "N", "source_path": "docs/qnotes.md", "content": "x",
-                 "content_hash": "h", "created_at": NOW, "updated_at": NOW}
-            ],
-        }
+    def doc(doc_id):
+        return {"id": doc_id, "title": "N", "source_path": "docs/qnotes.md", "content": "x",
+                "content_hash": "h", "created_at": NOW, "updated_at": NOW}
 
-    snapshot.load(two, P, root, snap("pn"))  # Q's qd has this path and stem
-    assert [d.id for d in documents.list_all(two, P)] == ["pn"]
-    with pytest.raises(DuplicatePathError):
-        snapshot.load(two, P, root, snap("pn2"))
+    third = Project(
+        id="33333333-3333-4333-8333-333333333333",
+        name="third",
+        root_path=str(root.resolve()),
+        created_at=NOW,
+    )
+    add_project(two, third)
+    before = _state(two)
+    with pytest.raises(ImportFormatError):
+        snapshot.load(two, root, {"brd_export": 1, "documents": [doc("pn"), doc("pn2")]})
+    assert _state(two) == before
+    # Q's qd has this path and stem; uniqueness is per project.
+    snapshot.load(two, root, {"brd_export": 1, "documents": [doc("pn")]})
+    assert [d.id for d in documents.list_all(two, third.id)] == ["pn"]
 
 
 Q_UUID = "abababab-abab-4bab-8bab-abababababab"
@@ -898,7 +960,7 @@ def test_export_holds_only_the_projects_comments_tags_and_refs(two, root):
     _explicit_ref(two, "p1", "pi")
     _explicit_ref(two, "p1", "p2")
     _explicit_ref(two, "q1", "q-child")
-    data = snapshot.export(two, P, root)
+    data = _export(two, PROJECT, root)
     assert [c["id"] for c in data["comments"]] == ["k-p2", "k-p1"]
     assert data["comments"][0] == {
         "id": "k-p2", "entity_id": "p1", "author": "me", "body": "on p card", "created_at": NOW
@@ -919,16 +981,16 @@ def test_export_holds_only_the_projects_comments_tags_and_refs(two, root):
 def test_export_of_a_project_without_comments_tags_or_refs_is_empty(two, root):
     _comment(two, "k-qc", "q1", "on q card")
     _explicit_ref(two, "q1", "q-child")  # Q's qd is already tagged qtag
-    data = snapshot.export(two, P, root)
+    data = _export(two, PROJECT, root)
     assert (data["comments"], data["tags"], data["refs"]) == ([], [], [])
 
 
 def test_export_keeps_a_ref_to_another_projects_entity(two, root):
     _explicit_ref(two, "p1", "qi")
     _explicit_ref(two, "q1", "p1")
-    assert snapshot.export(two, P, root)["refs"] == [
+    assert _export(two, PROJECT, root)["refs"] == [
         {"src_id": "p1", "dst_id": "qi", "origin": "explicit"}
     ]
-    assert snapshot.export(two, Q, root)["refs"] == [
+    assert _export(two, OTHER_PROJECT, root)["refs"] == [
         {"src_id": "q1", "dst_id": "p1", "origin": "explicit"}
     ]

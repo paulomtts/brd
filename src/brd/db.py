@@ -497,6 +497,16 @@ def upsert_project(conn: sqlite3.Connection, project: Project) -> Project:
     return get_project(conn, project.root_path)
 
 
+def insert_project(conn: sqlite3.Connection, project: Project) -> None:
+    """Register project with its own id. No commit: import registers projects
+    in the same transaction as their entities, so a failed import leaves
+    no project behind."""
+    conn.execute(
+        "INSERT INTO projects (id, name, root_path, created_at) VALUES (?, ?, ?, ?)",
+        (project.id, project.name, project.root_path, project.created_at),
+    )
+
+
 def list_projects(conn: sqlite3.Connection) -> list[Project]:
     rows = conn.execute("SELECT * FROM projects ORDER BY created_at").fetchall()
     return [_row_to_project(row) for row in rows]

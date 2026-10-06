@@ -717,7 +717,7 @@ def test_import_rejects_colliding_ids(isolated_env):
     result = runner.invoke(app, ["import", str(snapshot_file)])
     assert result.exit_code != 0
     payload = json.loads(result.stdout)
-    assert payload["error"]["type"] == "CardAlreadyExistsError"
+    assert payload["error"]["type"] == "ProjectNotEmptyError"
 
 
 def test_import_missing_file_errors(isolated_env):
@@ -1186,7 +1186,7 @@ def test_listings_exclude_a_foreign_card(foreign):
     assert ok("list", "--parent", foreign) == []
     assert [c["id"] for c in ok("next")] == [mine]
     assert [node["id"] for node in ok("tree")] == [mine]
-    assert [node["id"] for node in ok("export")["cards"]] == [mine]
+    assert [node["id"] for node in ok("export")["projects"][0]["cards"]] == [mine]
 
 
 def test_next_and_tree_refuse_a_foreign_root(foreign):
@@ -1231,7 +1231,7 @@ def test_document_commands_are_scoped_to_this_project(project, foreign_entities)
     _refused("delete", doc, error_type="DocumentNotFoundError")
     assert ok("show", doc)["title"] == "notes"
     assert (project / "docs" / "notes.md").read_text() == "mine"
-    assert [d["id"] for d in ok("export")["documents"]] == [mine]
+    assert [d["id"] for d in ok("export")["projects"][0]["documents"]] == [mine]
 
 
 def test_ref_commands_are_scoped_to_this_project(foreign_entities):
