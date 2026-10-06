@@ -718,3 +718,11 @@ def test_unreadable_master_db_is_a_migration_error_envelope(data, tmp_path, monk
     assert str(paths.master_db_path()) in error["message"]
     assert paths.master_db_path().is_file()
     assert not migrated(paths.master_db_path()).exists()
+
+
+def test_purge_works_when_master_db_is_unreadable(data):
+    data.mkdir(parents=True)
+    paths.master_db_path().write_bytes(b"not a database " * 100)
+
+    assert ok("purge", "--yes") == {"projects_removed": 0}
+    assert not data.exists()

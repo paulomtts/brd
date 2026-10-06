@@ -214,8 +214,10 @@ def forget_project(root_path: Path) -> Project:
 
 
 def _count_projects(db_path: Path, min_version: int) -> int | None:
-    conn = db.connect(db_path)
+    """None when the file is not at min_version or cannot be read at all."""
+    conn = None
     try:
+        conn = db.connect(db_path)
         if _version(conn) < min_version:
             return None
         has_table = conn.execute(
@@ -224,8 +226,12 @@ def _count_projects(db_path: Path, min_version: int) -> int | None:
         if not has_table:
             return 0
         return conn.execute("SELECT COUNT(DISTINCT root_path) FROM projects").fetchone()[0]
+    except sqlite3.DatabaseError:
+        # Unreadable: purge must still be able to remove it.
+        return None
     finally:
-        conn.close()
+        if conn is not None:
+            conn.close()
 
 
 def registry_count() -> int:
@@ -237,7 +243,7 @@ def registry_count() -> int:
         if count is not None:
             return count
     if paths.master_db_path().is_file():
-        return _count_projects(paths.master_db_path(), 0)
+        return _count_projects(paths.master_db_path(), 0) or 0
     return 0
 
 
