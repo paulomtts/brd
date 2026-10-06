@@ -1,5 +1,6 @@
 import json
 import sqlite3
+import sys
 from collections.abc import Callable
 from pathlib import Path
 
@@ -48,9 +49,48 @@ def _import_text(data: dict) -> str:
         )
         if item["registered"]:
             line += " [registered]"
+        elif any(item["removed"].values()):
+            line += " [replaced]"
         lines.append(line)
     lines.append(f"not-found edge targets: {data['not_found_edges']}")
     return "\n".join(lines)
+
+
+def _stdin_is_tty() -> bool:
+    # A function so tests can stand in for a terminal: CliRunner swaps
+    # sys.stdin for a non-TTY stream.
+    return sys.stdin.isatty()
+
+
+def _replacement_line(replacement: snapshot.Replacement) -> str:
+    project = replacement.project
+    removed = ", ".join(f"-{replacement.removed[key]} {key}" for key in snapshot.CONTENT_KEYS)
+    added = ", ".join(f"+{replacement.added[key]} {key}" for key in snapshot.CONTENT_KEYS)
+    return f"brd: replacing {project.name} ({project.root_path}): {removed} / {added}"
+
+
+def _confirmation(yes: bool) -> Callable[[list[snapshot.Replacement]], bool] | None:
+    """How import confirms replacing projects that have entities: not at all
+    (refuse) without a terminal and without --yes; otherwise print what
+    each replacement removes and adds on stderr, then ask unless --yes."""
+    if not yes and not _stdin_is_tty():
+        return None
+
+    def confirm(replacements: list[snapshot.Replacement]) -> bool:
+        for replacement in replacements:
+            typer.echo(_replacement_line(replacement), err=True)
+        if yes:
+            return True
+        try:
+            return typer.confirm(
+                f"Replace {len(replacements)} project(s)? This cannot be undone.",
+                default=False,
+                err=True,
+            )
+        except typer.Abort:  # EOF or Ctrl-C at the prompt
+            return False
+
+    return confirm
 
 
 @app.command(name="export")
@@ -80,6 +120,11 @@ def import_cmd(
     file: Path = typer.Argument(
         ..., help="Path to a `brd export` file (or an older `brd tree` snapshot)."
     ),
+    yes: bool = typer.Option(
+        False,
+        "--yes",
+        help="Replace target projects that already have entities without asking.",
+    ),
     pretty: bool = pretty_option(),
 ) -> None:
     """Restore a snapshot. A one-project snapshot lands in the current project,
@@ -93,6 +138,6 @@ def import_cmd(
             raw = json.loads(file.read_text())
         except (OSError, json.JSONDecodeError) as exc:
             raise ImportReadError(f"could not read a JSON snapshot from {file}: {exc}") from exc
-        return snapshot.load(conn, Path.cwd(), raw)
+        return snapshot.load(conn, Path.cwd(), raw, _confirmation(yes))
 
     _run_global(pretty, action, _import_text)

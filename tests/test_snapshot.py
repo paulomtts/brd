@@ -1,3 +1,4 @@
+import copy
 import json
 import shutil
 
@@ -923,3 +924,117 @@ def test_replace_without_tty_or_yes_refuses(populated, tmp_path):
     assert "not supported yet" not in error["message"]
     assert result.stderr == ""
     assert _board() == before and _backups() == backups
+
+
+def _import_on_tty(monkeypatch, snapshot, answer, *args):
+    """`brd import` as if stdin were a terminal, typing answer. The runner
+    echoes the typed answer into stdout before the envelope, so the
+    envelope is parsed from its first `{`."""
+    monkeypatch.setattr("brd.cli.snapshot._stdin_is_tty", lambda: True)
+    result = invoke("import", snapshot, *args, input=answer)
+    out = result.stdout
+    return result.exit_code, json.loads(out[out.index("{"):]), result.stderr
+
+
+@pytest.mark.parametrize("answer", ["y\n", "yes\n"])
+def test_replace_on_tty_answer_yes_replaces_the_project(populated, tmp_path, monkeypatch, answer):
+    data = ok("export")
+    snapshot = _snapshot_file(tmp_path, data)
+    extra = ok("add", "--title", "extra")["id"]
+    ok("update", populated["card"]["id"], "--title", "Renamed")
+    (registered,) = ok("projects")
+
+    code, envelope, stderr = _import_on_tty(monkeypatch, snapshot, answer)
+    assert code == 0 and envelope["ok"] is True
+    assert (
+        f"brd: replacing {registered['name']} ({registered['root_path']}): "
+        "-3 cards, -1 issues, -1 documents, -1 comments / "
+        "+2 cards, +1 issues, +1 documents, +1 comments"
+    ) in stderr
+    assert "Replace 1 project(s)? This cannot be undone. [y/N]" in stderr
+    (item,) = envelope["data"]["projects"]
+    assert item["registered"] is False
+    assert item["removed"] == {"cards": 3, "issues": 1, "documents": 1, "comments": 1}
+    assert extra not in {card["id"] for card in ok("list")}
+    assert ok("show", populated["card"]["id"])["title"] == "Parser"
+    assert ok("export") == data
+
+
+@pytest.mark.parametrize("answer", ["n\n", "\n", ""], ids=["no", "empty", "eof"])
+def test_replace_on_tty_answer_no_changes_nothing(populated, tmp_path, monkeypatch, answer):
+    snapshot = _snapshot_file(tmp_path, ok("export"))
+    ok("add", "--title", "extra")
+    before, backups = _board(), _backups()
+    code, envelope, stderr = _import_on_tty(monkeypatch, snapshot, answer)
+    assert code == 1
+    assert envelope["error"]["type"] == "Aborted"
+    assert "cancelled" in envelope["error"]["message"]
+    assert "brd: replacing " in stderr
+    assert _board() == before and _backups() == backups
+
+
+def test_replace_with_yes_skips_the_prompt(populated, tmp_path):
+    data = ok("export")
+    snapshot = _snapshot_file(tmp_path, data)
+    extra = ok("add", "--title", "extra")["id"]
+    result = invoke("import", snapshot, "--yes")
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["ok"] is True
+    assert "brd: replacing " in result.stderr
+    assert "[y/N]" not in result.stderr
+    assert extra not in {card["id"] for card in ok("list")}
+    assert ok("export") == data
+
+    ok("add", "--title", "extra again")
+    result = invoke("import", snapshot, "--yes", "--pretty")
+    assert result.exit_code == 0, result.output
+    project_line, _ = result.stdout.splitlines()
+    assert project_line.endswith(" [replaced]")
+    # The summary is stderr's, never part of the pretty report.
+    assert "brd: replacing " in result.stderr
+    assert "brd: replacing " not in result.stdout
+
+
+def test_validation_refusals_come_before_the_prompt(populated, tmp_path, monkeypatch):
+    data = ok("export")
+    entry = _entry(data)
+    entry["cards"].append(copy.deepcopy(entry["cards"][0]))
+    snapshot = _snapshot_file(tmp_path, data)
+    before, backups = _board(), _backups()
+    code, envelope, stderr = _import_on_tty(monkeypatch, snapshot, "y\n")
+    assert code == 1
+    assert envelope["error"]["type"] == "ImportFormatError"
+    assert "duplicate ids" in envelope["error"]["message"]
+    assert stderr == ""
+    assert _board() == before and _backups() == backups
+
+
+def test_ids_may_move_between_two_replaced_projects(project, tmp_path, monkeypatch):
+    a1 = ok("add", "--title", "a1")["id"]
+    b_root, _ = _another_project(tmp_path, monkeypatch, "bproj")
+    b1 = ok("add", "--title", "b1")["id"]
+    data = ok("export", "--all")
+    a_entry, b_entry = data["projects"]
+    a_entry["cards"], b_entry["cards"] = b_entry["cards"], a_entry["cards"]
+    snapshot = _snapshot_file(tmp_path, data)
+    _unregistered_dir(tmp_path, monkeypatch, "elsewhere")
+    result = ok("import", snapshot, "--yes")
+    assert [item["removed"]["cards"] for item in result["projects"]] == [1, 1]
+    monkeypatch.chdir(project)
+    assert [card["id"] for card in ok("list")] == [b1]
+    monkeypatch.chdir(b_root)
+    assert [card["id"] for card in ok("list")] == [a1]
+
+
+def test_replace_of_a_registered_but_empty_target_does_not_ask(project, tmp_path, monkeypatch):
+    snapshot = _snapshot_file(tmp_path, [_card_node(CARD_1)])
+    code, envelope, stderr = _import_on_tty(monkeypatch, snapshot, "")
+    assert code == 0 and envelope["ok"] is True
+    assert stderr == ""
+    (item,) = envelope["data"]["projects"]
+    assert item["registered"] is False
+    assert item["removed"] == {"cards": 0, "issues": 0, "documents": 0, "comments": 0}
+
+    _another_project(tmp_path, monkeypatch, "second")
+    text = human("import", _snapshot_file(tmp_path, [_card_node(CARD_2)], "second.json"))
+    assert "[replaced]" not in text
