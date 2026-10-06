@@ -4,11 +4,29 @@ import uuid
 import pytest
 
 from brd import db, master, paths
-from brd.cli import _app
-from tests.factories import PROJECT, make_card
+from brd.models import Project
+from tests.factories import PROJECT, make_card, make_document
 
 
-def test_init_project_creates_central_db_and_gitignored_marker(tmp_path, monkeypatch):
+def _brd():
+    return db.connect(paths.brd_db_path())
+
+
+def _card_owner(card_id):
+    """(title, project_id) of a card in brd.db, or None."""
+    conn = _brd()
+    try:
+        row = conn.execute(
+            "SELECT cards.title, entities.project_id FROM cards "
+            "JOIN entities ON entities.id = cards.id WHERE cards.id = ?",
+            (card_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    return tuple(row) if row else None
+
+
+def test_init_project_creates_brd_db_and_gitignored_marker(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
     repo = tmp_path / "myrepo"
     repo.mkdir()
@@ -21,9 +39,14 @@ def test_init_project_creates_central_db_and_gitignored_marker(tmp_path, monkeyp
     assert project.name == "myrepo"
     assert project.root_path == str(repo)
 
-    db_path = paths.project_db_path(repo)
+    db_path = paths.brd_db_path()
     assert db_path.is_file()
     assert str(db_path).startswith(str(tmp_path / "data"))
+    conn = _brd()
+    try:
+        assert db.list_projects(conn) == [project]
+    finally:
+        conn.close()
 
     gitignore = repo / ".gitignore"
     assert gitignore.exists()
@@ -49,8 +72,7 @@ def test_init_project_twice_preserves_existing_cards(tmp_path, monkeypatch):
     repo.mkdir()
     project = master.init_project(repo)
 
-    db_path = paths.project_db_path(repo)
-    conn = db.connect(db_path)
+    conn = _brd()
     try:
         make_card(conn, "c1", title="Existing card", project_id=project.id)
     finally:
@@ -58,12 +80,7 @@ def test_init_project_twice_preserves_existing_cards(tmp_path, monkeypatch):
 
     master.init_project(repo)
 
-    conn = db.connect(db_path)
-    try:
-        row = conn.execute("SELECT * FROM cards WHERE id = 'c1'").fetchone()
-    finally:
-        conn.close()
-    assert row is not None
+    assert _card_owner("c1") == ("Existing card", project.id)
 
 
 def test_init_project_upserts_name_on_rerun(tmp_path, monkeypatch):
@@ -97,16 +114,9 @@ def test_init_project_migrates_legacy_uuid_marker_preserving_cards(
     make_card(old_conn, "c1", title="Old card")
     old_conn.close()
 
-    master.init_project(repo)
+    project = master.init_project(repo)
 
-    new_db_path = paths.project_db_path(repo)
-    conn = db.connect(new_db_path)
-    try:
-        row = conn.execute("SELECT * FROM cards WHERE id = 'c1'").fetchone()
-    finally:
-        conn.close()
-    assert row is not None
-    assert row["title"] == "Old card"
+    assert _card_owner("c1") == ("Old card", project.id)
     assert (repo / ".brd").read_text() == ""
 
 
@@ -125,17 +135,10 @@ def test_init_project_migrates_in_repo_format_preserving_cards(tmp_path, monkeyp
     make_card(old_conn, "c1", title="In-repo card")
     old_conn.close()
 
-    master.init_project(repo)
+    project = master.init_project(repo)
 
     assert brd_dir.is_file()  # the directory is gone; .brd is a marker file again
-    new_db_path = paths.project_db_path(repo)
-    conn = db.connect(new_db_path)
-    try:
-        row = conn.execute("SELECT * FROM cards WHERE id = 'c1'").fetchone()
-    finally:
-        conn.close()
-    assert row is not None
-    assert row["title"] == "In-repo card"
+    assert _card_owner("c1") == ("In-repo card", project.id)
 
     gitignore_lines = (repo / ".gitignore").read_text().splitlines()
     assert ".brd" in gitignore_lines
@@ -158,24 +161,6 @@ def test_find_marker_returns_none_when_absent(tmp_path):
     assert master.find_marker(somewhere) is None
 
 
-def test_resolve_project_db_from_nested_dir(tmp_path, monkeypatch):
-    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
-    repo = tmp_path / "myrepo"
-    nested = repo / "a"
-    nested.mkdir(parents=True)
-    master.init_project(repo)
-
-    resolved = master.resolve_project_db(nested)
-    assert resolved == paths.project_db_path(repo)
-
-
-def test_resolve_project_db_raises_when_no_project(tmp_path):
-    somewhere = tmp_path / "nowhere"
-    somewhere.mkdir()
-    with pytest.raises(master.ProjectNotFoundError):
-        master.resolve_project_db(somewhere)
-
-
 def test_list_all_projects(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
     repo1 = tmp_path / "repo1"
@@ -189,18 +174,15 @@ def test_list_all_projects(tmp_path, monkeypatch):
     assert {p.name for p in results} == {"repo1", "repo2"}
 
 
-def test_forget_project_removes_db_marker_and_registry_row(tmp_path, monkeypatch):
+def test_forget_project_removes_marker_and_registry_row(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
     repo = tmp_path / "myrepo"
     repo.mkdir()
     master.init_project(repo)
-    db_path = paths.project_db_path(repo)
-    assert db_path.is_file()
 
     forgotten = master.forget_project(repo)
 
     assert forgotten.name == "myrepo"
-    assert not db_path.is_file()
     assert not (repo / ".brd").exists()
     assert master.list_all_projects() == []
 
@@ -219,13 +201,11 @@ def test_forget_project_works_when_root_path_no_longer_exists(tmp_path, monkeypa
     repo = tmp_path / "myrepo"
     repo.mkdir()
     master.init_project(repo)
-    db_path = paths.project_db_path(repo)
     shutil.rmtree(repo)
 
     forgotten = master.forget_project(repo)
 
     assert forgotten.name == "myrepo"
-    assert not db_path.is_file()
     assert master.list_all_projects() == []
 
 
@@ -250,22 +230,43 @@ def test_purge_all_returns_zero_when_nothing_registered(tmp_path, monkeypatch):
     assert master.purge_all() == 0
 
 
+def test_registry_count_reads_master_db_without_migrating(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    conn = db.connect(paths.master_db_path())
+    db.init_master_schema(conn)
+    for name in ("a", "b"):
+        db.upsert_project(
+            conn, Project(db.new_project_id(), name, str(tmp_path / name), "2026-01-01")
+        )
+    conn.close()
+
+    assert master.registry_count() == 2
+    assert not paths.brd_db_path().exists()
+    assert paths.master_db_path().is_file()
+
+
 def test_list_all_projects_is_empty_before_any_registration(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
 
     assert master.list_all_projects() == []
 
 
-def test_forget_removes_document_backups(tmp_path, monkeypatch):
+def test_forget_removes_the_projects_document_backups(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
     repo = tmp_path / "myrepo"
     repo.mkdir()
-    master.init_project(repo)
-    docs = paths.project_docs_dir(repo)
-    docs.mkdir()
-    (docs / "x.md").write_text("backup")
+    project = master.init_project(repo)
+    conn = _brd()
+    try:
+        make_document(conn, "d1", "notes", content="backup", project_id=project.id)
+    finally:
+        conn.close()
+    backup = paths.docs_dir() / "d1.md"
+    assert backup.read_text() == "backup"
+
     master.forget_project(repo)
-    assert not docs.exists()
+
+    assert not backup.exists()
 
 
 def _is_uuid4(value):
@@ -313,6 +314,52 @@ def test_init_project_gives_each_root_its_own_id(tmp_path, monkeypatch):
     assert first.id != second.id
 
 
+def test_init_rerun_keeps_the_brd_db_row_and_its_cards(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    repo1 = tmp_path / "repo1"
+    repo2 = tmp_path / "repo2"
+    repo1.mkdir()
+    repo2.mkdir()
+    first = master.init_project(repo1)
+    conn = _brd()
+    try:
+        make_card(conn, "c1", project_id=first.id)
+    finally:
+        conn.close()
+
+    master.init_project(repo1, name="renamed")
+    other = master.init_project(repo2)
+
+    conn = _brd()
+    try:
+        stored = {row["root_path"]: tuple(row) for row in conn.execute("SELECT * FROM projects")}
+    finally:
+        conn.close()
+    assert stored[str(repo1)] == (first.id, "renamed", str(repo1), first.created_at)
+    assert stored[str(repo2)][0] == other.id != first.id
+    assert _card_owner("c1") == ("c1", first.id)
+
+
+def test_init_on_an_unmigrated_install_keeps_the_registered_id(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    repo = tmp_path / "myrepo"
+    repo.mkdir()
+    legacy = Project(db.new_project_id(), "myrepo", str(repo), "2026-01-01T00:00:00+00:00")
+    conn = db.connect(paths.master_db_path())
+    db.init_master_schema(conn)
+    db.upsert_project(conn, legacy)
+    conn.close()
+    board = db.connect(paths.project_db_path(repo))
+    db.migrate_project(board, legacy)
+    make_card(board, "c1", project_id=legacy.id)
+    board.close()
+
+    project = master.init_project(repo)
+
+    assert (project.id, project.created_at) == (legacy.id, legacy.created_at)
+    assert _card_owner("c1") == ("c1", legacy.id)
+
+
 def test_forget_project_returns_project_with_its_id(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
     repo = tmp_path / "myrepo"
@@ -328,7 +375,11 @@ def test_registered_project_returns_the_registered_row(tmp_path, monkeypatch):
     repo.mkdir()
     project = master.init_project(repo)
 
-    assert master.registered_project(repo) == project
+    conn = master.connect()
+    try:
+        assert master.registered_project(conn, repo) == project
+    finally:
+        conn.close()
 
 
 def test_registered_project_raises_when_root_is_not_registered(tmp_path, monkeypatch):
@@ -336,8 +387,12 @@ def test_registered_project_raises_when_root_is_not_registered(tmp_path, monkeyp
     repo = tmp_path / "myrepo"
     repo.mkdir()
 
-    with pytest.raises(master.ProjectNotFoundError, match="brd init"):
-        master.registered_project(repo)
+    conn = master.connect()
+    try:
+        with pytest.raises(master.ProjectNotFoundError, match="brd init"):
+            master.registered_project(conn, repo)
+    finally:
+        conn.close()
 
 
 def test_copy_cards_drops_dangling_legacy_edges(tmp_path, monkeypatch):
@@ -355,7 +410,7 @@ def test_copy_cards_drops_dangling_legacy_edges(tmp_path, monkeypatch):
 
     project = master.init_project(repo)
 
-    conn = db.connect(paths.project_db_path(repo))
+    conn = _brd()
     try:
         entities = conn.execute("SELECT id, project_id FROM entities ORDER BY id").fetchall()
         edges = conn.execute("SELECT card_id, blocks_on_id FROM blocked_by").fetchall()
@@ -363,39 +418,3 @@ def test_copy_cards_drops_dangling_legacy_edges(tmp_path, monkeypatch):
         conn.close()
     assert [tuple(r) for r in entities] == [("c1", project.id), ("c2", project.id)]
     assert [tuple(r) for r in edges] == [("c2", "c1")]
-
-
-def _board_project_ids(repo):
-    conn = db.connect(paths.project_db_path(repo))
-    try:
-        return [row[0] for row in conn.execute("SELECT id FROM projects")]
-    finally:
-        conn.close()
-
-
-def test_init_project_board_row_matches_registry(tmp_path, monkeypatch):
-    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
-    repo = tmp_path / "myrepo"
-    repo.mkdir()
-
-    first = master.init_project(repo)
-    assert _board_project_ids(repo) == [first.id]
-
-    renamed = master.init_project(repo, name="x")
-    assert renamed.id == first.id
-    assert _board_project_ids(repo) == [first.id]
-
-    # The registry is lost; the board still knows its project.
-    for suffix in ("", "-wal", "-shm"):
-        paths.master_db_path().with_name(f"master.db{suffix}").unlink(missing_ok=True)
-    again = master.init_project(repo)
-    assert again.id == first.id
-    assert again.created_at == first.created_at
-    assert master.list_all_projects() == [again]
-
-    monkeypatch.chdir(repo)
-    ctx = _app.open_project()
-    try:
-        assert ctx.project.id == first.id
-    finally:
-        ctx.conn.close()

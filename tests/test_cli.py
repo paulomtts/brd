@@ -56,7 +56,12 @@ def test_init_registers_project(isolated_env):
     assert payload["ok"] is True
     assert payload["data"]["name"] == "myrepo"
     assert (isolated_env / ".brd").is_file()
-    assert paths.project_db_path(isolated_env).is_file()
+    conn = db.connect(paths.brd_db_path())
+    try:
+        stored = conn.execute("SELECT name, root_path FROM projects").fetchall()
+    finally:
+        conn.close()
+    assert [tuple(r) for r in stored] == [("myrepo", str(isolated_env))]
 
 
 def test_init_twice_succeeds_and_preserves_cards(isolated_env):
@@ -124,7 +129,11 @@ def test_forget_removes_current_project(isolated_env):
     assert payload["ok"] is True
     assert payload["data"]["name"] == "myrepo"
     assert not (isolated_env / ".brd").exists()
-    assert not paths.project_db_path(isolated_env).is_file()
+    conn = db.connect(paths.brd_db_path())
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM projects").fetchone()[0] == 0
+    finally:
+        conn.close()
 
     projects_result = runner.invoke(app, ["projects"])
     assert json.loads(projects_result.stdout)["data"] == []
@@ -553,6 +562,8 @@ def test_import_round_trips_a_board_into_a_fresh_project(isolated_env, monkeypat
     snapshot_file = isolated_env.parent / "snapshot.json"
     snapshot_file.write_text(tree_result.stdout)
 
+    # A second install: one install's projects share brd.db, where these ids exist.
+    monkeypatch.setenv("XDG_DATA_HOME", str(isolated_env.parent / "other-data"))
     other_repo = isolated_env.parent / "other-repo"
     other_repo.mkdir()
     monkeypatch.chdir(other_repo)
@@ -757,7 +768,7 @@ FOREIGN = "f0f0f0f0-0000-4000-8000-000000000000"
 def foreign(project):
     """Seed another project and its card FOREIGN into the current board file.
     No command can do this until every project shares one database."""
-    conn = db.connect(paths.project_db_path(project))
+    conn = db.connect(paths.brd_db_path())
     try:
         add_project(conn, OTHER_PROJECT)
         make_card(conn, FOREIGN, title="Foreign", project_id=OTHER_PROJECT.id)
@@ -774,7 +785,7 @@ FOREIGN_DOC = "f2f2f2f2-0000-4000-8000-000000000000"
 def foreign_entities(project, foreign):
     """Besides card FOREIGN, the other project owns the open issue
     FOREIGN_ISSUE and the document FOREIGN_DOC (stem `notes`, tag `t`)."""
-    conn = db.connect(paths.project_db_path(project))
+    conn = db.connect(paths.brd_db_path())
     try:
         make_issue(conn, FOREIGN_ISSUE, title="Foreign issue", project_id=OTHER_PROJECT.id)
         make_document(
@@ -858,7 +869,7 @@ def test_show_is_global_and_names_the_owner(foreign):
         "id": OTHER_PROJECT.id,
         "name": OTHER_PROJECT.name,
     }
-    registered = ok("projects")[0]
+    registered = next(p for p in ok("projects") if p["id"] != OTHER_PROJECT.id)
     assert ok("show", mine)["project"] == {"id": registered["id"], "name": registered["name"]}
     assert "project" not in ok("list")[0]
     assert err("show", "nope") == "CardNotFoundError"
@@ -912,7 +923,7 @@ def test_tag_commands_are_scoped_to_this_project(foreign_entities):
 
 
 def test_comment_commands_are_scoped_to_this_project(project, foreign_entities):
-    conn = db.connect(paths.project_db_path(project))
+    conn = db.connect(paths.brd_db_path())
     try:
         conn.execute(
             "INSERT INTO comments (id, entity_id, author, body, created_at) "
@@ -930,3 +941,51 @@ def test_comment_commands_are_scoped_to_this_project(project, foreign_entities):
     _refused("comment", "delete", "k-foreign", error_type="CommentNotFoundError")
     assert ok("show", foreign_entities["issue"])["comments"] == []
     assert [c["id"] for c in ok("show", foreign_entities["card"])["comments"]] == ["k-foreign"]
+
+
+def test_forget_removes_only_the_current_projects_rows_and_backups(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    ids = {}
+    for name in ("keep", "gone"):
+        root = tmp_path / name
+        root.mkdir()
+        monkeypatch.chdir(root)
+        ok("init")
+        (root / "notes.md").write_text(f"{name} notes")
+        parent = ok("add", "--title", "Parent")
+        child = ok("add", "--title", "Child", "--parent", parent["id"])
+        issue = ok("issue", "open", "--title", "Q", "--blocks", child["id"])
+        ok("comment", "add", child["id"], "progress")
+        doc = ok("doc", "add", "notes.md", "--tag", "design")
+        ids[name] = {"parent": parent["id"], "child": child["id"], "issue": issue["id"], "doc": doc["id"]}
+
+    monkeypatch.chdir(tmp_path / "gone")
+    assert ok("forget")["name"] == "gone"
+
+    assert not (paths.docs_dir() / f"{ids['gone']['doc']}.md").exists()
+    assert (paths.docs_dir() / f"{ids['keep']['doc']}.md").read_text() == "keep notes"
+    gone = list(ids["gone"].values())
+    marks = ", ".join("?" for _ in gone)
+    conn = db.connect(paths.brd_db_path())
+    try:
+        assert [r[0] for r in conn.execute("SELECT root_path FROM projects")] == [
+            str(tmp_path / "keep")
+        ]
+        for table, column in (
+            ("entities", "id"),
+            ("comments", "entity_id"),
+            ("tags", "entity_id"),
+            ("blocked_by", "card_id"),
+            ("blocked_by", "blocks_on_id"),
+            ("refs", "src_id"),
+        ):
+            count = conn.execute(
+                f"SELECT COUNT(*) FROM {table} WHERE {column} IN ({marks})", gone
+            ).fetchone()[0]
+            assert count == 0, (table, column)
+    finally:
+        conn.close()
+    monkeypatch.chdir(tmp_path / "keep")
+    assert {c["id"] for c in ok("list")} == {ids["keep"]["parent"], ids["keep"]["child"]}
+    assert ok("show", ids["keep"]["doc"])["tags"] == ["design"]
+    assert len(ok("show", ids["keep"]["child"])["comments"]) == 1

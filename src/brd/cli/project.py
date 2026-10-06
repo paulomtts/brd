@@ -58,10 +58,11 @@ def purge(
     pretty: bool = pretty_option(),
 ) -> None:
     """Delete ALL brd data for every project. Cannot be undone."""
-    all_projects = master.list_all_projects()
+    # Never migrates: purge must work when a migration aborts.
+    count = master.registry_count()
     if not yes:
         confirmed = typer.confirm(
-            f"Delete all brd data for {len(all_projects)} project(s)? "
+            f"Delete all brd data for {count} project(s)? "
             "This cannot be undone."
         )
         if not confirmed:

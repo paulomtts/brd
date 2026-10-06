@@ -68,112 +68,73 @@ def _set_up(conn: sqlite3.Connection) -> consolidate.Report | None:
         conn.execute("PRAGMA foreign_keys=ON")
 
 
-def _master_conn():
-    conn = db.connect(paths.master_db_path())
-    db.init_master_schema(conn)
-    return conn
-
-
-def _copy_cards(old_db_path: Path, new_db_path: Path, project: Project) -> None:
+def _copy_cards(conn: sqlite3.Connection, old_db_path: Path, project: Project) -> None:
+    """Copy a legacy board's cards, and the edges between them, into brd.db
+    under project, whose projects row is already there."""
     old_conn = db.connect(old_db_path)
-    new_conn = db.connect(new_db_path)
     try:
-        db.init_project_schema(new_conn, project)
         copied: set[str] = set()
-        for row in old_conn.execute("SELECT * FROM cards"):
-            db.insert_entity(new_conn, project.id, row["id"], "card")
-            new_conn.execute(
-                "INSERT INTO cards (id, title, description, status, "
-                "parent_id, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                tuple(row),
-            )
-            copied.add(row["id"])
-        for row in old_conn.execute("SELECT card_id, blocks_on_id FROM blocked_by"):
-            # Same rule as _migrate_to_v1: keep only edges between copied
-            # cards. Edge targets have no FK, so nothing else would stop one.
-            if row["card_id"] in copied and row["blocks_on_id"] in copied:
-                new_conn.execute(
-                    "INSERT INTO blocked_by (card_id, blocks_on_id) VALUES (?, ?)",
+        with conn:
+            for row in old_conn.execute("SELECT * FROM cards"):
+                db.insert_entity(conn, project.id, row["id"], "card")
+                conn.execute(
+                    "INSERT INTO cards (id, title, description, status, "
+                    "parent_id, created_at, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
                     tuple(row),
                 )
-        new_conn.commit()
+                copied.add(row["id"])
+            for row in old_conn.execute("SELECT card_id, blocks_on_id FROM blocked_by"):
+                # Same rule as _migrate_to_v1: keep only edges between copied
+                # cards. Edge targets have no FK, so nothing else would stop one.
+                if row["card_id"] in copied and row["blocks_on_id"] in copied:
+                    conn.execute(
+                        "INSERT INTO blocked_by (card_id, blocks_on_id) VALUES (?, ?)",
+                        tuple(row),
+                    )
     finally:
         old_conn.close()
-        new_conn.close()
 
 
-def _migrate_in_repo_format(marker_dir: Path, new_db_path: Path, project: Project) -> None:
+def _migrate_in_repo_format(conn: sqlite3.Connection, marker_dir: Path, project: Project) -> None:
     """Migrate the in-repo format (.brd/ directory with board.db, committed
     to git) back to central storage."""
     old_db_path = marker_dir / "board.db"
     if old_db_path.is_file():
-        _copy_cards(old_db_path, new_db_path, project)
+        _copy_cards(conn, old_db_path, project)
     shutil.rmtree(marker_dir)
 
 
-def _migrate_legacy_uuid_marker(marker_file: Path, new_db_path: Path, project: Project) -> None:
+def _migrate_legacy_uuid_marker(conn: sqlite3.Connection, marker_file: Path, project: Project) -> None:
     """Migrate the original design (.brd file holding a UUID, cards in a
     central per-project db keyed by that UUID)."""
     legacy_id = marker_file.read_text().strip()
     old_db_path = paths.data_dir() / "projects" / f"{legacy_id}.db"
-    if old_db_path.is_file() and old_db_path != new_db_path:
-        _copy_cards(old_db_path, new_db_path, project)
-
-
-def _board_project(db_path: Path) -> Project | None:
-    """The project a board file records, when it records exactly one."""
-    if not db_path.is_file():
-        return None
-    conn = db.connect(db_path)
-    try:
-        rows = db.board_projects(conn)
-    finally:
-        conn.close()
-    return rows[0] if len(rows) == 1 else None
-
-
-def _settle_project(root_path: Path, name: str | None) -> Project:
-    """The project this root is, settled before any board file is touched so
-    the board and the registry agree on its id: the registered row, else the
-    one project the board already records, else a new project."""
-    project_name = name or root_path.name
-    conn = _master_conn()
-    try:
-        stored = db.get_project(conn, str(root_path))
-    finally:
-        conn.close()
-    known = stored or _board_project(paths.project_db_path(root_path))
-    if known is not None:
-        return Project(
-            id=known.id,
-            name=project_name,
-            root_path=str(root_path),
-            created_at=known.created_at,
-        )
-    return Project(
-        id=db.new_project_id(),
-        name=project_name,
-        root_path=str(root_path),
-        created_at=_now(),
-    )
+    if legacy_id and old_db_path.is_file():
+        _copy_cards(conn, old_db_path, project)
 
 
 def init_project(root_path: Path, name: str | None = None) -> Project:
-    project = _settle_project(root_path, name)
     marker = root_path / MARKER_FILENAME
-    db_path = paths.project_db_path(root_path)
-
-    if marker.is_dir():
-        _migrate_in_repo_format(marker, db_path, project)
-    elif marker.is_file():
-        _migrate_legacy_uuid_marker(marker, db_path, project)
-
-    project_conn = db.connect(db_path)
+    conn = connect()
     try:
-        db.init_project_schema(project_conn, project)
+        # A root that is already registered keeps its id and created_at;
+        # only the name changes.
+        project = db.upsert_project(
+            conn,
+            Project(
+                id=db.new_project_id(),
+                name=name or root_path.name,
+                root_path=str(root_path),
+                created_at=_now(),
+            ),
+        )
+        if marker.is_dir():
+            _migrate_in_repo_format(conn, marker, project)
+        elif marker.is_file():
+            _migrate_legacy_uuid_marker(conn, marker, project)
     finally:
-        project_conn.close()
+        conn.close()
 
     marker.write_text("")
 
@@ -185,11 +146,7 @@ def init_project(root_path: Path, name: str | None = None) -> Project:
                 f.write("\n")
             f.write(f"{MARKER_FILENAME}\n")
 
-    conn = _master_conn()
-    try:
-        return db.upsert_project(conn, project)
-    finally:
-        conn.close()
+    return project
 
 
 def find_marker(start: Path) -> Path | None:
@@ -210,12 +167,8 @@ def resolve_project_root(start: Path) -> Path:
     return marker.parent
 
 
-def registered_project(root_path: Path) -> Project:
-    conn = _master_conn()
-    try:
-        project = db.get_project(conn, str(root_path))
-    finally:
-        conn.close()
+def registered_project(conn: sqlite3.Connection, root_path: Path) -> Project:
+    project = db.get_project(conn, str(root_path))
     if project is None:
         raise ProjectNotFoundError(
             f"{root_path} has a {MARKER_FILENAME} marker but is not a registered "
@@ -224,12 +177,8 @@ def registered_project(root_path: Path) -> Project:
     return project
 
 
-def resolve_project_db(start: Path) -> Path:
-    return paths.project_db_path(resolve_project_root(start))
-
-
 def list_all_projects() -> list[Project]:
-    conn = _master_conn()
+    conn = connect()
     try:
         return db.list_projects(conn)
     finally:
@@ -237,22 +186,25 @@ def list_all_projects() -> list[Project]:
 
 
 def forget_project(root_path: Path) -> Project:
-    conn = _master_conn()
+    conn = connect()
     try:
         project = db.get_project(conn, str(root_path))
         if project is None:
             raise ProjectNotFoundError(f"no registered project at {root_path}")
+        # Read before the delete: the cascade through entities removes them.
+        doc_ids = [
+            row["id"]
+            for row in conn.execute(
+                "SELECT id FROM entities WHERE project_id = ? AND kind = 'document'",
+                (project.id,),
+            )
+        ]
         db.delete_project(conn, str(root_path))
     finally:
         conn.close()
 
-    db_path = paths.project_db_path(root_path)
-    if db_path.is_file():
-        db_path.unlink()
-
-    docs_dir = paths.project_docs_dir(root_path)
-    if docs_dir.is_dir():
-        shutil.rmtree(docs_dir)
+    for doc_id in doc_ids:
+        (paths.docs_dir() / f"{doc_id}.md").unlink(missing_ok=True)
 
     marker = root_path / MARKER_FILENAME
     if marker.is_file():
@@ -261,11 +213,35 @@ def forget_project(root_path: Path) -> Project:
     return project
 
 
-def purge_all() -> int:
-    conn = _master_conn()
+def _count_projects(db_path: Path, min_version: int) -> int | None:
+    conn = db.connect(db_path)
     try:
-        count = len(db.list_projects(conn))
+        if _version(conn) < min_version:
+            return None
+        has_table = conn.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'projects'"
+        ).fetchone()[0]
+        if not has_table:
+            return 0
+        return conn.execute("SELECT COUNT(DISTINCT root_path) FROM projects").fetchone()[0]
     finally:
         conn.close()
+
+
+def registry_count() -> int:
+    """How many projects are registered, read without migrating: purge is the
+    way out when a migration aborts. brd.db once migrated, else master.db,
+    else 0."""
+    if paths.brd_db_path().is_file():
+        count = _count_projects(paths.brd_db_path(), db.SCHEMA_VERSION)
+        if count is not None:
+            return count
+    if paths.master_db_path().is_file():
+        return _count_projects(paths.master_db_path(), 0)
+    return 0
+
+
+def purge_all() -> int:
+    count = registry_count()
     shutil.rmtree(paths.data_dir())
     return count

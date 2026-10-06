@@ -190,7 +190,7 @@ def test_delete_card_goes_through_entities(v0_path):
 
 def test_docs_dir_sits_next_to_the_db(tmp_path):
     conn = db.connect(tmp_path / "project.db")
-    assert db.docs_dir(conn).resolve() == (tmp_path / "project.docs").resolve()
+    assert db.docs_dir(conn).resolve() == (tmp_path / "docs").resolve()
 
 
 def test_project_docs_dir_matches_db_path(tmp_path, monkeypatch):

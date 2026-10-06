@@ -8,6 +8,7 @@ import pytest
 from brd import db, master, paths
 from brd.errors import MigrationError
 from brd.models import Project
+from tests.cli_helpers import invoke, ok
 from tests.factories import NOW, OTHER_PROJECT, add_project, make_card, make_issue
 from tests.test_migration import INSERT_CARD, _make_v0, _make_v2_without_archived, _make_v3
 
@@ -540,3 +541,15 @@ def test_wal_sidecar_follows_its_database(data, tmp_path):
         assert not board.with_name(board.name + "-wal").exists()
     finally:
         holder.close()
+
+
+def test_purge_counts_the_registry_without_migrating(data, tmp_path):
+    seed_shared_ids(tmp_path)  # a migration would abort
+
+    declined = invoke("purge", input="n\n")
+    assert declined.exit_code == 1
+    assert "Delete all brd data for 2 project(s)?" in declined.stdout
+    assert not paths.brd_db_path().exists()
+
+    assert ok("purge", "--yes") == {"projects_removed": 2}
+    assert not data.exists()

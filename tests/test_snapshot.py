@@ -28,6 +28,17 @@ def _shows(ids):
     return {i: ok("show", i) for i in ids}
 
 
+def _fresh_project(tmp_path, monkeypatch):
+    """Init project `other` on a second install (its own data dir): one
+    install's projects share brd.db, where the snapshot's ids already exist."""
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "other-data"))
+    other = tmp_path / "other"
+    other.mkdir()
+    monkeypatch.chdir(other)
+    ok("init")
+    return other
+
+
 def test_export_shape(populated):
     data = ok("export")
     assert data["brd_export"] == 1
@@ -43,10 +54,7 @@ def test_round_trip_into_fresh_project(populated, tmp_path, monkeypatch):
     snapshot = tmp_path / "snapshot.json"
     snapshot.write_text(json.dumps(ok("export")))
 
-    other = tmp_path / "other"
-    other.mkdir()
-    monkeypatch.chdir(other)
-    ok("init")
+    other = _fresh_project(tmp_path, monkeypatch)
     result = ok("import", snapshot)
     assert (result["cards"], result["issues"], result["documents"], result["comments"]) == (2, 1, 1, 1)
 
@@ -78,10 +86,7 @@ def test_import_collision_touches_nothing(populated, tmp_path):
 def test_import_accepts_wrapped_export_envelope(populated, tmp_path, monkeypatch):
     snapshot = tmp_path / "snapshot.json"
     snapshot.write_text(json.dumps({"ok": True, "data": ok("export")}))
-    other = tmp_path / "other"
-    other.mkdir()
-    monkeypatch.chdir(other)
-    ok("init")
+    other = _fresh_project(tmp_path, monkeypatch)
     assert ok("import", snapshot)["cards"] == 2
 
 
@@ -90,10 +95,7 @@ def test_old_tree_snapshot_still_imports(project, tmp_path, monkeypatch):
     ok("add", "--title", "B", "--blocked-by", a["id"])
     snapshot = tmp_path / "tree.json"
     snapshot.write_text(json.dumps({"ok": True, "data": ok("tree")}))
-    other = tmp_path / "other"
-    other.mkdir()
-    monkeypatch.chdir(other)
-    ok("init")
+    other = _fresh_project(tmp_path, monkeypatch)
     assert ok("import", snapshot) == {"imported": 2}
     assert err("import", snapshot) == "CardAlreadyExistsError"
 
@@ -125,23 +127,17 @@ def test_import_rolls_back_document_backup_on_integrity_error(populated, tmp_pat
     snapshot = tmp_path / "snapshot.json"
     snapshot.write_text(json.dumps(data))
 
-    other = tmp_path / "other"
-    other.mkdir()
-    monkeypatch.chdir(other)
-    ok("init")
+    other = _fresh_project(tmp_path, monkeypatch)
     assert err("import", snapshot) == "ImportFormatError"
     assert ok("list") == [] and ok("issue", "list") == []
     doc_id = populated["doc"]["id"]
-    assert not (paths.project_docs_dir(other) / f"{doc_id}.md").exists()
+    assert not (paths.docs_dir() / f"{doc_id}.md").exists()
 
 
 def test_import_stem_collision_touches_nothing(populated, tmp_path, monkeypatch):
     snapshot = tmp_path / "snapshot.json"
     snapshot.write_text(json.dumps(ok("export")))
-    other = tmp_path / "other"
-    other.mkdir()
-    monkeypatch.chdir(other)
-    ok("init")
+    other = _fresh_project(tmp_path, monkeypatch)
     write(other, "docs/notes.md", "local")
     ok("doc", "add", "docs/notes.md")
     assert err("import", snapshot) == "DuplicatePathError"
@@ -151,10 +147,7 @@ def test_import_stem_collision_touches_nothing(populated, tmp_path, monkeypatch)
 def _import_into_fresh(tmp_path, monkeypatch, data):
     snapshot = tmp_path / "snapshot.json"
     snapshot.write_text(json.dumps(data))
-    other = tmp_path / "other"
-    other.mkdir()
-    monkeypatch.chdir(other)
-    ok("init")
+    other = _fresh_project(tmp_path, monkeypatch)
     return other, err("import", snapshot)
 
 
@@ -167,7 +160,7 @@ def test_import_rejects_unsafe_document_source_path(populated, tmp_path, monkeyp
     other, error = _import_into_fresh(tmp_path, monkeypatch, data)
     assert error == "ImportFormatError"
     assert ok("list") == [] and ok("issue", "list") == [] and ok("doc", "list") == []
-    docs_dir = paths.project_docs_dir(other)
+    docs_dir = paths.docs_dir()
     assert not docs_dir.exists() or list(docs_dir.iterdir()) == []
 
 
@@ -206,10 +199,7 @@ GHOST = "0b6f4c1e-dead-4222-8333-444455556666"
 def _import_error_into_fresh(tmp_path, monkeypatch, data):
     snapshot = tmp_path / "snapshot.json"
     snapshot.write_text(json.dumps(data))
-    other = tmp_path / "other"
-    other.mkdir()
-    monkeypatch.chdir(other)
-    ok("init")
+    other = _fresh_project(tmp_path, monkeypatch)
     result = invoke("import", snapshot)
     assert result.exit_code == 1, result.output
     return other, json.loads(result.stdout)["error"]
@@ -217,7 +207,7 @@ def _import_error_into_fresh(tmp_path, monkeypatch, data):
 
 def _assert_nothing_imported(other):
     assert ok("list") == [] and ok("issue", "list") == [] and ok("doc", "list") == []
-    docs_dir = paths.project_docs_dir(other)
+    docs_dir = paths.docs_dir()
     assert not docs_dir.exists() or list(docs_dir.iterdir()) == []
 
 
@@ -275,9 +265,6 @@ def test_round_trip_keeps_refs_between_snapshot_entities(populated, tmp_path, mo
     assert data["refs"], "populated has an explicit issue -> document ref"
     snapshot = tmp_path / "snapshot.json"
     snapshot.write_text(json.dumps(data))
-    other = tmp_path / "other"
-    other.mkdir()
-    monkeypatch.chdir(other)
-    ok("init")
+    other = _fresh_project(tmp_path, monkeypatch)
     ok("import", snapshot)
     assert ok("export")["refs"] == data["refs"]

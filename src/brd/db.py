@@ -470,9 +470,10 @@ def init_brd_schema(conn: sqlite3.Connection) -> None:
 
 
 def docs_dir(conn: sqlite3.Connection) -> Path:
-    """Directory holding document backups: next to the db, `<db stem>.docs`."""
+    """Directory holding document backups: `docs/` next to the db file. For
+    brd.db that is paths.docs_dir()."""
     main = next(row for row in conn.execute("PRAGMA database_list") if row["name"] == "main")
-    return Path(main["file"]).with_suffix(".docs")
+    return Path(main["file"]).parent / "docs"
 
 
 def _row_to_project(row: sqlite3.Row) -> Project:
