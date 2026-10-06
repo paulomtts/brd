@@ -1,0 +1,303 @@
+import sqlite3
+from pathlib import Path
+
+import pytest
+
+from brd import db, master, paths
+from brd.models import Project
+from tests.factories import NOW, make_card, make_issue
+from tests.test_migration import INSERT_CARD, _make_v0, _make_v2_without_archived, _make_v3
+
+TABLES = ("entities", "cards", "issues", "documents", "comments", "tags", "blocked_by", "refs")
+NOTICE = "brd: migrated {n} projects into brd.db (old files kept as *.migrated)"
+
+
+@pytest.fixture
+def data(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    return tmp_path / "data" / "brd"
+
+
+def register(base: Path, name: str, created_at: str = "2026-01-01T00:00:00+00:00") -> Project:
+    """Register base/name in master.db, the way brd did before brd.db."""
+    root = base / name
+    root.mkdir(parents=True)
+    conn = db.connect(paths.master_db_path())
+    try:
+        db.init_master_schema(conn)
+        return db.upsert_project(
+            conn, Project(id=db.new_project_id(), name=name, root_path=str(root), created_at=created_at)
+        )
+    finally:
+        conn.close()
+
+
+def board_path(project: Project) -> Path:
+    return paths.project_db_path(Path(project.root_path))
+
+
+def backups_path(project: Project) -> Path:
+    return paths.project_docs_dir(Path(project.root_path))
+
+
+def migrated(path: Path) -> Path:
+    return path.with_name(path.name + ".migrated")
+
+
+def v4_board(project: Project) -> sqlite3.Connection:
+    conn = db.connect(board_path(project))
+    db.migrate_project(conn, project)
+    return conn
+
+
+def add_document(conn, project: Project, doc_id: str, stem: str, content: str) -> None:
+    """A document row on a legacy board plus its backup in <hash>.docs/.
+    (factories.make_document would put the backup next to the db file.)"""
+    with conn:
+        db.insert_entity(conn, project.id, doc_id, "document")
+        conn.execute(
+            "INSERT INTO documents (id, project_id, title, source_path, stem, content_hash, "
+            "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (doc_id, project.id, stem, f"docs/{stem}.md", stem, "0" * 64, NOW, NOW),
+        )
+    backups = backups_path(project)
+    backups.mkdir(parents=True, exist_ok=True)
+    (backups / f"{doc_id}.md").write_text(content)
+
+
+def rows(conn, table: str, columns: str = "*") -> list[tuple]:
+    return sorted(tuple(r) for r in conn.execute(f"SELECT {columns} FROM {table}"))
+
+
+def open_brd():
+    """master.connect, with the notices it reports collected."""
+    notices: list[str] = []
+    conn = master.connect(notify=notices.append)
+    return conn, notices
+
+
+def seed_four_versions(base: Path) -> list[Project]:
+    """Registered projects whose boards sit at v0, v2, v3 and v4. The v4 one
+    holds a parent/child pair, an issue, a document with its backup, a
+    comment, a tag, a ref and a blocked_by edge."""
+    v0 = register(base, "v0", "2026-01-01T00:00:00+00:00")
+    _make_v0(board_path(v0), cards=[("a-p", None), ("a-c", "a-p")], edges=[("a-c", "a-p")])
+
+    v2 = register(base, "v2", "2026-01-02T00:00:00+00:00")
+    _make_v2_without_archived(board_path(v2))
+    legacy = sqlite3.connect(board_path(v2))
+    legacy.execute(INSERT_CARD, ("b-1", "B", None))
+    legacy.commit()
+    legacy.close()
+
+    v3 = register(base, "v3", "2026-01-03T00:00:00+00:00")
+    _make_v3(board_path(v3))
+
+    v4 = register(base, "v4", "2026-01-04T00:00:00+00:00")
+    conn = v4_board(v4)
+    make_card(conn, "d-card", project_id=v4.id)
+    make_card(conn, "d-child", parent_id="d-card", project_id=v4.id)
+    make_issue(conn, "d-issue", project_id=v4.id)
+    add_document(conn, v4, "d-doc", "notes", "# Notes\n")
+    conn.execute(
+        "INSERT INTO comments (id, entity_id, author, body, created_at) "
+        "VALUES ('d-comment', 'd-card', 'me', 'hi', ?)",
+        (NOW,),
+    )
+    conn.execute("INSERT INTO tags (entity_id, tag) VALUES ('d-doc', 'design')")
+    conn.execute("INSERT INTO refs (src_id, dst_id, origin) VALUES ('d-card', 'd-doc', 'explicit')")
+    conn.execute("INSERT INTO blocked_by (card_id, blocks_on_id) VALUES ('d-child', 'd-issue')")
+    conn.commit()
+    conn.close()
+    return [v0, v2, v3, v4]
+
+
+def test_boards_at_v0_v2_v3_and_v4_move_into_brd_db_unchanged(data, tmp_path):
+    projects = seed_four_versions(tmp_path)
+
+    conn, notices = open_brd()
+    try:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION
+        assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+        assert rows(conn, "projects") == sorted(
+            (p.id, p.name, p.root_path, p.created_at) for p in projects
+        )
+        # Each board was upgraded in place, then copied; the renamed file is
+        # that upgraded board, so brd.db must hold exactly the union of them.
+        boards = [sqlite3.connect(migrated(board_path(p))) for p in projects]
+        try:
+            for table in TABLES:
+                expected = sorted(row for board in boards for row in rows(board, table))
+                assert rows(conn, table) == expected, table
+        finally:
+            for board in boards:
+                board.close()
+        v0, v2, v3, v4 = projects
+        owners = dict(rows(conn, "entities", "id, project_id"))
+        assert (owners["a-p"], owners["b-1"], owners["p"], owners["d-card"]) == (
+            v0.id, v2.id, v3.id, v4.id,
+        )
+        assert tuple(
+            conn.execute("SELECT created_at, updated_at FROM cards WHERE id = 'a-p'").fetchone()
+        ) == ("now", "now")
+        assert tuple(
+            conn.execute("SELECT created_at, updated_at FROM cards WHERE id = 'd-card'").fetchone()
+        ) == (NOW, NOW)
+        assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
+    finally:
+        conn.close()
+    assert notices == [NOTICE.format(n=4)]
+
+
+def test_registered_project_without_a_board_is_registered_empty(data, tmp_path):
+    empty = register(tmp_path, "empty")
+
+    conn, notices = open_brd()
+    try:
+        assert rows(conn, "projects") == [(empty.id, "empty", empty.root_path, empty.created_at)]
+        assert rows(conn, "entities") == []
+    finally:
+        conn.close()
+    assert notices == [NOTICE.format(n=1)]
+
+
+def test_unregistered_board_files_are_left_alone(data, tmp_path):
+    kept = register(tmp_path, "kept")
+    conn = v4_board(kept)
+    make_card(conn, "k-1", project_id=kept.id)
+    conn.close()
+    stray = data / "projects" / "stray.db"
+    _make_v0(stray, cards=[("s-1", None)], edges=[])
+    legacy_uuid = data / "projects" / "07a7d240-444a-4b71-b585-b5bc7b50fdf3.db"
+    _make_v0(legacy_uuid, cards=[("u-1", None)], edges=[])
+    (data / "projects" / "stray.docs").mkdir()
+    (data / "projects" / "stray.docs" / "x.md").write_text("stray")
+
+    conn, notices = open_brd()
+    try:
+        assert rows(conn, "cards", "id") == [("k-1",)]
+    finally:
+        conn.close()
+    for path in (stray, legacy_uuid, data / "projects" / "stray.docs"):
+        assert path.exists() and not migrated(path).exists()
+    assert not (data / "docs" / "x.md").exists()
+    assert notices == [
+        NOTICE.format(n=1)
+        + "\nbrd: skipped 2 unregistered board files: "
+        "projects/07a7d240-444a-4b71-b585-b5bc7b50fdf3.db, projects/stray.db"
+    ]
+
+
+def test_document_backups_move_to_the_shared_docs_dir(data, tmp_path):
+    owner = register(tmp_path, "owner")
+    conn = v4_board(owner)
+    add_document(conn, owner, "doc-1", "notes", "# Notes\n")
+    conn.close()
+
+    brd, _ = open_brd()
+    brd.close()
+
+    assert (paths.docs_dir() / "doc-1.md").read_text() == "# Notes\n"
+    assert (migrated(backups_path(owner)) / "doc-1.md").read_text() == "# Notes\n"
+
+
+def test_old_files_are_renamed_never_deleted(data, tmp_path):
+    owner = register(tmp_path, "owner")
+    conn = v4_board(owner)
+    add_document(conn, owner, "doc-1", "notes", "x")
+    conn.close()
+
+    brd, _ = open_brd()
+    brd.close()
+
+    for path in (paths.master_db_path(), board_path(owner), backups_path(owner)):
+        assert not path.exists(), path
+        assert migrated(path).exists(), path
+    registry = sqlite3.connect(migrated(paths.master_db_path()))
+    try:
+        assert [tuple(r) for r in registry.execute("SELECT id, root_path FROM projects")] == [
+            (owner.id, owner.root_path)
+        ]
+    finally:
+        registry.close()
+
+
+def test_empty_registry_migrates_zero_projects(data):
+    conn = db.connect(paths.master_db_path())
+    db.init_master_schema(conn)
+    conn.close()
+
+    brd, notices = open_brd()
+    try:
+        assert rows(brd, "projects") == []
+    finally:
+        brd.close()
+    assert notices == [NOTICE.format(n=0)]
+    assert not paths.master_db_path().exists()
+    assert migrated(paths.master_db_path()).is_file()
+
+
+def test_pre_id_registry_is_upgraded_then_migrated(data, tmp_path):
+    root = tmp_path / "old"
+    root.mkdir()
+    legacy = sqlite3.connect(paths.master_db_path())
+    legacy.execute(
+        "CREATE TABLE projects (root_path TEXT PRIMARY KEY, name TEXT NOT NULL, "
+        "created_at TEXT NOT NULL)"
+    )
+    legacy.execute(
+        "INSERT INTO projects VALUES (?, 'old', '2026-01-01T00:00:00')", (str(root),)
+    )
+    legacy.commit()
+    legacy.close()
+    _make_v0(paths.project_db_path(root), cards=[("o-1", None)], edges=[])
+
+    brd, notices = open_brd()
+    try:
+        [project] = db.list_projects(brd)
+        assert (project.name, project.root_path) == ("old", str(root))
+        assert rows(brd, "entities", "id, project_id") == [("o-1", project.id)]
+    finally:
+        brd.close()
+    assert notices == [NOTICE.format(n=1)]
+
+
+def test_child_card_stored_before_its_parent_still_migrates(data, tmp_path):
+    owner = register(tmp_path, "owner")
+    _make_v0(board_path(owner), cards=[("child", "parent"), ("parent", None)], edges=[])
+
+    brd, _ = open_brd()
+    try:
+        assert db.get_card(brd, "child").parent_id == "parent"
+    finally:
+        brd.close()
+
+
+def test_fresh_install_gets_an_empty_v4_brd_db_and_no_notice(data):
+    brd, notices = open_brd()
+    try:
+        assert brd.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION
+        assert brd.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+        assert rows(brd, "projects") == []
+    finally:
+        brd.close()
+    assert notices == []
+    assert not paths.master_db_path().exists()
+    assert not (data / "projects").exists()
+
+
+def test_second_connect_neither_migrates_nor_notifies(data, tmp_path):
+    owner = register(tmp_path, "owner")
+    conn = v4_board(owner)
+    make_card(conn, "c1", project_id=owner.id)
+    conn.close()
+    first, _ = open_brd()
+    first.close()
+
+    second, notices = open_brd()
+    try:
+        assert rows(second, "cards", "id") == [("c1",)]
+        assert len(rows(second, "projects")) == 1
+    finally:
+        second.close()
+    assert notices == []

@@ -1,8 +1,11 @@
 import shutil
+import sqlite3
+import sys
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 
-from brd import db, paths
+from brd import consolidate, db, paths
 from brd.models import Project
 from brd.errors import ProjectNotFoundError  # noqa: F401  (re-exported)
 
@@ -11,6 +14,58 @@ MARKER_FILENAME = ".brd"
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _to_stderr(text: str) -> None:
+    # Looked up at call time, so test runners that swap sys.stderr see it.
+    print(text, file=sys.stderr)
+
+
+def _version(conn: sqlite3.Connection) -> int:
+    return conn.execute("PRAGMA user_version").fetchone()[0]
+
+
+def connect(notify: Callable[[str], None] = _to_stderr) -> sqlite3.Connection:
+    """The brd.db connection every data command uses. An install that is not
+    migrated yet is set up first: from master.db and the legacy boards when
+    master.db exists (notify gets the one-time notice), else empty."""
+    conn = db.connect(paths.brd_db_path())
+    try:
+        if _version(conn) < db.SCHEMA_VERSION:
+            report = _set_up(conn)
+            if report is not None:
+                consolidate.retire(report.retired)
+                notify(report.notice())
+    except BaseException:
+        conn.close()
+        raise
+    return conn
+
+
+def _set_up(conn: sqlite3.Connection) -> consolidate.Report | None:
+    """Migrate or create brd.db under its write lock; the report when this
+    call migrated, None when it created an empty one or found it done."""
+    conn.commit()
+    # Must be issued outside a transaction; SQLite ignores it inside one.
+    conn.execute("PRAGMA foreign_keys=OFF")
+    try:
+        # IMMEDIATE takes the write lock up front: a concurrent first run
+        # waits here on the busy timeout, then finds the work already done.
+        conn.execute("BEGIN IMMEDIATE")
+        if _version(conn) >= db.SCHEMA_VERSION:
+            conn.rollback()
+            return None
+        if paths.master_db_path().is_file():
+            return consolidate.migrate(conn)
+        db.init_brd_schema(conn)
+        conn.execute(f"PRAGMA user_version = {db.SCHEMA_VERSION}")
+        conn.commit()
+        return None
+    except BaseException:
+        conn.rollback()
+        raise
+    finally:
+        conn.execute("PRAGMA foreign_keys=ON")
 
 
 def _master_conn():
