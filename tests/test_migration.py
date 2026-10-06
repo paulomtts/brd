@@ -3,7 +3,8 @@ import sqlite3
 import pytest
 
 from brd import db, paths
-from tests.factories import PROJECT, make_card, make_document
+from brd.errors import MigrationError
+from tests.factories import OTHER_PROJECT, PROJECT, make_card, make_document
 
 V0_SCHEMA = [
     """CREATE TABLE cards (
@@ -336,3 +337,27 @@ def test_migrated_board_still_rejects_case_only_stem_collision(tmp_path):
     db.migrate_project(conn, PROJECT)
     with pytest.raises(sqlite3.IntegrityError, match="UNIQUE"):
         make_document(conn, "d2", "Notes")  # docs/Notes.md vs the copied docs/notes.md
+
+
+def test_migrate_project_rejects_board_of_other_project(tmp_path):
+    conn = db.connect(tmp_path / "p.db")
+    db.migrate_project(conn, PROJECT)
+    db.migrate_project(conn, PROJECT)  # same project: a no-op
+    assert _rows(conn, "projects") == [PROJECT_ROW]
+
+    with pytest.raises(MigrationError) as excinfo:
+        db.migrate_project(conn, OTHER_PROJECT)
+    assert PROJECT.id in str(excinfo.value)
+    assert OTHER_PROJECT.id in str(excinfo.value)
+    assert _rows(conn, "projects") == [PROJECT_ROW]
+
+
+def test_migrate_project_rejects_v4_board_with_no_project(tmp_path):
+    conn = db.connect(tmp_path / "p.db")
+    db.migrate_project(conn, PROJECT)
+    conn.execute("DELETE FROM projects")
+    conn.commit()
+
+    with pytest.raises(MigrationError, match="no project") as excinfo:
+        db.migrate_project(conn, PROJECT)
+    assert PROJECT.id in str(excinfo.value)

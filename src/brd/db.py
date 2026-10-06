@@ -367,9 +367,32 @@ def _migrate_to_v4(conn: sqlite3.Connection, project: Project) -> None:
         conn.execute(statement)
 
 
+def board_projects(conn: sqlite3.Connection) -> list[Project]:
+    """The projects rows a board records; [] below v4, where a projects
+    table, if any, is a legacy leftover."""
+    if conn.execute("PRAGMA user_version").fetchone()[0] < 4:
+        return []
+    rows = conn.execute("SELECT * FROM projects ORDER BY created_at").fetchall()
+    return [_row_to_project(row) for row in rows]
+
+
+def _require_board_project(conn: sqlite3.Connection, project: Project) -> None:
+    # Without this, a registry/board mismatch surfaces later as a raw FK
+    # error on the first insert.
+    stored = [row.id for row in board_projects(conn)]
+    if project.id in stored:
+        return
+    held = f"project {', '.join(stored)}" if stored else "no project"
+    raise MigrationError(
+        f"this board records {held}, not project {project.id}; "
+        "the registry and the board disagree"
+    )
+
+
 def migrate_project(conn: sqlite3.Connection, project: Project) -> None:
     version = conn.execute("PRAGMA user_version").fetchone()[0]
     if version >= SCHEMA_VERSION:
+        _require_board_project(conn, project)
         return
     conn.commit()
     # Must be issued outside a transaction; SQLite ignores it inside one.
@@ -382,6 +405,7 @@ def migrate_project(conn: sqlite3.Connection, project: Project) -> None:
         version = conn.execute("PRAGMA user_version").fetchone()[0]
         if version >= SCHEMA_VERSION:
             conn.rollback()
+            _require_board_project(conn, project)
             return
         if version < 1:
             _migrate_to_v1(conn)
