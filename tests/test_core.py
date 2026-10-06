@@ -3,7 +3,7 @@ import pytest
 from brd import core, db, issues
 from brd import refs as _refs
 from brd.models import Card
-from tests.factories import OTHER_PROJECT, PROJECT, add_project
+from tests.factories import OTHER_PROJECT, PROJECT, add_project, make_issue
 
 
 @pytest.fixture
@@ -154,12 +154,80 @@ def test_would_create_block_cycle_false_for_unrelated_cards(conn):
     assert core.would_create_block_cycle(conn, "a", "b") is False
 
 
-def test_resolve_status_skips_blocker_whose_card_is_missing(conn):
+def _status(conn, card_id):
+    return core.resolve_status(conn, db.get_card(conn, card_id))
+
+
+def test_resolve_status_blocks_on_a_blocker_that_is_not_found(conn):
     db.insert_card(conn, PROJECT.id, _card("c1"))
-    conn.execute("PRAGMA foreign_keys=OFF")
     db.add_blocked_by_edge(conn, "c1", "ghost")
-    card = db.get_card(conn, "c1")
-    assert core.resolve_status(conn, card) == "todo"
+    assert _status(conn, "c1") == "blocked"
+
+
+def test_resolve_status_not_found_blocker_wins_over_released_ones(conn):
+    db.insert_card(conn, PROJECT.id, _card("c1"))
+    db.insert_card(conn, PROJECT.id, _card("d", status="done"))
+    make_issue(conn, "i", status="closed")
+    db.add_blocked_by_edge(conn, "c1", "d")
+    db.add_blocked_by_edge(conn, "c1", "i")
+    db.add_blocked_by_edge(conn, "c1", "ghost")
+    assert _status(conn, "c1") == "blocked"
+
+    db.remove_blocked_by_edge(conn, "c1", "ghost")
+    assert _status(conn, "c1") == "todo"
+
+
+def test_resolve_status_not_found_blocker_blocks_children_and_spares_non_todo(conn):
+    db.insert_card(conn, PROJECT.id, _card("p"))
+    db.insert_card(conn, PROJECT.id, _card("ch", parent_id="p"))
+    db.add_blocked_by_edge(conn, "p", "ghost")
+    assert _status(conn, "ch") == "blocked"
+
+    db.insert_card(conn, PROJECT.id, _card("wip", status="in_progress"))
+    db.add_blocked_by_edge(conn, "wip", "ghost")
+    assert _status(conn, "wip") == "in_progress"
+
+    db.insert_card(conn, PROJECT.id, _card("x", status="done"))
+    db.insert_card(conn, PROJECT.id, _card("y"))
+    db.add_blocked_by_edge(conn, "x", "ghost")
+    db.add_blocked_by_edge(conn, "y", "x")
+    assert _status(conn, "x") == "done"
+    assert _status(conn, "y") == "todo"
+
+
+def test_resolve_status_not_found_blocker_inside_a_persisted_cycle_ends_blocked(conn):
+    db.insert_card(conn, PROJECT.id, _card("a"))
+    db.insert_card(conn, PROJECT.id, _card("b"))
+    db.add_blocked_by_edge(conn, "a", "b")
+    db.add_blocked_by_edge(conn, "b", "a")
+    db.add_blocked_by_edge(conn, "a", "ghost")
+    assert _status(conn, "a") == "blocked"
+    assert _status(conn, "b") == "blocked"
+
+
+def test_block_cycle_check_treats_a_not_found_id_as_a_dead_end(conn):
+    db.insert_card(conn, PROJECT.id, _card("a"))
+    db.insert_card(conn, PROJECT.id, _card("b"))
+    db.add_blocked_by_edge(conn, "a", "ghost")
+
+    assert core.would_create_block_cycle(conn, "b", "a") is False
+    assert core.would_create_block_cycle(conn, "ghost", "a") is True
+
+    core.block_card(conn, PROJECT.id, "b", "a")
+    assert db.list_blockers_of(conn, "b") == ["a"]
+    assert _status(conn, "b") == "blocked"
+    assert _status(conn, "a") == "blocked"
+
+
+def test_unblock_card_removes_a_not_found_edge(conn):
+    db.insert_card(conn, PROJECT.id, _card("c1"))
+    db.add_blocked_by_edge(conn, "c1", "ghost")
+    assert _status(conn, "c1") == "blocked"
+
+    core.unblock_card(conn, PROJECT.id, "c1", "ghost")
+
+    assert db.list_blockers_of(conn, "c1") == []
+    assert _status(conn, "c1") == "todo"
 
 
 def test_resolve_status_terminates_on_persisted_blocking_cycle(conn):

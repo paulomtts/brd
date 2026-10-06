@@ -33,17 +33,22 @@ def resolve_status(conn: sqlite3.Connection, card: Card, _seen: set[str] | None 
     seen = seen | {card.id}
 
     for blocker_id in db.list_blockers_of(conn, card.id):
-        blocker = db.get_card(conn, blocker_id)
-        if blocker is None:
+        kind = entities.kind_of(conn, blocker_id)
+        if kind is None:
+            # Not found (say its project was forgotten): brd can't tell a
+            # missing blocker from an unfinished one, so it blocks.
+            return "blocked"
+        if kind == "issue":
             # Issues block while open, whatever reason they are later closed with.
             issue = conn.execute(
                 "SELECT status FROM issues WHERE id = ?", (blocker_id,)
             ).fetchone()
-            if issue is not None and issue["status"] == "open":
+            if issue["status"] == "open":
                 return "blocked"
             continue
-        if not _is_released(conn, blocker, seen):
+        if kind == "card" and not _is_released(conn, db.get_card(conn, blocker_id), seen):
             return "blocked"
+        # A document never blocks; no command can store one as a blocker.
 
     if card.parent_id is not None:
         parent = db.get_card(conn, card.parent_id)
