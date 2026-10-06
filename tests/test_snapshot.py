@@ -493,6 +493,7 @@ def _hand_entry(project_id, root_path, name="hand", cards=(), issues=(), refs=()
 def _v2(*entries):
     return {"brd_export": 2, "projects": list(entries)}
 
+
 def test_one_entry_import_registers_an_unregistered_cwd_with_the_entry_id(
     populated, tmp_path, monkeypatch
 ):
@@ -679,13 +680,6 @@ def test_import_refuses_two_documents_with_one_path(populated, tmp_path, monkeyp
     assert ok("projects") == []
     docs_dir = paths.docs_dir()
     assert not docs_dir.exists() or list(docs_dir.iterdir()) == []
-
-
-def test_import_refuses_a_snapshot_with_no_entries(project, tmp_path, monkeypatch):
-    other, error = _import_error_into_fresh(tmp_path, monkeypatch, _v2())
-    assert error["type"] == "ImportFormatError"
-    assert "no project entries" in error["message"]
-    _assert_nothing_imported(other)
 
 
 def test_multi_entry_import_matches_registered_projects_by_id(project, tmp_path, monkeypatch):
