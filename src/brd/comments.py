@@ -5,7 +5,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from brd import core, entities, refs
+from brd import db, entities, refs
 from brd.errors import CommentNotFoundError, EmptyCommentError, NotCommentableError
 
 
@@ -29,12 +29,12 @@ def _row(row: sqlite3.Row) -> Comment:
 def add(
     conn: sqlite3.Connection, project_id: str, entity_id: str, body: str, author: str
 ) -> Comment:
-    kind = entities.require_capability(
+    # Ownership first: a foreign document is reported as foreign, not
+    # uncommentable, and a foreign issue's empty comment as foreign.
+    entities.require_in_project(conn, project_id, entity_id)
+    entities.require_capability(
         conn, entity_id, entities.COMMENTABLE, NotCommentableError, "commented on"
     )
-    if kind == "card":
-        # Only cards are scoped to the current project so far; issues follow.
-        core.require_card(conn, project_id, entity_id)
     if not body.strip():
         raise EmptyCommentError("comment body is empty")
     comment = Comment(
@@ -53,8 +53,8 @@ def add(
     return comment
 
 
-def list_for(conn: sqlite3.Connection, entity_id: str) -> list[Comment]:
-    entities.require(conn, entity_id)
+def for_entity(conn: sqlite3.Connection, entity_id: str) -> list[Comment]:
+    """Any entity's comments, unchecked: `brd show` is global."""
     rows = conn.execute(
         "SELECT * FROM comments WHERE entity_id = ? ORDER BY created_at, rowid",
         (entity_id,),
@@ -62,11 +62,19 @@ def list_for(conn: sqlite3.Connection, entity_id: str) -> list[Comment]:
     return [_row(row) for row in rows]
 
 
-def delete(conn: sqlite3.Connection, comment_id: str) -> Comment:
+def list_for(conn: sqlite3.Connection, project_id: str, entity_id: str) -> list[Comment]:
+    entities.require_in_project(conn, project_id, entity_id)
+    return for_entity(conn, entity_id)
+
+
+def delete(conn: sqlite3.Connection, project_id: str, comment_id: str) -> Comment:
     row = conn.execute("SELECT * FROM comments WHERE id = ?", (comment_id,)).fetchone()
     if row is None:
         raise CommentNotFoundError(f"no comment with id {comment_id}")
     comment = _row(row)
+    owner = db.owner_of(conn, comment.entity_id)
+    if owner is not None and owner.id != project_id:
+        raise CommentNotFoundError(entities.foreign_message("comment", comment_id, owner))
     conn.execute("DELETE FROM comments WHERE id = ?", (comment_id,))
     conn.commit()
     refs.reindex(conn, comment.entity_id)

@@ -18,7 +18,7 @@ def test_add_and_list_on_card_and_issue(pconn):
     first = comments.add(pconn, PROJECT.id, "c", "one", "alice")
     comments.add(pconn, PROJECT.id, "c", "two", "claude")
     comments.add(pconn, PROJECT.id, "i", "on issue", "alice")
-    assert [c.body for c in comments.list_for(pconn, "c")] == ["one", "two"]
+    assert [c.body for c in comments.list_for(pconn, PROJECT.id, "c")] == ["one", "two"]
     assert first.author == "alice" and first.entity_id == "c"
 
 
@@ -32,7 +32,7 @@ def test_unknown_entity(pconn):
     with pytest.raises(EntityNotFoundError):
         comments.add(pconn, PROJECT.id, "zz", "hi", "alice")
     with pytest.raises(EntityNotFoundError):
-        comments.list_for(pconn, "zz")
+        comments.list_for(pconn, PROJECT.id, "zz")
 
 
 def test_empty_body_rejected(pconn):
@@ -46,13 +46,13 @@ def test_links_in_comments_become_parent_refs_and_go_on_delete(pconn):
     make_card(pconn, B)
     comment = comments.add(pconn, PROJECT.id, "c", f"see [[{B}]]", "alice")
     assert [r["id"] for r in refs.outgoing(pconn, "c")] == [B]
-    comments.delete(pconn, comment.id)
+    comments.delete(pconn, PROJECT.id, comment.id)
     assert refs.outgoing(pconn, "c") == []
 
 
 def test_delete_unknown(pconn):
     with pytest.raises(CommentNotFoundError):
-        comments.delete(pconn, "nope")
+        comments.delete(pconn, PROJECT.id, "nope")
 
 
 def test_comments_cascade_with_entity(pconn):

@@ -30,7 +30,7 @@ def card_detail(conn: sqlite3.Connection, card: Card) -> dict:
         "updated_at": card.updated_at,
         "blocked_by": db.list_blockers_of(conn, card.id),
         "children": [child.id for child in db.list_children(conn, card.id)],
-        "comments": [comment_dict(c) for c in comments.list_for(conn, card.id)],
+        "comments": [comment_dict(c) for c in comments.for_entity(conn, card.id)],
         **links_of(conn, card.id),
     }
 
@@ -46,7 +46,7 @@ def issue_detail(conn: sqlite3.Connection, issue: issues.Issue) -> dict:
         "blocks": issues.blocks_of(conn, issue.id),
         "created_at": issue.created_at,
         "updated_at": issue.updated_at,
-        "comments": [comment_dict(c) for c in comments.list_for(conn, issue.id)],
+        "comments": [comment_dict(c) for c in comments.for_entity(conn, issue.id)],
         **links_of(conn, issue.id),
     }
 

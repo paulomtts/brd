@@ -8,6 +8,7 @@ from brd import comments, core, db, documents, entities, issues, pretty, refs, s
 from brd.cli import cards as cli_cards
 from brd.errors import (
     CardNotFoundError,
+    CommentNotFoundError,
     DocumentNotFoundError,
     DuplicatePathError,
     DuplicateStemError,
@@ -448,6 +449,26 @@ SCOPED_REFUSED = [
         lambda c: tags.add(c, P, "q1", ["x"]), CardNotFoundError, "q1", "card",
         id="tag_add_foreign_card",
     ),
+    pytest.param(
+        lambda c: comments.add(c, P, "qi", "hi", "alice"), IssueNotFoundError, "qi", "issue",
+        id="comments_add_foreign_issue",
+    ),
+    pytest.param(
+        lambda c: comments.add(c, P, "qi", "   ", "alice"), IssueNotFoundError, "qi", "issue",
+        id="comments_add_foreign_issue_empty_body",
+    ),
+    pytest.param(
+        lambda c: comments.add(c, P, "qd", "hi", "alice"), DocumentNotFoundError, "qd",
+        "document", id="comments_add_foreign_document",
+    ),
+    pytest.param(
+        lambda c: comments.list_for(c, P, "qi"), IssueNotFoundError, "qi", "issue",
+        id="comments_list_foreign_issue",
+    ),
+    pytest.param(
+        lambda c: comments.list_for(c, P, "q1"), CardNotFoundError, "q1", "card",
+        id="comments_list_foreign_card",
+    ),
 ]
 
 
@@ -689,3 +710,26 @@ def test_tag_counts_cover_only_the_projects_entities(two):
 def test_show_lists_a_foreign_documents_tags(two):
     assert views.detail(two, "qd")["tags"] == ["qtag"]
     assert tags.for_entity(two, "qd") == ["qtag"]
+
+
+def test_comment_delete_refuses_a_comment_on_a_foreign_entity(two):
+    _comment(two, "k-q", "q1", "keep")
+    before = _state(two)
+    with pytest.raises(CommentNotFoundError, match=_foreign("k-q", "comment")):
+        comments.delete(two, P, "k-q")
+    assert _state(two) == before
+    with pytest.raises(CommentNotFoundError, match=r"^no comment with id nope$"):
+        comments.delete(two, P, "nope")
+
+
+def test_comment_delete_removes_an_own_comment(two):
+    _comment(two, "k-p", "p1", "go")
+    assert comments.delete(two, P, "k-p").id == "k-p"
+    assert comments.for_entity(two, "p1") == []
+
+
+def test_show_lists_comments_of_a_foreign_card_and_issue(two):
+    _comment(two, "k-c", "q1", "on card")
+    _comment(two, "k-i", "qi", "on issue")
+    assert [c["id"] for c in views.detail(two, "q1")["comments"]] == ["k-c"]
+    assert [c["id"] for c in views.detail(two, "qi")["comments"]] == ["k-i"]

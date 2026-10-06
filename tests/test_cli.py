@@ -909,3 +909,24 @@ def test_tag_commands_are_scoped_to_this_project(foreign_entities):
     _refused("tag", "remove", doc, "t", error_type="DocumentNotFoundError")
     _refused("tag", "list", doc, error_type="DocumentNotFoundError")
     assert ok("show", doc)["tags"] == ["t"]
+
+
+def test_comment_commands_are_scoped_to_this_project(project, foreign_entities):
+    conn = db.connect(paths.project_db_path(project))
+    try:
+        conn.execute(
+            "INSERT INTO comments (id, entity_id, author, body, created_at) "
+            "VALUES ('k-foreign', ?, 'them', 'theirs', '2026-09-24T00:00:00+00:00')",
+            (foreign_entities["card"],),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    _refused("comment", "list", foreign_entities["card"])
+    _refused("comment", "add", foreign_entities["issue"], "hi", error_type="IssueNotFoundError")
+    _refused(
+        "comment", "add", foreign_entities["document"], "hi", error_type="DocumentNotFoundError"
+    )
+    _refused("comment", "delete", "k-foreign", error_type="CommentNotFoundError")
+    assert ok("show", foreign_entities["issue"])["comments"] == []
+    assert [c["id"] for c in ok("show", foreign_entities["card"])["comments"]] == ["k-foreign"]
