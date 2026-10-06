@@ -17,6 +17,16 @@ Cards are units of work. There are no Epic/Story/Task types: a card with childre
 Issues are bugs, questions, and findings that aren't work yet. An open issue can block a card \
 (`brd block <card> --by <issue>`); closing it, for any reason, unblocks the card.
 
+Blocking: `status` is authoritative. `blocked` already accounts for blockers in other projects, \
+not-found blockers, container release and a blocked parent, and `brd next` lists only cards \
+that can start now.
+
+`blocked_by` is a list of ids that may belong to other projects or be not-found (the blocker's \
+project was forgotten or not imported here); a not-found blocker blocks until its id returns. \
+`blockers` gives each one's id, kind, project, title, status and `released`, in the same order. \
+A card blocker releases its dependents once it is done, merged, canceled or archived; blocking \
+a story or milestone waits for all of its children, even while its own status still reads todo.
+
 Documents are registered `.md` files that brd backs up. Whenever you edit a registered document, \
 run `brd doc update <id>` right after; after moving or renaming one, run \
 `brd doc update <id> --path <new>`.
