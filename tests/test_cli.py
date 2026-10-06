@@ -1,4 +1,5 @@
 import json
+import uuid
 
 import pytest
 from typer.testing import CliRunner
@@ -706,3 +707,42 @@ def test_end_to_end_workflow(isolated_env):
 
     projects_payload = json.loads(runner.invoke(app, ["projects"]).stdout)
     assert projects_payload["data"][0]["name"] == "myrepo"
+
+
+def _is_uuid4(value):
+    return uuid.UUID(value).version == 4 and str(uuid.UUID(value)) == value
+
+
+def test_init_reports_project_with_id_first(isolated_env):
+    result = runner.invoke(app, ["init"])
+    assert result.exit_code == 0
+    data = json.loads(result.stdout)["data"]
+    assert list(data) == ["id", "name", "root_path", "created_at"]
+    assert _is_uuid4(data["id"])
+    assert data["root_path"] == str(isolated_env)
+
+
+def test_projects_reports_the_id_init_assigned_and_rerun_keeps_it(isolated_env):
+    first = json.loads(runner.invoke(app, ["init"]).stdout)["data"]
+    second = json.loads(runner.invoke(app, ["init", "--name", "renamed"]).stdout)["data"]
+
+    listed = json.loads(runner.invoke(app, ["projects"]).stdout)["data"]
+
+    assert second["id"] == first["id"]
+    assert second["created_at"] == first["created_at"]
+    assert listed == [second]
+    assert list(listed[0]) == ["id", "name", "root_path", "created_at"]
+
+
+def test_projects_pretty_includes_the_id(isolated_env):
+    project_id = json.loads(runner.invoke(app, ["init"]).stdout)["data"]["id"]
+    result = runner.invoke(app, ["projects", "--pretty"])
+    assert result.exit_code == 0
+    assert project_id in result.stdout
+
+
+def test_forget_reports_the_forgotten_project_id(isolated_env):
+    project_id = json.loads(runner.invoke(app, ["init"]).stdout)["data"]["id"]
+    result = runner.invoke(app, ["forget"])
+    assert result.exit_code == 0
+    assert json.loads(result.stdout)["data"]["id"] == project_id

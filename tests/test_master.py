@@ -1,4 +1,5 @@
 import shutil
+import uuid
 
 import pytest
 
@@ -278,3 +279,57 @@ def test_forget_removes_document_backups(tmp_path, monkeypatch):
     (docs / "x.md").write_text("backup")
     master.forget_project(repo)
     assert not docs.exists()
+
+
+def _is_uuid4(value):
+    return uuid.UUID(value).version == 4 and str(uuid.UUID(value)) == value
+
+
+def test_init_project_returns_stored_project_with_uuid4_id(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    repo = tmp_path / "myrepo"
+    repo.mkdir()
+
+    project = master.init_project(repo)
+
+    assert _is_uuid4(project.id)
+    assert master.list_all_projects() == [project]
+
+
+def test_init_project_rerun_keeps_id_and_created_at(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    repo = tmp_path / "myrepo"
+    repo.mkdir()
+
+    first = master.init_project(repo, name="first-name")
+    second = master.init_project(repo, name="second-name")
+    third = master.init_project(repo)
+
+    assert second.id == first.id
+    assert second.created_at == first.created_at
+    assert second.name == "second-name"
+    assert third.id == first.id
+    assert third.name == "myrepo"
+    assert master.list_all_projects() == [third]
+
+
+def test_init_project_gives_each_root_its_own_id(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    repo1 = tmp_path / "repo1"
+    repo2 = tmp_path / "repo2"
+    repo1.mkdir()
+    repo2.mkdir()
+
+    first = master.init_project(repo1)
+    second = master.init_project(repo2)
+
+    assert first.id != second.id
+
+
+def test_forget_project_returns_project_with_its_id(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    repo = tmp_path / "myrepo"
+    repo.mkdir()
+    project = master.init_project(repo)
+
+    assert master.forget_project(repo) == project

@@ -87,18 +87,16 @@ def init_project(root_path: Path, name: str | None = None) -> Project:
             f.write(f"{MARKER_FILENAME}\n")
 
     project = Project(
-        root_path=str(root_path),
+        id=db.new_project_id(),
         name=project_name,
+        root_path=str(root_path),
         created_at=_now(),
     )
     conn = _master_conn()
     try:
-        db.upsert_project(conn, project)
+        return db.upsert_project(conn, project)
     finally:
         conn.close()
-
-    return project
-
 
 def find_marker(start: Path) -> Path | None:
     current = start.resolve()

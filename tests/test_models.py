@@ -3,10 +3,12 @@ from brd.models import Card, Project
 
 def test_project_fields():
     p = Project(
-        root_path="/repo",
+        id="0b5e7c1a-4a3e-4c7e-9a52-3f1d2b6c8e90",
         name="brd",
+        root_path="/repo",
         created_at="2026-09-17T00:00:00",
     )
+    assert p.id == "0b5e7c1a-4a3e-4c7e-9a52-3f1d2b6c8e90"
     assert p.name == "brd"
     assert p.root_path == "/repo"
 
@@ -28,12 +30,14 @@ def test_card_fields_and_optional_defaults():
 
 def test_project_field_order_is_positional():
     p = Project(
-        "/repo",
+        "0b5e7c1a-4a3e-4c7e-9a52-3f1d2b6c8e90",
         "brd",
+        "/repo",
         "2026-09-17T00:00:00",
     )
-    assert p.root_path == "/repo"
+    assert p.id == "0b5e7c1a-4a3e-4c7e-9a52-3f1d2b6c8e90"
     assert p.name == "brd"
+    assert p.root_path == "/repo"
     assert p.created_at == "2026-09-17T00:00:00"
 
 

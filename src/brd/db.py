@@ -1,4 +1,5 @@
 import sqlite3
+import uuid
 from pathlib import Path
 
 from brd.errors import MigrationError
@@ -15,41 +16,63 @@ def connect(db_path: Path) -> sqlite3.Connection:
     return conn
 
 
+_PROJECTS_SQL = """
+CREATE TABLE {name} (
+    id TEXT PRIMARY KEY NOT NULL,
+    name TEXT NOT NULL,
+    root_path TEXT NOT NULL UNIQUE,
+    created_at TEXT NOT NULL
+)
+"""
+
+
+def new_project_id() -> str:
+    return str(uuid.uuid4())
+
+
+def _project_columns(conn: sqlite3.Connection) -> set[str]:
+    return {row[1] for row in conn.execute("PRAGMA table_info(projects)")}
+
+
+def _is_target_projects(columns: set[str]) -> bool:
+    # Key the legacy check on db_path: the original legacy table also had an
+    # id column, so "id" alone cannot tell it apart from the target.
+    return "id" in columns and "db_path" not in columns
+
+
+def _rebuild_projects(conn: sqlite3.Connection) -> None:
+    """Rebuild a legacy or pre-id projects table into the target shape,
+    keeping root_path, name and created_at and assigning fresh ids."""
+    rows = conn.execute("SELECT root_path, name, created_at FROM projects").fetchall()
+    conn.execute(_PROJECTS_SQL.format(name="projects_new"))
+    for row in rows:
+        # OR REPLACE collapses duplicate legacy root_paths: last row read wins.
+        conn.execute(
+            "INSERT OR REPLACE INTO projects_new (id, name, root_path, created_at) "
+            "VALUES (?, ?, ?, ?)",
+            (new_project_id(), row["name"], row["root_path"], row["created_at"]),
+        )
+    conn.execute("DROP TABLE projects")
+    conn.execute("ALTER TABLE projects_new RENAME TO projects")
+
+
 def init_master_schema(conn: sqlite3.Connection) -> None:
-    columns = {row[1] for row in conn.execute("PRAGMA table_info(projects)")}
-    if "id" in columns:
-        # Legacy schema (id PK, unique name, db_path): migrate in place,
-        # preserving what still applies (root_path, name, created_at).
-        old_rows = conn.execute(
-            "SELECT name, root_path, created_at FROM projects"
-        ).fetchall()
-        conn.execute("DROP TABLE projects")
-        conn.execute(
-            """
-            CREATE TABLE projects (
-                root_path TEXT PRIMARY KEY,
-                name TEXT NOT NULL,
-                created_at TEXT NOT NULL
-            )
-            """
-        )
-        for row in old_rows:
-            conn.execute(
-                "INSERT OR REPLACE INTO projects (root_path, name, created_at) "
-                "VALUES (?, ?, ?)",
-                (row["root_path"], row["name"], row["created_at"]),
-            )
-    else:
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS projects (
-                root_path TEXT PRIMARY KEY,
-                name TEXT NOT NULL,
-                created_at TEXT NOT NULL
-            )
-            """
-        )
+    if _is_target_projects(_project_columns(conn)):
+        return
     conn.commit()
+    try:
+        # IMMEDIATE takes the write lock up front, so a concurrent first run
+        # waits here and then sees the migrated table instead of re-migrating.
+        conn.execute("BEGIN IMMEDIATE")
+        columns = _project_columns(conn)
+        if not columns:
+            conn.execute(_PROJECTS_SQL.format(name="projects"))
+        elif not _is_target_projects(columns):
+            _rebuild_projects(conn)
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
 
 
 SCHEMA_VERSION = 3
@@ -265,19 +288,23 @@ def docs_dir(conn: sqlite3.Connection) -> Path:
 
 def _row_to_project(row: sqlite3.Row) -> Project:
     return Project(
-        root_path=row["root_path"],
+        id=row["id"],
         name=row["name"],
+        root_path=row["root_path"],
         created_at=row["created_at"],
     )
 
 
-def upsert_project(conn: sqlite3.Connection, project: Project) -> None:
+def upsert_project(conn: sqlite3.Connection, project: Project) -> Project:
+    """Register project, or rename the one already at its root_path. An
+    existing row keeps its id and created_at; returns the stored row."""
     conn.execute(
-        "INSERT INTO projects (root_path, name, created_at) VALUES (?, ?, ?) "
+        "INSERT INTO projects (id, name, root_path, created_at) VALUES (?, ?, ?, ?) "
         "ON CONFLICT(root_path) DO UPDATE SET name = excluded.name",
-        (project.root_path, project.name, project.created_at),
+        (project.id, project.name, project.root_path, project.created_at),
     )
     conn.commit()
+    return get_project(conn, project.root_path)
 
 
 def list_projects(conn: sqlite3.Connection) -> list[Project]:

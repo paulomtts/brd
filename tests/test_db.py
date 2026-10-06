@@ -1,4 +1,5 @@
 import sqlite3
+import uuid
 
 import pytest
 
@@ -24,10 +25,64 @@ def test_connect_sets_row_factory(conn):
     assert conn.row_factory is sqlite3.Row
 
 
+def _project_table_info(conn):
+    return {row["name"]: row for row in conn.execute("PRAGMA table_info(projects)")}
+
+
+def _project_rows(conn):
+    return {
+        row["root_path"]: dict(row)
+        for row in conn.execute("SELECT * FROM projects")
+    }
+
+
+def _is_uuid4(value):
+    return uuid.UUID(value).version == 4 and str(uuid.UUID(value)) == value
+
+
+def _create_current_projects_table(conn, rows=()):
+    conn.execute(
+        """
+        CREATE TABLE projects (
+            root_path TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.executemany(
+        "INSERT INTO projects (root_path, name, created_at) VALUES (?, ?, ?)", rows
+    )
+    conn.commit()
+
+
+def _create_legacy_projects_table(conn, rows=()):
+    conn.execute(
+        """
+        CREATE TABLE projects (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL UNIQUE,
+            root_path TEXT NOT NULL,
+            db_path TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.executemany(
+        "INSERT INTO projects (id, name, root_path, db_path, created_at) "
+        "VALUES (?, ?, ?, ?, ?)",
+        rows,
+    )
+    conn.commit()
+
+
 def test_init_master_schema_creates_projects_table(conn):
     db.init_master_schema(conn)
-    columns = {row[1] for row in conn.execute("PRAGMA table_info(projects)")}
-    assert columns == {"root_path", "name", "created_at"}
+    info = _project_table_info(conn)
+    assert set(info) == {"id", "name", "root_path", "created_at"}
+    assert info["id"]["pk"] == 1
+    assert [name for name, row in info.items() if row["pk"]] == ["id"]
+    assert _project_rows(conn) == {}
 
 
 def test_init_master_schema_is_idempotent(conn):
@@ -35,51 +90,142 @@ def test_init_master_schema_is_idempotent(conn):
     db.init_master_schema(conn)  # must not raise
 
 
-def test_init_master_schema_migrates_legacy_schema_preserving_rows(conn):
-    conn.execute(
-        """
-        CREATE TABLE projects (
-            id TEXT PRIMARY KEY,
-            name TEXT NOT NULL UNIQUE,
-            root_path TEXT NOT NULL,
-            db_path TEXT NOT NULL,
-            created_at TEXT NOT NULL
-        )
-        """
+def test_init_master_schema_migrates_current_schema_assigning_uuid4_ids(conn):
+    _create_current_projects_table(
+        conn,
+        [
+            ("/repo1", "one", "2026-01-01T00:00:00"),
+            ("/repo2", "two", "2026-01-02T00:00:00"),
+        ],
     )
-    conn.execute(
-        "INSERT INTO projects (id, name, root_path, db_path, created_at) "
-        "VALUES (?, ?, ?, ?, ?)",
-        ("old-id", "legacy-project", "/repo", "/old/db/path.db", "2026-01-01T00:00:00"),
-    )
-    conn.commit()
 
     db.init_master_schema(conn)
 
-    columns = {row[1] for row in conn.execute("PRAGMA table_info(projects)")}
-    assert columns == {"root_path", "name", "created_at"}
+    assert set(_project_table_info(conn)) == {"id", "name", "root_path", "created_at"}
+    rows = _project_rows(conn)
+    assert {k: (v["name"], v["created_at"]) for k, v in rows.items()} == {
+        "/repo1": ("one", "2026-01-01T00:00:00"),
+        "/repo2": ("two", "2026-01-02T00:00:00"),
+    }
+    ids = [row["id"] for row in rows.values()]
+    assert all(_is_uuid4(i) for i in ids)
+    assert len(set(ids)) == 2
+
+
+def test_init_master_schema_migrates_empty_current_table(conn):
+    _create_current_projects_table(conn)
+    db.init_master_schema(conn)
+    assert set(_project_table_info(conn)) == {"id", "name", "root_path", "created_at"}
+    assert _project_rows(conn) == {}
+
+
+def test_init_master_schema_never_changes_ids_once_assigned(tmp_path):
+    db_path = tmp_path / "master.db"
+    first = db.connect(db_path)
+    _create_current_projects_table(
+        first,
+        [
+            ("/repo1", "one", "2026-01-01T00:00:00"),
+            ("/repo2", "two", "2026-01-02T00:00:00"),
+        ],
+    )
+    db.init_master_schema(first)
+    ids = {k: v["id"] for k, v in _project_rows(first).items()}
+
+    db.init_master_schema(first)
+    db.init_master_schema(first)
+    second = db.connect(db_path)
+    try:
+        db.init_master_schema(second)
+        assert {k: v["id"] for k, v in _project_rows(second).items()} == ids
+    finally:
+        second.close()
+    assert {k: v["id"] for k, v in _project_rows(first).items()} == ids
+    first.close()
+
+
+def test_init_master_schema_migrates_legacy_schema_preserving_rows(conn):
+    _create_legacy_projects_table(
+        conn,
+        [("old-id", "legacy-project", "/repo", "/old/db/path.db", "2026-01-01T00:00:00")],
+    )
+
+    db.init_master_schema(conn)
+
+    assert set(_project_table_info(conn)) == {"id", "name", "root_path", "created_at"}
     row = conn.execute("SELECT * FROM projects").fetchone()
     assert row["root_path"] == "/repo"
     assert row["name"] == "legacy-project"
     assert row["created_at"] == "2026-01-01T00:00:00"
+    assert row["id"] != "old-id"
+    assert _is_uuid4(row["id"])
+
+
+def test_init_master_schema_migrates_empty_legacy_table(conn):
+    _create_legacy_projects_table(conn)
+    db.init_master_schema(conn)
+    assert set(_project_table_info(conn)) == {"id", "name", "root_path", "created_at"}
+    assert _project_rows(conn) == {}
+
+
+def test_init_master_schema_collapses_duplicate_legacy_root_paths(conn):
+    _create_legacy_projects_table(
+        conn,
+        [
+            ("a", "first", "/repo", "/a.db", "2026-01-01T00:00:00"),
+            ("b", "second", "/repo", "/b.db", "2026-01-02T00:00:00"),
+        ],
+    )
+
+    db.init_master_schema(conn)
+
+    rows = conn.execute("SELECT * FROM projects").fetchall()
+    assert len(rows) == 1
+    assert rows[0]["root_path"] == "/repo"
+    assert _is_uuid4(rows[0]["id"])
 
 
 def test_init_master_schema_migration_is_idempotent(conn):
-    conn.execute(
-        """
-        CREATE TABLE projects (
-            id TEXT PRIMARY KEY,
-            name TEXT NOT NULL UNIQUE,
-            root_path TEXT NOT NULL,
-            db_path TEXT NOT NULL,
-            created_at TEXT NOT NULL
-        )
-        """
+    _create_legacy_projects_table(
+        conn,
+        [("old-id", "legacy-project", "/repo", "/old/db/path.db", "2026-01-01T00:00:00")],
     )
-    conn.commit()
 
     db.init_master_schema(conn)
+    ids = {k: v["id"] for k, v in _project_rows(conn).items()}
     db.init_master_schema(conn)  # must not raise on the already-migrated table
+    db.init_master_schema(conn)
+
+    assert {k: v["id"] for k, v in _project_rows(conn).items()} == ids
+
+
+def test_init_master_schema_migration_is_atomic(conn, monkeypatch):
+    rows = [
+        ("/repo1", "one", "2026-01-01T00:00:00"),
+        ("/repo2", "two", "2026-01-02T00:00:00"),
+    ]
+    _create_current_projects_table(conn, rows)
+    calls = []
+    real_new_project_id = db.new_project_id
+
+    def failing_new_project_id():
+        calls.append(None)
+        if len(calls) == 2:
+            raise RuntimeError("boom")
+        return real_new_project_id()
+
+    monkeypatch.setattr(db, "new_project_id", failing_new_project_id)
+
+    with pytest.raises(RuntimeError, match="boom"):
+        db.init_master_schema(conn)
+
+    assert set(_project_table_info(conn)) == {"root_path", "name", "created_at"}
+    assert sorted(
+        tuple(row) for row in conn.execute("SELECT root_path, name, created_at FROM projects")
+    ) == rows
+    tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    assert tables == {"projects"}
+    assert not conn.in_transaction
 
 
 def test_init_project_schema_creates_cards_and_blocked_by_tables(conn):
@@ -113,16 +259,34 @@ def test_cards_status_check_constraint_rejects_blocked(conn):
         )
 
 
-def test_projects_root_path_is_primary_key(conn):
+def test_projects_root_path_is_unique(conn):
     db.init_master_schema(conn)
     conn.execute(
-        "INSERT INTO projects (root_path, name, created_at) VALUES (?, ?, ?)",
-        ("/r", "dup", "now"),
+        "INSERT INTO projects (id, name, root_path, created_at) VALUES (?, ?, ?, ?)",
+        ("id-1", "dup", "/r", "now"),
     )
     with pytest.raises(sqlite3.IntegrityError):
         conn.execute(
-            "INSERT INTO projects (root_path, name, created_at) VALUES (?, ?, ?)",
-            ("/r", "other", "now"),
+            "INSERT INTO projects (id, name, root_path, created_at) VALUES (?, ?, ?, ?)",
+            ("id-2", "other", "/r", "now"),
+        )
+
+
+def test_projects_id_is_unique_and_required(conn):
+    db.init_master_schema(conn)
+    conn.execute(
+        "INSERT INTO projects (id, name, root_path, created_at) VALUES (?, ?, ?, ?)",
+        ("id-1", "one", "/r1", "now"),
+    )
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute(
+            "INSERT INTO projects (id, name, root_path, created_at) VALUES (?, ?, ?, ?)",
+            ("id-1", "two", "/r2", "now"),
+        )
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute(
+            "INSERT INTO projects (id, name, root_path, created_at) VALUES (?, ?, ?, ?)",
+            (None, "three", "/r3", "now"),
         )
 
 
@@ -169,53 +333,53 @@ def test_blocked_by_rejects_duplicate_edge(conn):
         )
 
 
-def _sample_project(root_path="/repo", name="brd"):
-    return Project(
-        root_path=root_path,
-        name=name,
-        created_at="2026-09-17T00:00:00",
-    )
+def _sample_project(
+    root_path="/repo",
+    name="brd",
+    id="11111111-1111-4111-8111-111111111111",
+    created_at="2026-09-17T00:00:00",
+):
+    return Project(id=id, name=name, root_path=root_path, created_at=created_at)
 
 
 def test_upsert_project_inserts_new(conn):
     db.init_master_schema(conn)
-    db.upsert_project(conn, _sample_project())
-    results = db.list_projects(conn)
-    assert results == [_sample_project()]
+    stored = db.upsert_project(conn, _sample_project())
+    assert db.list_projects(conn) == [_sample_project()]
+    assert stored == _sample_project()
 
 
-def test_upsert_project_updates_name_on_existing_root_path(conn):
+def test_upsert_project_updates_only_name_on_existing_root_path(conn):
     db.init_master_schema(conn)
     db.upsert_project(conn, _sample_project(name="brd"))
-    db.upsert_project(conn, _sample_project(name="renamed"))
-    results = db.list_projects(conn)
-    assert [p.name for p in results] == ["renamed"]
-    assert len(results) == 1
+    stored = db.upsert_project(
+        conn,
+        _sample_project(
+            name="renamed",
+            id="22222222-2222-4222-8222-222222222222",
+            created_at="2026-12-31T00:00:00",
+        ),
+    )
+    expected = _sample_project(name="renamed")
+    assert db.list_projects(conn) == [expected]
+    assert stored == expected
 
 
 def test_list_projects_returns_all(conn):
     db.init_master_schema(conn)
-    db.upsert_project(conn, _sample_project("/repo1", "brd"))
-    db.upsert_project(conn, _sample_project("/repo2", "other"))
+    db.upsert_project(conn, _sample_project("/repo1", "brd", id="id-1"))
+    db.upsert_project(conn, _sample_project("/repo2", "other", id="id-2"))
     results = db.list_projects(conn)
-    assert {p.root_path for p in results} == {"/repo1", "/repo2"}
+    assert {(p.id, p.root_path) for p in results} == {("id-1", "/repo1"), ("id-2", "/repo2")}
 
 
 def test_list_projects_orders_by_created_at(conn):
     db.init_master_schema(conn)
-    later = Project(
-        root_path="/repo1",
-        name="brd",
-        created_at="2026-09-17T12:00:00",
-    )
-    earlier = Project(
-        root_path="/repo2",
-        name="other",
-        created_at="2026-09-16T08:00:00",
-    )
+    later = _sample_project("/repo1", "brd", id="id-1", created_at="2026-09-17T12:00:00")
+    earlier = _sample_project("/repo2", "other", id="id-2", created_at="2026-09-16T08:00:00")
     db.upsert_project(conn, later)
     db.upsert_project(conn, earlier)
-    assert [p.root_path for p in db.list_projects(conn)] == ["/repo2", "/repo1"]
+    assert db.list_projects(conn) == [earlier, later]
 
 
 def test_upsert_project_commits_so_another_connection_sees_it(tmp_path):
@@ -232,9 +396,9 @@ def test_upsert_project_commits_so_another_connection_sees_it(tmp_path):
 
 def test_get_project_returns_matching_project(conn):
     db.init_master_schema(conn)
-    db.upsert_project(conn, _sample_project("/repo1", "brd"))
-    db.upsert_project(conn, _sample_project("/repo2", "other"))
-    assert db.get_project(conn, "/repo2") == _sample_project("/repo2", "other")
+    db.upsert_project(conn, _sample_project("/repo1", "brd", id="id-1"))
+    db.upsert_project(conn, _sample_project("/repo2", "other", id="id-2"))
+    assert db.get_project(conn, "/repo2") == _sample_project("/repo2", "other", id="id-2")
 
 
 def test_get_project_returns_none_when_absent(conn):
@@ -244,8 +408,8 @@ def test_get_project_returns_none_when_absent(conn):
 
 def test_delete_project_removes_matching_row(conn):
     db.init_master_schema(conn)
-    db.upsert_project(conn, _sample_project("/repo1", "brd"))
-    db.upsert_project(conn, _sample_project("/repo2", "other"))
+    db.upsert_project(conn, _sample_project("/repo1", "brd", id="id-1"))
+    db.upsert_project(conn, _sample_project("/repo2", "other", id="id-2"))
     db.delete_project(conn, "/repo1")
     assert [p.root_path for p in db.list_projects(conn)] == ["/repo2"]
 
