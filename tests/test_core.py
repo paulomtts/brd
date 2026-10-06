@@ -1,6 +1,6 @@
 import pytest
 
-from brd import core, db
+from brd import core, db, issues
 from brd import refs as _refs
 from brd.models import Card
 
@@ -591,3 +591,156 @@ def test_update_card_rejects_unknown_status(conn):
 
     with pytest.raises(core.InvalidStatusError):
         core.update_card(conn, "c1", status="cancelled")
+
+
+def _story_with_children(conn, story_id, child_statuses, story_status="todo"):
+    db.insert_card(conn, _card(story_id, status=story_status))
+    for index, status in enumerate(child_statuses):
+        db.insert_card(conn, _card(f"{story_id}-c{index}", status=status, parent_id=story_id))
+
+
+def _blocked_on(conn, card_id, blocker_id):
+    db.insert_card(conn, _card(card_id))
+    db.add_blocked_by_edge(conn, card_id, blocker_id)
+    return db.get_card(conn, card_id)
+
+
+def test_resolve_status_dependent_of_story_with_all_children_releasing_is_todo(conn):
+    _story_with_children(conn, "s", ["done", "merged", "canceled", "archived"])
+    dependent = _blocked_on(conn, "d", "s")
+
+    assert core.resolve_status(conn, dependent) == "todo"
+
+
+def test_resolve_status_dependent_of_story_with_one_todo_child_is_blocked(conn):
+    _story_with_children(conn, "s", ["done", "merged", "canceled", "archived", "todo"])
+    dependent = _blocked_on(conn, "d", "s")
+
+    assert core.resolve_status(conn, dependent) == "blocked"
+
+
+def test_resolve_status_dependent_of_story_with_in_progress_child_is_blocked(conn):
+    _story_with_children(conn, "s", ["done", "in_progress"])
+    dependent = _blocked_on(conn, "d", "s")
+
+    assert core.resolve_status(conn, dependent) == "blocked"
+
+
+def test_resolve_status_dependent_of_story_with_blocked_child_is_blocked(conn):
+    _story_with_children(conn, "s", ["done", "todo"])
+    issue = issues.open_issue(conn, "q")
+    core.block_card(conn, "s-c1", issue.id)
+    dependent = _blocked_on(conn, "d", "s")
+    assert core.resolve_status(conn, db.get_card(conn, "s-c1")) == "blocked"
+
+    assert core.resolve_status(conn, dependent) == "blocked"
+
+    issues.close(conn, issue.id)
+    db.update_card_fields(conn, "s-c1", status="done")
+    assert core.resolve_status(conn, db.get_card(conn, "d")) == "todo"
+
+
+def test_resolve_status_dependent_of_milestone_releases_only_when_every_story_does(conn):
+    db.insert_card(conn, _card("m"))
+    db.insert_card(conn, _card("s1", parent_id="m"))
+    db.insert_card(conn, _card("s1-c0", status="done", parent_id="s1"))
+    db.insert_card(conn, _card("s1-c1", status="done", parent_id="s1"))
+    db.insert_card(conn, _card("s2", parent_id="m"))
+    db.insert_card(conn, _card("s2-c0", status="done", parent_id="s2"))
+    db.insert_card(conn, _card("s2-c1", status="todo", parent_id="s2"))
+    dependent = _blocked_on(conn, "d", "m")
+
+    assert core.resolve_status(conn, dependent) == "blocked"
+
+    db.update_card_fields(conn, "s2-c1", status="done")
+    assert core.resolve_status(conn, db.get_card(conn, "d")) == "todo"
+
+
+def test_resolve_status_dependent_of_milestone_with_done_story_releases(conn):
+    db.insert_card(conn, _card("m"))
+    db.insert_card(conn, _card("s1", status="done", parent_id="m"))
+    db.insert_card(conn, _card("s1-c0", status="todo", parent_id="s1"))
+    db.insert_card(conn, _card("s2", parent_id="m"))
+    db.insert_card(conn, _card("s2-c0", status="done", parent_id="s2"))
+    db.insert_card(conn, _card("s2-c1", status="done", parent_id="s2"))
+    dependent = _blocked_on(conn, "d", "m")
+
+    assert core.resolve_status(conn, dependent) == "todo"
+
+
+def test_resolve_status_container_own_status_unchanged_when_children_done(conn):
+    _story_with_children(conn, "s", ["done", "done"])
+
+    assert core.resolve_status(conn, db.get_card(conn, "s")) == "todo"
+    assert db.get_card(conn, "s").status == "todo"
+
+
+def test_resolve_status_childless_todo_blocker_still_blocks(conn):
+    db.insert_card(conn, _card("b"))
+    dependent = _blocked_on(conn, "d", "b")
+
+    assert core.resolve_status(conn, dependent) == "blocked"
+
+
+def test_resolve_status_in_progress_container_with_all_children_done_releases(conn):
+    _story_with_children(conn, "s", ["done", "done"], story_status="in_progress")
+    dependent = _blocked_on(conn, "d", "s")
+
+    assert core.resolve_status(conn, dependent) == "todo"
+
+
+def test_resolve_status_blocked_container_with_all_children_done_releases(conn):
+    db.insert_card(conn, _card("x"))
+    _story_with_children(conn, "s", ["done", "done"])
+    db.add_blocked_by_edge(conn, "s", "x")
+    dependent = _blocked_on(conn, "d", "s")
+
+    assert core.resolve_status(conn, dependent) == "todo"
+    assert core.resolve_status(conn, db.get_card(conn, "s")) == "blocked"
+
+
+def test_resolve_status_done_container_with_unfinished_child_releases(conn):
+    _story_with_children(conn, "s", ["todo"], story_status="done")
+    dependent = _blocked_on(conn, "d", "s")
+
+    assert core.resolve_status(conn, dependent) == "todo"
+
+
+def test_resolve_status_child_blocked_by_own_container_terminates_blocked(conn):
+    _story_with_children(conn, "s", ["done", "todo"])
+    db.add_blocked_by_edge(conn, "s-c1", "s")
+
+    assert core.resolve_status(conn, db.get_card(conn, "s-c1")) == "blocked"
+
+
+def test_resolve_status_container_child_blocked_by_dependent_terminates_blocked(conn):
+    _story_with_children(conn, "s", ["todo"])
+    db.insert_card(conn, _card("a"))
+    db.add_blocked_by_edge(conn, "a", "s")
+    db.add_blocked_by_edge(conn, "s-c0", "a")
+
+    assert core.resolve_status(conn, db.get_card(conn, "a")) == "blocked"
+    assert core.resolve_status(conn, db.get_card(conn, "s-c0")) == "blocked"
+
+
+def test_next_cards_includes_dependent_of_finished_container(conn):
+    story = core.create_card(conn, title="story")
+    first = core.create_card(conn, title="first", parent_id=story.id)
+    second = core.create_card(conn, title="second", parent_id=story.id)
+    dependent = core.create_card(conn, title="dependent", blocked_by=[story.id])
+    core.update_card(conn, first.id, status="done")
+    core.update_card(conn, second.id, status="done")
+
+    ready_ids = [card.id for card in core.next_cards(conn)]
+
+    assert dependent.id in ready_ids
+    assert story.id not in ready_ids
+
+
+def test_resolve_status_terminates_on_persisted_parent_cycle(conn):
+    db.insert_card(conn, _card("p"))
+    db.insert_card(conn, _card("q", parent_id="p"))
+    db.update_card_fields(conn, "p", parent_id="q")
+    dependent = _blocked_on(conn, "d", "p")
+
+    assert core.resolve_status(conn, dependent) == "blocked"

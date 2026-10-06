@@ -42,7 +42,7 @@ def resolve_status(conn: sqlite3.Connection, card: Card, _seen: set[str] | None 
             if issue is not None and issue["status"] == "open":
                 return "blocked"
             continue
-        if resolve_status(conn, blocker, seen) not in _RELEASING_STATUSES:
+        if not _is_released(conn, blocker, seen):
             return "blocked"
 
     if card.parent_id is not None:
@@ -51,6 +51,21 @@ def resolve_status(conn: sqlite3.Connection, card: Card, _seen: set[str] | None 
             return "blocked"
 
     return "todo"
+
+
+def _is_released(conn: sqlite3.Connection, card: Card, seen: set[str]) -> bool:
+    # A card stops holding its dependents once it resolves to a releasing
+    # status, or once it has children and every one of them is released.
+    # Its own status is left alone either way.
+    if resolve_status(conn, card, seen) in _RELEASING_STATUSES:
+        return True
+    if card.id in seen:
+        # Already on this resolution path (a loop through blocked_by or
+        # containment): fail closed rather than recurse forever.
+        return False
+    children = db.list_children(conn, card.id)
+    seen = seen | {card.id}
+    return bool(children) and all(_is_released(conn, child, seen) for child in children)
 
 
 def would_create_parent_cycle(conn: sqlite3.Connection, card_id: str, new_parent_id: str) -> bool:
