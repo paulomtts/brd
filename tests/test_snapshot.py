@@ -240,6 +240,22 @@ def test_malformed_snapshot_is_an_envelope(project, tmp_path, monkeypatch, raw):
 GHOST = "0b6f4c1e-dead-4222-8333-444455556666"
 
 
+@pytest.mark.parametrize(
+    "raw",
+    [
+        {"brd_export": 2, "projects": "x"},
+        {"brd_export": 2, "projects": [5]},
+        {"brd_export": 2},
+        {"brd_export": 2, "projects": [{"project": {}, "cards": []}]},
+    ],
+)
+def test_malformed_v2_snapshot_says_malformed(project, tmp_path, monkeypatch, raw):
+    other, error = _import_error_into_fresh(tmp_path, monkeypatch, raw)
+    assert error["type"] == "ImportFormatError"
+    assert error["message"].startswith("malformed snapshot: ")
+    _assert_nothing_imported(other)
+
+
 def _import_error_into_fresh(tmp_path, monkeypatch, data):
     snapshot = tmp_path / "snapshot.json"
     snapshot.write_text(json.dumps(data))
