@@ -207,6 +207,14 @@ REFUSED = [
         lambda c: comments.add(c, P, "q1", "hi", "alice"), "q1", "card",
         id="comments_add_foreign_card",
     ),
+    pytest.param(
+        lambda c: core.next_cards(c, P, parent_id="q1"), "q1", "card",
+        id="next_cards_foreign_parent",
+    ),
+    pytest.param(
+        lambda c: core.build_tree(c, P, root_id="q1"), "q1", "card",
+        id="build_tree_foreign_root",
+    ),
 ]
 
 
@@ -241,3 +249,44 @@ def test_a_document_of_this_project_still_cannot_block(two):
 def test_a_missing_blocker_is_unchanged(two):
     with pytest.raises(CardNotFoundError, match=r"^no card or issue with id nope$"):
         core.block_card(two, P, "p1", "nope")
+
+
+def test_list_cards_returns_only_the_projects_cards(two):
+    assert {c.id for c in db.list_cards(two, P)} == {"p1", "p2"}
+    assert {c.id for c in db.list_cards(two, P, status="todo")} == {"p1", "p2"}
+    assert {c.id for c in db.list_cards(two, P, parent_id=None)} == {"p1", "p2"}
+    assert {c.id for c in db.list_cards(two, Q, parent_id=None)} == {"q1"}
+
+
+def test_list_cards_with_a_foreign_parent_is_empty(two):
+    assert db.list_cards(two, P, parent_id="q1") == []
+
+
+def test_next_cards_skips_other_projects_and_follows_edges_across_them(two):
+    assert {c.id for c in core.next_cards(two, P)} == {"p1", "p2"}
+    make_card(two, "q-blocker", project_id=Q)
+    make_card(two, "p-blocked")
+    db.add_blocked_by_edge(two, "p-blocked", "q-blocker")
+    assert core.resolve_status(two, db.get_card(two, "p-blocked")) == "blocked"
+    assert {c.id for c in db.list_cards(two, P)} == {"p1", "p2", "p-blocked"}
+    assert {c.id for c in core.next_cards(two, P)} == {"p1", "p2"}
+    db.update_card_fields(two, "q-blocker", status="done")
+    assert {c.id for c in core.next_cards(two, P)} == {"p1", "p2", "p-blocked"}
+
+
+def test_build_tree_holds_only_the_projects_roots(two):
+    make_card(two, "p-child", parent_id="p1")
+    tree = core.build_tree(two, P)
+    assert {node["id"] for node in tree} == {"p1", "p2"}
+    p1 = next(node for node in tree if node["id"] == "p1")
+    assert [child["id"] for child in p1["children"]] == ["p-child"]
+
+
+def _tree_ids(nodes):
+    return [node["id"] for node in nodes] + [
+        child_id for node in nodes for child_id in _tree_ids(node["children"])
+    ]
+
+
+def test_export_cards_hold_only_the_projects_cards(two, tmp_path):
+    assert set(_tree_ids(snapshot.export(two, P, tmp_path)["cards"])) == {"p1", "p2"}

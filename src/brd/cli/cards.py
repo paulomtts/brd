@@ -66,7 +66,10 @@ def list_cards_cmd(
         kwargs: dict = {"status": status}
         if parent is not None:
             kwargs["parent_id"] = parent
-        return [views.card_detail(ctx.conn, card) for card in db.list_cards(ctx.conn, **kwargs)]
+        return [
+            views.card_detail(ctx.conn, card)
+            for card in db.list_cards(ctx.conn, ctx.project.id, **kwargs)
+        ]
 
     run(pretty, action, render=lambda ctx, data: pretty_render.render_list(ctx.conn, data))
 
@@ -178,7 +181,7 @@ def tree(
     """Print the hierarchy and dependency tree."""
     run(
         pretty,
-        lambda ctx: core.build_tree(ctx.conn, root_id=card_id),
+        lambda ctx: core.build_tree(ctx.conn, ctx.project.id, root_id=card_id),
         render=lambda ctx, data: output.render_tree_text(data),
     )
 
@@ -199,7 +202,7 @@ def next_cmd(
     """List unblocked todo cards, oldest first."""
 
     def action(ctx):
-        cards = core.next_cards(ctx.conn, limit=limit, parent_id=parent)
+        cards = core.next_cards(ctx.conn, ctx.project.id, limit=limit, parent_id=parent)
         return [views.card_detail(ctx.conn, card) for card in cards]
 
     run(pretty, action, render=lambda ctx, data: pretty_render.render_list(ctx.conn, data))

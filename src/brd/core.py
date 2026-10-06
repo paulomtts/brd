@@ -99,13 +99,6 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _require_card(conn: sqlite3.Connection, card_id: str) -> Card:
-    card = db.get_card(conn, card_id)
-    if card is None:
-        raise CardNotFoundError(f"no card with id {card_id}")
-    return card
-
-
 def _require_in_project(
     conn: sqlite3.Connection, project_id: str, entity_id: str, what: str
 ) -> None:
@@ -267,14 +260,17 @@ def delete_card(
 
 
 def next_cards(
-    conn: sqlite3.Connection, limit: int | None = None, parent_id: str | None = None
+    conn: sqlite3.Connection,
+    project_id: str,
+    limit: int | None = None,
+    parent_id: str | None = None,
 ) -> list[Card]:
     if parent_id is not None:
-        _require_card(conn, parent_id)
+        require_card(conn, project_id, parent_id)
         candidates = db.list_children(conn, parent_id)
         ready = [card for card in candidates if resolve_status(conn, card) == "todo"]
     else:
-        todo_cards = db.list_cards(conn, status="todo")
+        todo_cards = db.list_cards(conn, project_id, status="todo")
         ready = [
             card
             for card in todo_cards
@@ -299,12 +295,14 @@ def _build_node(conn: sqlite3.Connection, card: Card) -> dict:
     }
 
 
-def build_tree(conn: sqlite3.Connection, root_id: str | None = None) -> list[dict]:
+def build_tree(
+    conn: sqlite3.Connection, project_id: str, root_id: str | None = None
+) -> list[dict]:
     if root_id is not None:
-        card = _require_card(conn, root_id)
+        card = require_card(conn, project_id, root_id)
         return [_build_node(conn, card)]
 
-    top_level = db.list_cards(conn, parent_id=None)
+    top_level = db.list_cards(conn, project_id, parent_id=None)
     return [_build_node(conn, card) for card in top_level]
 
 

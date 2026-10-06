@@ -814,3 +814,18 @@ def test_issue_open_refuses_a_foreign_blocks_card(foreign):
 def test_comment_add_refuses_a_foreign_card(foreign):
     _refused("comment", "add", foreign, "hi")
     assert ok("show", foreign)["comments"] == []
+
+
+def test_listings_exclude_a_foreign_card(foreign):
+    mine = ok("add", "--title", "mine")["id"]
+    assert [c["id"] for c in ok("list")] == [mine]
+    assert [c["id"] for c in ok("list", "--status", "todo")] == [mine]
+    assert ok("list", "--parent", foreign) == []
+    assert [c["id"] for c in ok("next")] == [mine]
+    assert [node["id"] for node in ok("tree")] == [mine]
+    assert [node["id"] for node in ok("export")["cards"]] == [mine]
+
+
+def test_next_and_tree_refuse_a_foreign_root(foreign):
+    _refused("next", "--parent", foreign)
+    _refused("tree", foreign)

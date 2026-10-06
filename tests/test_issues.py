@@ -69,10 +69,10 @@ def test_open_issue_blocks_card_until_closed_any_reason(pconn):
         issue = issues.open_issue(pconn, PROJECT.id, "q")
         core.block_card(pconn, PROJECT.id, card.id, issue.id)
         assert core.resolve_status(pconn, card) == "blocked"
-        assert card.id not in [c.id for c in core.next_cards(pconn)]
+        assert card.id not in [c.id for c in core.next_cards(pconn, PROJECT.id)]
         issues.close(pconn, issue.id, reason=reason)
         assert core.resolve_status(pconn, card) == "todo"
-        assert card.id in [c.id for c in core.next_cards(pconn)]
+        assert card.id in [c.id for c in core.next_cards(pconn, PROJECT.id)]
         issues.reopen(pconn, issue.id)
         assert core.resolve_status(pconn, card) == "blocked"
         issues.close(pconn, issue.id)

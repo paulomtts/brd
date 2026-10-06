@@ -385,7 +385,7 @@ def test_next_cards_returns_unblocked_todo_oldest_first(conn):
     blocker = core.create_card(conn, PROJECT.id, title="Blocker")
     core.block_card(conn, PROJECT.id, b.id, blocker.id)
 
-    result = core.next_cards(conn)
+    result = core.next_cards(conn, PROJECT.id)
     assert [c.id for c in result] == [a.id, blocker.id]
 
 
@@ -396,7 +396,7 @@ def test_next_cards_excludes_in_progress_and_done(conn):
     core.update_card(conn, PROJECT.id, b.id, status="done")
     c = core.create_card(conn, PROJECT.id, title="C")
 
-    result = core.next_cards(conn)
+    result = core.next_cards(conn, PROJECT.id)
     assert [card.id for card in result] == [c.id]
 
 
@@ -405,7 +405,7 @@ def test_next_cards_respects_limit(conn):
     core.create_card(conn, PROJECT.id, title="B")
     core.create_card(conn, PROJECT.id, title="C")
 
-    result = core.next_cards(conn, limit=2)
+    result = core.next_cards(conn, PROJECT.id, limit=2)
     assert len(result) == 2
 
 
@@ -415,7 +415,7 @@ def test_build_tree_single_root_with_children_and_blockers(conn):
     child = core.create_card(conn, PROJECT.id, title="Child", parent_id=parent.id, blocked_by=[blocker.id]
     )
 
-    tree = core.build_tree(conn, root_id=parent.id)
+    tree = core.build_tree(conn, PROJECT.id, root_id=parent.id)
     assert len(tree) == 1
     root_node = tree[0]
     assert root_node["id"] == parent.id
@@ -433,7 +433,7 @@ def test_build_tree_single_root_with_children_and_blockers(conn):
 def test_build_tree_node_includes_description_and_timestamps(conn):
     card = core.create_card(conn, PROJECT.id, title="Card", description="details")
 
-    tree = core.build_tree(conn, root_id=card.id)
+    tree = core.build_tree(conn, PROJECT.id, root_id=card.id)
     node = tree[0]
     assert node["description"] == "details"
     assert node["created_at"] == card.created_at
@@ -446,7 +446,7 @@ def test_build_tree_whole_board_returns_all_top_level_roots(conn):
     parent = core.create_card(conn, PROJECT.id, title="Root3")
     nested = core.create_card(conn, PROJECT.id, title="Nested", parent_id=parent.id)
 
-    tree = core.build_tree(conn)
+    tree = core.build_tree(conn, PROJECT.id)
     assert [node["id"] for node in tree] == [root1.id, root2.id, parent.id]
     assert [node["id"] for node in tree[2]["children"]] == [nested.id]
     assert [node["title"] for node in tree] == ["Root1", "Root2", "Root3"]
@@ -454,21 +454,21 @@ def test_build_tree_whole_board_returns_all_top_level_roots(conn):
 
 def test_build_tree_rejects_unknown_root_id(conn):
     with pytest.raises(core.CardNotFoundError):
-        core.build_tree(conn, root_id="nope")
+        core.build_tree(conn, PROJECT.id, root_id="nope")
 
 
 def test_next_cards_limit_zero_returns_empty(conn):
     core.create_card(conn, PROJECT.id, title="A")
     core.create_card(conn, PROJECT.id, title="B")
 
-    assert core.next_cards(conn, limit=0) == []
+    assert core.next_cards(conn, PROJECT.id, limit=0) == []
 
 
 def test_next_cards_excludes_cards_with_children(conn):
     epic = core.create_card(conn, PROJECT.id, title="Epic")
     child = core.create_card(conn, PROJECT.id, title="Child", parent_id=epic.id)
 
-    result = core.next_cards(conn)
+    result = core.next_cards(conn, PROJECT.id)
     assert [c.id for c in result] == [child.id]
 
 
@@ -479,7 +479,7 @@ def test_next_cards_with_parent_returns_ready_direct_children(conn):
     core.block_card(conn, PROJECT.id, story_b.id, story_a.id)
     core.create_card(conn, PROJECT.id, title="A.1", parent_id=story_a.id)  # unrelated leaf
 
-    result = core.next_cards(conn, parent_id=milestone.id)
+    result = core.next_cards(conn, PROJECT.id, parent_id=milestone.id)
     assert [c.id for c in result] == [story_a.id]
 
 
@@ -488,7 +488,7 @@ def test_next_cards_with_parent_includes_ready_children_even_with_grandchildren(
     subtask = core.create_card(conn, PROJECT.id, title="Subtask", parent_id=story.id)
     core.create_card(conn, PROJECT.id, title="Sub-subtask", parent_id=subtask.id)
 
-    result = core.next_cards(conn, parent_id=story.id)
+    result = core.next_cards(conn, PROJECT.id, parent_id=story.id)
     assert [c.id for c in result] == [subtask.id]
 
 
@@ -497,13 +497,13 @@ def test_next_cards_with_parent_excludes_blocked_children(conn):
     blocker = core.create_card(conn, PROJECT.id, title="Blocker")
     core.create_card(conn, PROJECT.id, title="Subtask", parent_id=story.id, blocked_by=[blocker.id])
 
-    result = core.next_cards(conn, parent_id=story.id)
+    result = core.next_cards(conn, PROJECT.id, parent_id=story.id)
     assert result == []
 
 
 def test_next_cards_with_unknown_parent_raises(conn):
     with pytest.raises(core.CardNotFoundError):
-        core.next_cards(conn, parent_id="nope")
+        core.next_cards(conn, PROJECT.id, parent_id="nope")
 
 
 def test_import_tree_round_trips_a_whole_board(conn):
@@ -514,20 +514,20 @@ def test_import_tree_round_trips_a_whole_board(conn):
         parent_id=parent.id,
         blocked_by=[blocker.id],
     )
-    original_tree = core.build_tree(conn)
+    original_tree = core.build_tree(conn, PROJECT.id)
 
     fresh_conn = db.connect(":memory:")
     db.init_project_schema(fresh_conn, PROJECT)
     count = core.import_tree(fresh_conn, PROJECT.id, original_tree)
 
     assert count == 3
-    assert core.build_tree(fresh_conn) == original_tree
+    assert core.build_tree(fresh_conn, PROJECT.id) == original_tree
 
 
 def test_import_tree_maps_derived_blocked_status_back_to_todo(conn):
     blocker = core.create_card(conn, PROJECT.id, title="Blocker")
     blocked = core.create_card(conn, PROJECT.id, title="Blocked", blocked_by=[blocker.id])
-    tree = core.build_tree(conn)
+    tree = core.build_tree(conn, PROJECT.id)
 
     fresh_conn = db.connect(":memory:")
     db.init_project_schema(fresh_conn, PROJECT)
@@ -543,7 +543,7 @@ def test_import_tree_preserves_in_progress_and_done_status(conn):
     core.update_card(conn, PROJECT.id, a.id, status="in_progress")
     b = core.create_card(conn, PROJECT.id, title="B")
     core.update_card(conn, PROJECT.id, b.id, status="done")
-    tree = core.build_tree(conn)
+    tree = core.build_tree(conn, PROJECT.id)
 
     fresh_conn = db.connect(":memory:")
     db.init_project_schema(fresh_conn, PROJECT)
@@ -755,7 +755,7 @@ def test_next_cards_includes_dependent_of_finished_container(conn):
     core.update_card(conn, PROJECT.id, first.id, status="done")
     core.update_card(conn, PROJECT.id, second.id, status="done")
 
-    ready_ids = [card.id for card in core.next_cards(conn)]
+    ready_ids = [card.id for card in core.next_cards(conn, PROJECT.id)]
 
     assert dependent.id in ready_ids
     assert story.id not in ready_ids
@@ -785,7 +785,7 @@ def test_create_card_records_its_project(conn):
 def test_import_tree_records_its_project(conn):
     parent = core.create_card(conn, PROJECT.id, "Parent")
     core.create_card(conn, PROJECT.id, "Child", parent_id=parent.id)
-    tree = core.build_tree(conn)
+    tree = core.build_tree(conn, PROJECT.id)
 
     fresh_conn = db.connect(":memory:")
     db.init_project_schema(fresh_conn, OTHER_PROJECT)

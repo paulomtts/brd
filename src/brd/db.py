@@ -550,21 +550,23 @@ _UNSET = "__unset__"
 
 def list_cards(
     conn: sqlite3.Connection,
+    project_id: str,
     status: str | None = None,
     parent_id: str | None = _UNSET,
 ) -> list[Card]:
-    query = "SELECT * FROM cards WHERE 1=1"
-    params: list[str | None] = []
+    # cards.* only: the scope join brings entities' own id column along.
+    query = f"SELECT cards.* FROM cards {in_project('cards.id')} WHERE 1=1"
+    params: list[str | None] = [project_id]
     if status is not None:
-        query += " AND status = ?"
+        query += " AND cards.status = ?"
         params.append(status)
     if parent_id is not _UNSET:
         if parent_id is None:
-            query += " AND parent_id IS NULL"
+            query += " AND cards.parent_id IS NULL"
         else:
-            query += " AND parent_id = ?"
+            query += " AND cards.parent_id = ?"
             params.append(parent_id)
-    query += " ORDER BY created_at"
+    query += " ORDER BY cards.created_at"
     rows = conn.execute(query, params).fetchall()
     return [_row_to_card(row) for row in rows]
 

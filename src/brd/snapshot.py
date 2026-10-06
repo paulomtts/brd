@@ -8,11 +8,11 @@ from brd.errors import EntityAlreadyExistsError, ImportFormatError
 FORMAT_VERSION = 1
 
 
-def export(conn: sqlite3.Connection, root: Path) -> dict:
+def export(conn: sqlite3.Connection, project_id: str, root: Path) -> dict:
     results = documents.sync_all(conn, root)
     return {
         "brd_export": FORMAT_VERSION,
-        "cards": core.build_tree(conn),
+        "cards": core.build_tree(conn, project_id),
         "issues": [dataclasses.asdict(i) for i in issues.list_issues(conn)],
         "documents": [
             {

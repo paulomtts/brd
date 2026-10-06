@@ -494,21 +494,21 @@ def test_update_card_fields(project_conn):
 def test_list_cards_no_filter_returns_all(project_conn):
     db.insert_card(project_conn, PROJECT.id, _sample_card("c1"))
     db.insert_card(project_conn, PROJECT.id, _sample_card("c2"))
-    results = db.list_cards(project_conn)
+    results = db.list_cards(project_conn, PROJECT.id)
     assert {c.id for c in results} == {"c1", "c2"}
 
 
 def test_list_cards_filters_by_status(project_conn):
     db.insert_card(project_conn, PROJECT.id, _sample_card("c1", status="todo"))
     db.insert_card(project_conn, PROJECT.id, _sample_card("c2", status="done"))
-    results = db.list_cards(project_conn, status="done")
+    results = db.list_cards(project_conn, PROJECT.id, status="done")
     assert [c.id for c in results] == ["c2"]
 
 
 def test_list_cards_filters_by_parent_id(project_conn):
     db.insert_card(project_conn, PROJECT.id, _sample_card("parent"))
     db.insert_card(project_conn, PROJECT.id, _sample_card("child", parent_id="parent"))
-    results = db.list_cards(project_conn, parent_id="parent")
+    results = db.list_cards(project_conn, PROJECT.id, parent_id="parent")
     assert [c.id for c in results] == ["child"]
 
 
@@ -516,7 +516,7 @@ def test_list_cards_filters_by_explicit_none_parent(project_conn):
     db.insert_card(project_conn, PROJECT.id, _sample_card("top"))
     db.insert_card(project_conn, PROJECT.id, _sample_card("parent2"))
     db.insert_card(project_conn, PROJECT.id, _sample_card("child", parent_id="parent2"))
-    results = db.list_cards(project_conn, parent_id=None)
+    results = db.list_cards(project_conn, PROJECT.id, parent_id=None)
     assert {c.id for c in results} == {"top", "parent2"}
 
 
@@ -546,7 +546,7 @@ def test_list_children(project_conn):
 def test_list_cards_orders_by_created_at(project_conn):
     db.insert_card(project_conn, PROJECT.id, _sample_card("c1", created_at="2026-09-17T12:00:00"))
     db.insert_card(project_conn, PROJECT.id, _sample_card("c2", created_at="2026-09-16T08:00:00"))
-    assert [c.id for c in db.list_cards(project_conn)] == ["c2", "c1"]
+    assert [c.id for c in db.list_cards(project_conn, PROJECT.id)] == ["c2", "c1"]
 
 
 def test_list_children_orders_by_created_at(project_conn):
