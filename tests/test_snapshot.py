@@ -646,6 +646,7 @@ def test_import_report_shape_and_pretty(populated, tmp_path, monkeypatch):
             "issues": 1,
             "documents": 1,
             "comments": 1,
+            "removed": {"cards": 0, "issues": 0, "documents": 0, "comments": 0},
         }
     ]
     assert result["not_found_edges"] == 0
@@ -820,9 +821,14 @@ def test_import_refuses_a_non_empty_target(project, tmp_path, monkeypatch, entri
     snapshot = _snapshot_file(tmp_path, _v2(*hand[:entries]))
     if entries == 2:
         _unregistered_dir(tmp_path, monkeypatch, "elsewhere")
-    error = _import_error(snapshot)
+    result = invoke("import", snapshot)
+    assert result.exit_code == 1, result.output
+    error = json.loads(result.stdout)["error"]
     assert error["type"] == "ProjectNotEmptyError"
     assert a["id"] in error["message"] and a["name"] in error["message"]
+    assert "--yes" in error["message"]
+    assert "not supported yet" not in error["message"]
+    assert result.stderr == ""
     assert ok("projects") == [a]
     monkeypatch.chdir(project)
     assert (ok("list"), ok("issue", "list")) == before
@@ -883,3 +889,37 @@ def test_import_help_describes_placement():
     assert "current project" in text
     assert "multi-project" in text
     assert "already has entities" in text
+
+
+def _board():
+    """What a replacing import could change, as the CLI shows it from the cwd."""
+    return {
+        "projects": ok("projects"),
+        "cards": ok("list"),
+        "issues": ok("issue", "list"),
+        "docs": ok("doc", "list"),
+        "export": ok("export"),
+    }
+
+
+def _backups():
+    """Every document backup file in this install, with its bytes."""
+    docs_dir = paths.docs_dir()
+    if not docs_dir.exists():
+        return {}
+    return {path.name: path.read_bytes() for path in docs_dir.iterdir()}
+
+
+def test_replace_without_tty_or_yes_refuses(populated, tmp_path):
+    snapshot = _snapshot_file(tmp_path, ok("export"))
+    (registered,) = ok("projects")
+    before, backups = _board(), _backups()
+    result = invoke("import", snapshot)
+    assert result.exit_code == 1, result.output
+    error = json.loads(result.stdout)["error"]
+    assert error["type"] == "ProjectNotEmptyError"
+    assert registered["name"] in error["message"] and registered["id"] in error["message"]
+    assert "--yes" in error["message"]
+    assert "not supported yet" not in error["message"]
+    assert result.stderr == ""
+    assert _board() == before and _backups() == backups

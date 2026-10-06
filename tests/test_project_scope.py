@@ -8,6 +8,7 @@ import pytest
 from brd import comments, core, db, documents, entities, issues, pretty, refs, snapshot, tags, views
 from brd.cli import cards as cli_cards
 from brd.errors import (
+    Aborted,
     CardNotFoundError,
     CommentNotFoundError,
     CycleError,
@@ -18,6 +19,7 @@ from brd.errors import (
     ImportFormatError,
     InvalidBlockerError,
     IssueNotFoundError,
+    ProjectNotEmptyError,
     SelfReferenceError,
 )
 from brd.models import Card, Project
@@ -116,6 +118,54 @@ def test_snapshot_load_records_its_project(pconn, tmp_path):
     assert rows == {"c": other.id, "i": other.id, "d": other.id}
     stored = pconn.execute("SELECT project_id FROM documents WHERE id = 'd'").fetchone()
     assert stored[0] == other.id
+
+
+def test_load_confirm_contract(pconn, tmp_path):
+    other = dataclasses.replace(OTHER_PROJECT, root_path=str(tmp_path.resolve()))
+    add_project(pconn, other)
+    snap = {
+        "brd_export": 1,
+        "cards": [
+            {"id": "e", "title": "E", "description": None, "status": "todo", "blocked_by": [],
+             "created_at": NOW, "updated_at": NOW, "children": []}
+        ],
+        "documents": [
+            {"id": "dd", "title": "D", "source_path": "docs/d.md", "content": "x",
+             "content_hash": "h", "created_at": NOW, "updated_at": NOW}
+        ],
+        "comments": [
+            {"id": "m", "entity_id": "e", "author": "a", "body": "b", "created_at": NOW}
+        ],
+    }
+
+    def owned():
+        return {
+            row[0]
+            for row in pconn.execute("SELECT id FROM entities WHERE project_id = ?", (other.id,))
+        }
+
+    def never(replacements):
+        raise AssertionError("confirm was called for an empty target")
+
+    # A registered but empty target is not replaced: confirm is never called.
+    snapshot.load(pconn, tmp_path, snap, confirm=never)
+    make_card(pconn, "old", project_id=other.id)
+
+    # The same ids again: owned by the project being replaced, so allowed.
+    with pytest.raises(ProjectNotEmptyError, match="pass --yes"):
+        snapshot.load(pconn, tmp_path, snap)
+    calls = []
+    with pytest.raises(Aborted, match="nothing was written"):
+        snapshot.load(pconn, tmp_path, snap, confirm=lambda reps: calls.append(reps) or False)
+    assert owned() == {"e", "dd", "old"}
+    ((replacement,),) = calls
+    assert replacement.project.id == other.id
+    assert replacement.removed == {"cards": 2, "issues": 0, "documents": 1, "comments": 1}
+    assert replacement.added == {"cards": 1, "issues": 0, "documents": 1, "comments": 1}
+
+    result = snapshot.load(pconn, tmp_path, snap, confirm=lambda reps: True)
+    assert owned() == {"e", "dd"}
+    assert result["projects"][0]["removed"] == replacement.removed
 
 
 @pytest.fixture

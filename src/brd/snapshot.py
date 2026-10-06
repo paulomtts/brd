@@ -1,9 +1,11 @@
 import dataclasses
 import sqlite3
+from collections.abc import Callable
 from pathlib import Path, PurePosixPath
 
 from brd import core, db, documents, entities, issues, master, refs
 from brd.errors import (
+    Aborted,
     EntityAlreadyExistsError,
     ImportFormatError,
     ProjectAlreadyExistsError,
@@ -18,6 +20,7 @@ V1_FORMAT_VERSION = 1
 ENTRY_BODY_KEYS = ("cards", "issues", "documents", "comments", "tags", "refs")
 PROJECT_KEYS = ("id", "name", "root_path", "created_at")
 COUNT_KEYS = ("imported", "cards", "issues", "documents", "comments")
+CONTENT_KEYS = ("cards", "issues", "documents", "comments")
 
 
 def export_projects(conn: sqlite3.Connection, projects: list[Project]) -> dict:
@@ -126,29 +129,50 @@ class _Target:
     registered: bool
 
 
-def load(conn: sqlite3.Connection, cwd: Path, raw) -> dict:
+@dataclasses.dataclass
+class Replacement:
+    """A registered target that already owns entities: the import wipes it
+    and loads its entry instead. removed is what it holds now, added what
+    the entry brings; both keyed by CONTENT_KEYS."""
+
+    project: Project
+    removed: dict
+    added: dict
+
+
+def load(
+    conn: sqlite3.Connection,
+    cwd: Path,
+    raw,
+    confirm: Callable[[list[Replacement]], bool] | None = None,
+) -> dict:
     """Import a snapshot: place each entry in its project (registering
     projects where needed), check the whole file, then write it in one
-    transaction. cwd matters only for a one-entry snapshot."""
+    transaction. cwd matters only for a one-entry snapshot. A target that
+    already has entities is replaced only if confirm, called once with every
+    replacement, returns True; with no confirm, import refuses."""
     try:
-        return _load(conn, cwd, raw)
+        return _load(conn, cwd, raw, confirm)
     except (KeyError, TypeError, AttributeError, sqlite3.ProgrammingError) as exc:
         # Missing keys or wrong value types in the snapshot. Any backups the
         # import wrote were already cleaned up by the time this is caught.
         raise ImportFormatError(f"malformed snapshot: {type(exc).__name__}: {exc}") from exc
 
 
-def _load(conn: sqlite3.Connection, cwd: Path, raw) -> dict:
+def _load(conn: sqlite3.Connection, cwd: Path, raw, confirm) -> dict:
     entries = _entries(raw)
     targets = _place(conn, cwd, entries)
-    _require_empty(conn, targets)
-    _validate(conn, entries, targets)
-    _write(conn, entries, targets)
+    replacements = _replacements(conn, entries, targets)
+    replaced = {replacement.project.id for replacement in replacements}
+    _validate(conn, entries, targets, replaced)
+    if replacements:
+        _confirm(replacements, confirm)
+    _write(conn, entries, targets, replaced)
     # After commit, so [[stem]] and [[uuid]] links resolve against the whole import.
     for entry in entries:
         for entity_id in entry.entity_ids():
             refs.reindex(conn, entity_id)
-    return _report(conn, entries, targets)
+    return _report(conn, entries, targets, replacements)
 
 
 def _entries(raw) -> list[_Entry]:
@@ -282,32 +306,57 @@ def _place_by_record(conn: sqlite3.Connection, recorded: list[dict]) -> list[_Ta
     return targets
 
 
-def _require_empty(conn: sqlite3.Connection, targets: list[_Target]) -> None:
-    """A registered target that already owns entities is refused: replacing
-    its contents is not supported yet. New targets are empty."""
-    busy = []
-    for target in targets:
+def _replacements(
+    conn: sqlite3.Connection, entries: list[_Entry], targets: list[_Target]
+) -> list[Replacement]:
+    """Every registered target that already owns entities, in file order.
+    New targets are empty."""
+    replacements = []
+    for entry, target in zip(entries, targets):
         if target.registered:
             continue
-        counts = {
-            row["kind"]: row["n"]
-            for row in conn.execute(
-                "SELECT kind, COUNT(*) AS n FROM entities WHERE project_id = ? GROUP BY kind",
-                (target.project.id,),
-            )
-        }
-        if counts:
-            project = target.project
-            busy.append(
-                f"{project.name} ({project.id}) has {counts.get('card', 0)} cards, "
-                f"{counts.get('issue', 0)} issues and {counts.get('document', 0)} documents"
-            )
-    if busy:
+        removed = _project_counts(conn, target.project.id)
+        if any(removed.values()):
+            counts = entry.counts()
+            added = {key: counts[key] for key in CONTENT_KEYS}
+            replacements.append(Replacement(target.project, removed, added))
+    return replacements
+
+
+def _project_counts(conn: sqlite3.Connection, project_id: str) -> dict:
+    kinds = {
+        row["kind"]: row["n"]
+        for row in conn.execute(
+            "SELECT kind, COUNT(*) AS n FROM entities WHERE project_id = ? GROUP BY kind",
+            (project_id,),
+        )
+    }
+    comments = conn.execute(
+        f"SELECT COUNT(*) FROM comments {db.in_project('comments.entity_id')}", (project_id,)
+    ).fetchone()[0]
+    return {
+        "cards": kinds.get("card", 0),
+        "issues": kinds.get("issue", 0),
+        "documents": kinds.get("document", 0),
+        "comments": comments,
+    }
+
+
+def _confirm(
+    replacements: list[Replacement], confirm: Callable[[list[Replacement]], bool] | None
+) -> None:
+    if confirm is None:
         raise ProjectNotEmptyError(
             "target project already has entities: "
-            + "; ".join(busy)
-            + "; replacing a project's contents is not supported yet"
+            + "; ".join(
+                f"{r.project.name} ({r.project.id}) has {r.removed['cards']} cards, "
+                f"{r.removed['issues']} issues and {r.removed['documents']} documents"
+                for r in replacements
+            )
+            + "; pass --yes to replace their contents"
         )
+    if not confirm(replacements):
+        raise Aborted("Import cancelled; nothing was written.")
 
 
 def _check_source_path(source_path) -> None:
@@ -323,33 +372,49 @@ def _check_source_path(source_path) -> None:
         )
 
 
-def _validate(conn: sqlite3.Connection, entries: list[_Entry], targets: list[_Target]) -> None:
-    """Every check before anything is written, over the whole file. Edge
-    targets are not checked: one that is not in the database is kept and
-    reported as not-found."""
+def _validate(
+    conn: sqlite3.Connection, entries: list[_Entry], targets: list[_Target], replaced: set[str]
+) -> None:
+    """Every check before anything is written, over the whole file. A
+    replaced project counts as already empty: its ids may come back, in any
+    entry, and its documents never collide with incoming ones. Edge targets
+    are not checked: one that is not in the database is kept and reported
+    as not-found."""
     entity_ids = [entity_id for entry in entries for entity_id in entry.entity_ids()]
     if len(set(entity_ids)) != len(entity_ids):
         raise ImportFormatError("snapshot contains duplicate ids")
     for entity_id in entity_ids:
-        if entities.kind_of(conn, entity_id) is not None:
+        owner = db.owner_of(conn, entity_id)
+        if owner is not None and owner.id not in replaced:
             raise EntityAlreadyExistsError(f"entity {entity_id} already exists in another project")
     for entry in entries:
         for comment in entry.comments:
-            if conn.execute("SELECT 1 FROM comments WHERE id = ?", (comment["id"],)).fetchone():
+            row = conn.execute(
+                "SELECT entity_id FROM comments WHERE id = ?", (comment["id"],)
+            ).fetchone()
+            if row is None:
+                continue
+            owner = db.owner_of(conn, row["entity_id"])
+            if owner is None or owner.id not in replaced:
                 raise EntityAlreadyExistsError(f"comment {comment['id']} already exists")
     for entry, target in zip(entries, targets):
         for doc in entry.documents:
             _check_source_path(doc["source_path"])
+        if target.project.id in replaced:
+            continue
         for doc in entry.documents:
             documents._check_unique(
                 conn, target.project.id, doc["source_path"], PurePosixPath(doc["source_path"]).stem
             )
 
 
-def _write(conn: sqlite3.Connection, entries: list[_Entry], targets: list[_Target]) -> None:
-    """One transaction: new projects, then every entry's entities, then every
-    entry's edges, comments, tags and refs, so an edge or comment into another
-    entry finds its target whatever the entry order."""
+def _write(
+    conn: sqlite3.Connection, entries: list[_Entry], targets: list[_Target], replaced: set[str]
+) -> None:
+    """One transaction: new projects, then the replaced projects' wipe, then
+    every entry's entities, then every entry's edges, comments, tags and
+    refs, so an edge or comment into another entry finds its target whatever
+    the entry order."""
     contents = {
         d["id"]: d["content"].encode("utf-8")
         for entry in entries
@@ -366,6 +431,11 @@ def _write(conn: sqlite3.Connection, entries: list[_Entry], targets: list[_Targe
             for target in targets:
                 if target.registered:
                     db.insert_project(conn, target.project)
+            for project_id in replaced:
+                # The deletion `brd forget` does, keeping the project row: the
+                # cascades take cards, issues, documents, comments, tags and
+                # outgoing edges. Incoming edges have no foreign key and stay.
+                conn.execute("DELETE FROM entities WHERE project_id = ?", (project_id,))
             for entry, target in zip(entries, targets):
                 _insert_entities(conn, target.project.id, entry, contents)
             for entry in entries:
@@ -434,12 +504,19 @@ def _insert_links(conn: sqlite3.Connection, entry: _Entry) -> None:
         )
 
 
-def _report(conn: sqlite3.Connection, entries: list[_Entry], targets: list[_Target]) -> dict:
+def _report(
+    conn: sqlite3.Connection,
+    entries: list[_Entry],
+    targets: list[_Target],
+    replacements: list[Replacement],
+) -> dict:
+    removed = {replacement.project.id: replacement.removed for replacement in replacements}
     per_project = [
         {
             "project": dataclasses.asdict(db.get_project_by_id(conn, target.project.id)),
             "registered": target.registered,
             **entry.counts(),
+            "removed": removed.get(target.project.id, dict.fromkeys(CONTENT_KEYS, 0)),
         }
         for entry, target in zip(entries, targets)
     ]
