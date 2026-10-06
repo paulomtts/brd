@@ -15,13 +15,19 @@ def _stamp(iso: str) -> str:
     return iso[:16].replace("T", " ")
 
 
+def _ref_item(item: dict) -> str:
+    if item["kind"] is None:
+        return f"not-found {item['id']}"
+    return f"{item['title']} ({item['kind']})"
+
+
 def _ref_line(label: str, items: list[dict]) -> str | None:
     seen: dict[str, dict] = {}
     for item in items:
         seen.setdefault(item["id"], item)
     if not seen:
         return None
-    return f"{label}: " + ", ".join(f"{i['title']} ({i['kind']})" for i in seen.values())
+    return f"{label}: " + ", ".join(_ref_item(i) for i in seen.values())
 
 
 def _blocker(conn: sqlite3.Connection, blocker_id: str) -> str:

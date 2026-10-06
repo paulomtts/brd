@@ -983,6 +983,43 @@ def test_issue_open_can_block_a_foreign_card(foreign):
     assert ok("show", foreign)["status"] == "todo"
 
 
+def test_forget_leaves_a_foreign_card_blocked_until_unblocked(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    for name in ("a", "b"):
+        (tmp_path / name).mkdir()
+    monkeypatch.chdir(tmp_path / "a")
+    project_a = ok("init")
+    theirs = ok("add", "--title", "theirs")["id"]
+    monkeypatch.chdir(tmp_path / "b")
+    ok("init")
+    mine = ok("add", "--title", "mine")["id"]
+    ok("block", mine, "--by", theirs)
+    ok("ref", "add", mine, theirs)
+
+    ok("forget", "--project", project_a["id"])
+
+    shown = ok("show", mine)
+    assert (shown["status"], shown["blocked_by"]) == ("blocked", [theirs])
+    assert shown["refs"] == [
+        {"id": theirs, "kind": None, "title": None, "origin": "explicit"}
+    ]
+    assert mine not in [c["id"] for c in ok("next")]
+    assert [(c["id"], c["status"]) for c in ok("list")] == [(mine, "blocked")]
+    assert [(n["id"], n["status"]) for n in ok("tree")] == [(mine, "blocked")]
+    assert f"not-found {theirs}" in human("show", mine)
+    human("list")
+    human("tree")
+
+    unblocked = ok("unblock", mine, "--by", theirs)
+    assert (unblocked["blocked_by"], unblocked["status"]) == ([], "todo")
+    assert mine in [c["id"] for c in ok("next")]
+    assert ok("ref", "remove", mine, theirs)["refs"] == []
+
+    # Commands still refuse to add an edge to a missing id.
+    assert err("block", mine, "--by", theirs) == "CardNotFoundError"
+    assert err("ref", "add", mine, theirs) == "EntityNotFoundError"
+
+
 def test_comment_add_refuses_a_foreign_card(foreign):
     _refused("comment", "add", foreign, "hi")
     assert ok("show", foreign)["comments"] == []

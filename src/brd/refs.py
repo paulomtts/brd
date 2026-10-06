@@ -129,7 +129,18 @@ def remove_explicit(conn: sqlite3.Connection, project_id: str, src_id: str, dst_
 
 
 def _summaries(conn: sqlite3.Connection, rows, column: str) -> list[dict]:
-    return [{**entities.summary(conn, row[column]), "origin": row["origin"]} for row in rows]
+    # A target whose project was forgotten has no entity row: keep its id
+    # and null the rest, rather than drop the ref.
+    return [
+        {
+            **(
+                entities.summary(conn, row[column])
+                or {"id": row[column], "kind": None, "title": None}
+            ),
+            "origin": row["origin"],
+        }
+        for row in rows
+    ]
 
 
 def outgoing(conn: sqlite3.Connection, entity_id: str) -> list[dict]:
