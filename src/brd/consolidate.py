@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from brd import db, paths
+from brd.errors import MigrationError
 from brd.models import Project
 
 # Copied in this order; foreign keys are off while they copy.
@@ -54,19 +55,56 @@ def _registered() -> list[Project]:
         conn.close()
 
 
+def _label(project: Project) -> str:
+    return f"project {project.name} ({project.root_path})"
+
+
 def _open_board(project: Project) -> sqlite3.Connection | None:
     """The project's legacy board, upgraded in place to v4; None when it has
     no board file (it is registered empty)."""
     path = _board_path(project)
     if not path.is_file():
         return None
-    board = db.connect(path)
+    board = None
     try:
+        board = db.connect(path)
         db.migrate_project(board, project)
-    except BaseException:
-        board.close()
+        return board
+    except BaseException as exc:
+        if board is not None:
+            board.close()
+        # Not SQLite, or a board that records another project: name both.
+        if isinstance(exc, (sqlite3.DatabaseError, MigrationError)):
+            raise MigrationError(
+                f"cannot migrate the board of {_label(project)} at {path}: {exc}"
+            ) from exc
         raise
-    return board
+
+
+def _check_duplicates(boards: list[tuple[Project, sqlite3.Connection | None]]) -> None:
+    """Abort before anything is copied when two boards hold the same entity or
+    comment id; brd.db would otherwise fail on a raw IntegrityError."""
+    projects = {project.id: project for project, _ in boards}
+    clashes: dict[tuple[str, str], list[str]] = {}
+    for table in ("entities", "comments"):
+        owners: dict[str, str] = {}
+        for project, board in boards:
+            if board is None:
+                continue
+            for row in board.execute(f"SELECT id FROM {table}"):
+                first = owners.setdefault(row[0], project.id)
+                if first != project.id:
+                    clashes.setdefault((first, project.id), []).append(row[0])
+    if clashes:
+        parts = [
+            f"{_label(projects[a])} and {_label(projects[b])} share ids {', '.join(sorted(ids))}"
+            for (a, b), ids in clashes.items()
+        ]
+        raise MigrationError(
+            "cannot migrate into brd.db: "
+            + "; ".join(parts)
+            + "; no file was renamed, remove the duplicates and run brd again"
+        )
 
 
 def _copy(conn: sqlite3.Connection, project: Project, board: sqlite3.Connection | None) -> None:
@@ -125,21 +163,31 @@ def migrate(conn: sqlite3.Connection) -> Report:
     """Copy master.db's projects and every registered legacy board into brd.db.
 
     conn is brd.db, already inside BEGIN IMMEDIATE with foreign keys off.
-    Commits on success; on failure raises with the backups it copied removed
-    and leaves the rollback to the caller. retire() renames the old files
-    once this has committed."""
+    Commits on success; on failure raises (MigrationError for anything in the
+    old files) with the backups it copied removed, and leaves the rollback to
+    the caller. retire() renames the old files once this has committed."""
     projects = _registered()
     boards: list[tuple[Project, sqlite3.Connection | None]] = []
     try:
         for project in projects:
             boards.append((project, _open_board(project)))
+        _check_duplicates(boards)
         db.init_brd_schema(conn)
-        for project, board in boards:
-            _copy(conn, project, board)
+        try:
+            for project, board in boards:
+                _copy(conn, project, board)
+        except sqlite3.IntegrityError as exc:
+            raise MigrationError(f"cannot migrate into brd.db: {exc}") from exc
     finally:
         for _, board in boards:
             if board is not None:
                 board.close()
+    violations = conn.execute("PRAGMA foreign_key_check").fetchall()
+    if violations:
+        raise MigrationError(
+            f"cannot migrate into brd.db: {len(violations)} foreign key violation(s); "
+            "no file was renamed"
+        )
     created: list[Path] = []
     try:
         _copy_backups(projects, created)

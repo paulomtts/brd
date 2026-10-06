@@ -1,11 +1,13 @@
+import shutil
 import sqlite3
 from pathlib import Path
 
 import pytest
 
 from brd import db, master, paths
+from brd.errors import MigrationError
 from brd.models import Project
-from tests.factories import NOW, make_card, make_issue
+from tests.factories import NOW, OTHER_PROJECT, add_project, make_card, make_issue
 from tests.test_migration import INSERT_CARD, _make_v0, _make_v2_without_archived, _make_v3
 
 TABLES = ("entities", "cards", "issues", "documents", "comments", "tags", "blocked_by", "refs")
@@ -301,3 +303,133 @@ def test_second_connect_neither_migrates_nor_notifies(data, tmp_path):
     finally:
         second.close()
     assert notices == []
+
+
+def seed_shared_ids(base: Path) -> tuple[Project, Project]:
+    """Two registered v4 boards that both hold card 'dup' and comment
+    'k-dup', each with one document backup."""
+    first = register(base, "first", "2026-01-01T00:00:00+00:00")
+    second = register(base, "second", "2026-01-02T00:00:00+00:00")
+    for project in (first, second):
+        conn = v4_board(project)
+        make_card(conn, "dup", project_id=project.id)
+        conn.execute(
+            "INSERT INTO comments (id, entity_id, author, body, created_at) "
+            "VALUES ('k-dup', 'dup', 'me', 'hi', ?)",
+            (NOW,),
+        )
+        conn.commit()
+        add_document(conn, project, f"doc-{project.name}", "notes", "body")
+        conn.close()
+    return first, second
+
+
+def assert_nothing_migrated(projects: list[Project]) -> None:
+    assert paths.master_db_path().is_file()
+    assert not migrated(paths.master_db_path()).exists()
+    for project in projects:
+        assert board_path(project).is_file()
+        assert not migrated(board_path(project)).exists()
+        assert not migrated(backups_path(project)).exists()
+    brd = paths.brd_db_path()
+    if brd.exists():
+        conn = sqlite3.connect(brd)
+        try:
+            assert conn.execute("PRAGMA user_version").fetchone()[0] == 0
+            assert conn.execute("SELECT COUNT(*) FROM sqlite_master").fetchone()[0] == 0
+        finally:
+            conn.close()
+
+
+def test_shared_ids_abort_naming_both_projects_and_every_id(data, tmp_path):
+    first, second = seed_shared_ids(tmp_path)
+    notices: list[str] = []
+
+    with pytest.raises(MigrationError) as excinfo:
+        master.connect(notify=notices.append)
+
+    message = str(excinfo.value)
+    for text in ("first", first.root_path, "second", second.root_path, "dup", "k-dup"):
+        assert text in message
+    assert notices == []
+    assert_nothing_migrated([first, second])
+    assert backups_path(first).is_dir() and backups_path(second).is_dir()
+    assert not (data / "docs").exists()
+
+    conn = db.connect(board_path(second))
+    db.delete_card(conn, "dup")  # the cascade takes comment k-dup with it
+    conn.close()
+    brd, notices = open_brd()
+    try:
+        assert rows(brd, "entities", "id") == sorted(
+            [("dup",), ("doc-first",), ("doc-second",)]
+        )
+    finally:
+        brd.close()
+    assert notices == [NOTICE.format(n=2)]
+
+
+def test_board_recording_another_project_aborts(data, tmp_path):
+    owner = register(tmp_path, "owner")
+    stranger = Project(id=db.new_project_id(), name="stranger", root_path="/elsewhere", created_at=NOW)
+    conn = db.connect(board_path(owner))
+    db.migrate_project(conn, stranger)
+    conn.close()
+
+    with pytest.raises(MigrationError) as excinfo:
+        master.connect()
+
+    assert "owner" in str(excinfo.value)
+    assert str(board_path(owner)) in str(excinfo.value)
+    assert_nothing_migrated([owner])
+
+
+def test_unreadable_board_aborts_naming_the_project_and_file(data, tmp_path):
+    owner = register(tmp_path, "owner")
+    board_path(owner).write_bytes(b"not a database " * 100)
+
+    with pytest.raises(MigrationError) as excinfo:
+        master.connect()
+
+    assert "owner" in str(excinfo.value)
+    assert str(board_path(owner)) in str(excinfo.value)
+    assert_nothing_migrated([owner])
+
+
+def test_rows_of_an_unregistered_project_fail_the_foreign_key_check(data, tmp_path):
+    owner = register(tmp_path, "owner")
+    conn = v4_board(owner)
+    add_project(conn, OTHER_PROJECT)
+    make_card(conn, "stray", project_id=OTHER_PROJECT.id)
+    conn.close()
+
+    with pytest.raises(MigrationError, match="foreign key"):
+        master.connect()
+
+    assert_nothing_migrated([owner])
+
+
+def test_failed_backup_copy_removes_the_backups_it_copied(data, tmp_path, monkeypatch):
+    owner = register(tmp_path, "owner")
+    conn = v4_board(owner)
+    add_document(conn, owner, "doc-a", "a", "A")
+    add_document(conn, owner, "doc-b", "b", "B")
+    conn.close()
+    (data / "docs").mkdir()
+    (data / "docs" / "keep.md").write_text("mine")
+    real_copyfile = shutil.copyfile
+    calls = []
+
+    def copyfile(source, target):
+        calls.append(source)
+        if len(calls) == 2:
+            raise OSError("disk full")
+        return real_copyfile(source, target)
+
+    monkeypatch.setattr(shutil, "copyfile", copyfile)
+    with pytest.raises(OSError, match="disk full"):
+        master.connect()
+
+    assert sorted(path.name for path in (data / "docs").iterdir()) == ["keep.md"]
+    assert (data / "docs" / "keep.md").read_text() == "mine"
+    assert_nothing_migrated([owner])
