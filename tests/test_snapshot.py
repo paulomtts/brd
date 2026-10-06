@@ -1,9 +1,10 @@
 import json
+import shutil
 
 import pytest
 
 from brd import paths
-from tests.cli_helpers import err, invoke, ok
+from tests.cli_helpers import err, human, invoke, ok
 
 
 def write(root, rel, text):
@@ -342,3 +343,116 @@ def test_import_refuses_a_multi_entry_export(project, tmp_path, monkeypatch, cou
     assert f"{count} project entries" in error["message"]
     assert "not supported yet" in error["message"]
     _assert_nothing_imported(other)
+
+
+def test_export_all_lists_every_project_in_creation_order(project, tmp_path, monkeypatch):
+    a_card = ok("add", "--title", "A card")["id"]
+    a_issue = ok("issue", "open", "--title", "A issue")["id"]
+    a_entry = _entry(ok("export"))
+    _another_project(tmp_path, monkeypatch, "second")
+    b_card = ok("add", "--title", "B card")["id"]
+    b_entry = _entry(ok("export"))
+
+    from_b = ok("export", "--all")
+    monkeypatch.chdir(project)
+    from_a = ok("export", "--all")
+    assert from_a == from_b
+    assert set(from_a) == {"brd_export", "projects"} and from_a["brd_export"] == 2
+    assert [e["project"] for e in from_a["projects"]] == ok("projects")
+    assert from_a["projects"] == [a_entry, b_entry]
+    assert [c["id"] for c in a_entry["cards"]] == [a_card]
+    assert [i["id"] for i in a_entry["issues"]] == [a_issue]
+    assert [c["id"] for c in b_entry["cards"]] == [b_card]
+    assert b_entry["issues"] == []
+    # Without --all, still only the current project.
+    assert ok("export")["projects"] == [a_entry]
+
+    # A two-project snapshot does not import yet (5.2), and writes nothing.
+    snapshot = tmp_path / "all.json"
+    snapshot.write_text(json.dumps(from_a))
+    assert err("import", snapshot) == "ImportFormatError"
+    assert [c["id"] for c in ok("list")] == [a_card]
+
+
+def test_export_all_works_outside_any_project(project, tmp_path, monkeypatch):
+    ok("add", "--title", "A")
+    _another_project(tmp_path, monkeypatch, "second")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    monkeypatch.chdir(outside)
+    data = ok("export", "--all")
+    assert [e["project"] for e in data["projects"]] == ok("projects")
+    assert len(data["projects"]) == 2
+    assert err("export") == "ProjectNotFoundError"
+
+
+def test_export_all_with_no_projects_is_empty(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    monkeypatch.chdir(tmp_path)
+    assert ok("export", "--all") == {"brd_export": 2, "projects": []}
+
+
+def test_export_all_with_a_missing_project_root(project, tmp_path, monkeypatch):
+    second, registered = _another_project(tmp_path, monkeypatch, "second")
+    write(second, "docs/plan.md", "# Plan\nkept in the backup")
+    doc = ok("doc", "add", "docs/plan.md")
+    monkeypatch.chdir(project)
+    shutil.rmtree(second)
+
+    data = ok("export", "--all")
+    (entry,) = [e for e in data["projects"] if e["project"]["id"] == registered["id"]]
+    assert [d["id"] for d in entry["documents"]] == [doc["id"]]
+    assert entry["documents"][0]["content"] == "# Plan\nkept in the backup"
+
+
+def test_export_keeps_cross_project_and_not_found_edges(project, tmp_path, monkeypatch):
+    _, b = _another_project(tmp_path, monkeypatch, "b")
+    b_card = ok("add", "--title", "B card")["id"]
+    b_issue = ok("issue", "open", "--title", "B issue")["id"]
+    _, g = _another_project(tmp_path, monkeypatch, "g")
+    ghost = ok("add", "--title", "ghost")["id"]
+    monkeypatch.chdir(project)
+    a1 = ok("add", "--title", "a1")["id"]
+    a2 = ok("add", "--title", "a2")["id"]
+    ok("block", a1, "--by", b_card)
+    ok("block", a1, "--by", ghost)
+    ok("block", a2, "--by", b_issue)
+    ok("ref", "add", a1, b_card)
+    ok("ref", "add", a1, ghost)
+    ok("forget", "--project", g["id"])  # ghost is now not-found
+
+    entry = _entry(ok("export"))
+    nodes = {n["id"]: n for n in _card_nodes(entry["cards"])}
+    assert set(nodes[a1]["blocked_by"]) == {b_card, ghost}
+    assert nodes[a2]["blocked_by"] == [b_issue]
+    assert {"src_id": a1, "dst_id": b_card, "origin": "explicit"} in entry["refs"]
+    assert {"src_id": a1, "dst_id": ghost, "origin": "explicit"} in entry["refs"]
+
+    everything = ok("export", "--all")
+    assert [e["project"]["id"] for e in everything["projects"]] == [
+        entry["project"]["id"], b["id"]
+    ]
+    assert everything["projects"][0] == entry
+    b_entry = everything["projects"][1]
+    assert b_entry["refs"] == []
+    assert all(n["blocked_by"] == [] for n in _card_nodes(b_entry["cards"]))
+    assert a1 not in json.dumps(b_entry) and a2 not in json.dumps(b_entry)
+
+
+def test_export_pretty_is_indented_json(project, tmp_path, monkeypatch):
+    ok("add", "--title", "A")
+    _another_project(tmp_path, monkeypatch, "second")
+    for args in (["export"], ["export", "--all"]):
+        text = human(*args)
+        assert text.startswith("{\n  ")
+        assert json.loads(text) == ok(*args)
+
+
+def test_export_help_mentions_all():
+    result = invoke("export", "--help")
+    assert result.exit_code == 0, result.output
+    # Rich wraps help inside a bordered panel; compare with borders and
+    # line breaks folded away.
+    text = " ".join(result.stdout.replace("│", " ").split())
+    assert "--all" in text
+    assert "every registered project" in text
