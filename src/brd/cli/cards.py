@@ -104,6 +104,7 @@ def update(
         parent_arg = core.CLEAR_PARENT if clear_parent else parent
         card = core.update_card(
             ctx.conn,
+            ctx.project.id,
             card_id,
             title=title,
             description=description,

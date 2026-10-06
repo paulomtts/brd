@@ -106,6 +106,27 @@ def _require_card(conn: sqlite3.Connection, card_id: str) -> Card:
     return card
 
 
+def _require_in_project(
+    conn: sqlite3.Connection, project_id: str, entity_id: str, what: str
+) -> None:
+    # Commands act on the current project only. Name the owner, so an id
+    # copied from another project's board says where it lives.
+    owner = db.owner_of(conn, entity_id)
+    if owner is not None and owner.id != project_id:
+        raise CardNotFoundError(
+            f"no {what} with id {entity_id} in this project; "
+            f"it belongs to project {owner.name} ({owner.id})"
+        )
+
+
+def require_card(conn: sqlite3.Connection, project_id: str, card_id: str) -> Card:
+    card = db.get_card(conn, card_id)
+    if card is None:
+        raise CardNotFoundError(f"no card with id {card_id}")
+    _require_in_project(conn, project_id, card_id, "card")
+    return card
+
+
 def _require_blocker(conn: sqlite3.Connection, blocker_id: str) -> None:
     kind = entities.kind_of(conn, blocker_id)
     if kind is None:
@@ -134,7 +155,7 @@ def create_card(
     blocked_by: list[str] | None = None,
 ) -> Card:
     if parent_id is not None:
-        _require_card(conn, parent_id)
+        require_card(conn, project_id, parent_id)
 
     blocked_by = blocked_by or []
     for blocker_id in blocked_by:
@@ -165,13 +186,14 @@ def create_card(
 
 def update_card(
     conn: sqlite3.Connection,
+    project_id: str,
     card_id: str,
     title: str | None = None,
     description: str | None = None,
     status: str | None = None,
     parent_id: str | object | None = None,
 ) -> Card:
-    _require_card(conn, card_id)
+    require_card(conn, project_id, card_id)
 
     if status == "blocked":
         raise InvalidStatusError("status cannot be set to 'blocked' directly; it is derived")
@@ -191,7 +213,7 @@ def update_card(
     if parent_id is CLEAR_PARENT:
         fields["parent_id"] = None
     elif parent_id is not None:
-        _require_card(conn, parent_id)
+        require_card(conn, project_id, parent_id)
         if would_create_parent_cycle(conn, card_id, parent_id):
             raise CycleError(f"setting {card_id}'s parent to {parent_id} would create a cycle")
         fields["parent_id"] = parent_id
@@ -202,7 +224,7 @@ def update_card(
         if description is not None:
             refs.reindex(conn, card_id)
 
-    return _require_card(conn, card_id)
+    return require_card(conn, project_id, card_id)
 
 
 def block_card(conn: sqlite3.Connection, card_id: str, blocker_id: str) -> None:

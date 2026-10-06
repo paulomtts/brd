@@ -213,7 +213,7 @@ def test_create_card_rejects_unknown_blocker(conn):
 
 def test_update_card_changes_only_given_fields(conn):
     card = core.create_card(conn, PROJECT.id, title="Original", description="d")
-    updated = core.update_card(conn, card.id, title="Updated")
+    updated = core.update_card(conn, PROJECT.id, card.id, title="Updated")
     assert updated.title == "Updated"
     assert updated.description == "d"
 
@@ -221,20 +221,20 @@ def test_update_card_changes_only_given_fields(conn):
 def test_update_card_rejects_blocked_status(conn):
     card = core.create_card(conn, PROJECT.id, title="Card")
     with pytest.raises(core.InvalidStatusError):
-        core.update_card(conn, card.id, status="blocked")
+        core.update_card(conn, PROJECT.id, card.id, status="blocked")
 
 
 def test_update_card_rejects_parent_cycle(conn):
     a = core.create_card(conn, PROJECT.id, title="A")
     b = core.create_card(conn, PROJECT.id, title="B", parent_id=a.id)
     with pytest.raises(core.CycleError):
-        core.update_card(conn, a.id, parent_id=b.id)
+        core.update_card(conn, PROJECT.id, a.id, parent_id=b.id)
 
 
 def test_update_card_can_clear_parent(conn):
     a = core.create_card(conn, PROJECT.id, title="A")
     b = core.create_card(conn, PROJECT.id, title="B", parent_id=a.id)
-    updated = core.update_card(conn, b.id, parent_id=core.CLEAR_PARENT)
+    updated = core.update_card(conn, PROJECT.id, b.id, parent_id=core.CLEAR_PARENT)
     assert updated.parent_id is None
 
 
@@ -263,7 +263,7 @@ def test_unblock_card_removes_edge(conn):
 
 def test_update_card_rejects_unknown_card(conn):
     with pytest.raises(core.CardNotFoundError):
-        core.update_card(conn, "nope", title="Updated")
+        core.update_card(conn, PROJECT.id, "nope", title="Updated")
 
 
 def test_delete_card_removes_leaf_card(conn):
@@ -339,13 +339,13 @@ def test_delete_card_cascade_removes_incoming_edges_of_every_deleted_card(conn):
 def test_update_card_rejects_unknown_parent(conn):
     card = core.create_card(conn, PROJECT.id, title="Card")
     with pytest.raises(core.CardNotFoundError):
-        core.update_card(conn, card.id, parent_id="nope")
+        core.update_card(conn, PROJECT.id, card.id, parent_id="nope")
 
 
 def test_update_card_bumps_updated_at_and_leaves_created_at(conn, monkeypatch):
     card = core.create_card(conn, PROJECT.id, title="Card")
     monkeypatch.setattr(core, "_now", lambda: "2099-01-01T00:00:00+00:00")
-    updated = core.update_card(conn, card.id, title="Updated")
+    updated = core.update_card(conn, PROJECT.id, card.id, title="Updated")
     assert updated.updated_at == "2099-01-01T00:00:00+00:00"
     assert updated.created_at == card.created_at
 
@@ -353,7 +353,7 @@ def test_update_card_bumps_updated_at_and_leaves_created_at(conn, monkeypatch):
 def test_update_card_without_fields_does_not_touch_updated_at(conn, monkeypatch):
     card = core.create_card(conn, PROJECT.id, title="Card")
     monkeypatch.setattr(core, "_now", lambda: "2099-01-01T00:00:00+00:00")
-    unchanged = core.update_card(conn, card.id)
+    unchanged = core.update_card(conn, PROJECT.id, card.id)
     assert unchanged == card
 
 
@@ -391,9 +391,9 @@ def test_next_cards_returns_unblocked_todo_oldest_first(conn):
 
 def test_next_cards_excludes_in_progress_and_done(conn):
     a = core.create_card(conn, PROJECT.id, title="A")
-    core.update_card(conn, a.id, status="in_progress")
+    core.update_card(conn, PROJECT.id, a.id, status="in_progress")
     b = core.create_card(conn, PROJECT.id, title="B")
-    core.update_card(conn, b.id, status="done")
+    core.update_card(conn, PROJECT.id, b.id, status="done")
     c = core.create_card(conn, PROJECT.id, title="C")
 
     result = core.next_cards(conn)
@@ -540,9 +540,9 @@ def test_import_tree_maps_derived_blocked_status_back_to_todo(conn):
 
 def test_import_tree_preserves_in_progress_and_done_status(conn):
     a = core.create_card(conn, PROJECT.id, title="A")
-    core.update_card(conn, a.id, status="in_progress")
+    core.update_card(conn, PROJECT.id, a.id, status="in_progress")
     b = core.create_card(conn, PROJECT.id, title="B")
-    core.update_card(conn, b.id, status="done")
+    core.update_card(conn, PROJECT.id, b.id, status="done")
     tree = core.build_tree(conn)
 
     fresh_conn = db.connect(":memory:")
@@ -587,7 +587,7 @@ def test_update_card_removing_link_drops_link_ref_but_keeps_explicit(conn):
     other = core.create_card(conn, PROJECT.id, title="Other")
     source = core.create_card(conn, PROJECT.id, title="Source", description=f"[[{target.id}]] [[{other.id}]]")
     _refs.add_explicit(conn, source.id, other.id)
-    core.update_card(conn, source.id, description="no links now")
+    core.update_card(conn, PROJECT.id, source.id, description="no links now")
     assert {(r["id"], r["origin"]) for r in _refs.outgoing(conn, source.id)} == {
         (other.id, "explicit")
     }
@@ -606,7 +606,7 @@ def test_resolve_status_terminal_blocker_releases_dependent(conn, blocker_status
 def test_update_card_accepts_every_terminal_status(conn, status):
     db.insert_card(conn, PROJECT.id, _card("c1"))
 
-    assert core.update_card(conn, "c1", status=status).status == status
+    assert core.update_card(conn, PROJECT.id, "c1", status=status).status == status
     assert core.resolve_status(conn, db.get_card(conn, "c1")) == status
 
 
@@ -614,7 +614,7 @@ def test_update_card_rejects_unknown_status(conn):
     db.insert_card(conn, PROJECT.id, _card("c1"))
 
     with pytest.raises(core.InvalidStatusError):
-        core.update_card(conn, "c1", status="cancelled")
+        core.update_card(conn, PROJECT.id, "c1", status="cancelled")
 
 
 def _story_with_children(conn, story_id, child_statuses, story_status="todo"):
@@ -752,8 +752,8 @@ def test_next_cards_includes_dependent_of_finished_container(conn):
     first = core.create_card(conn, PROJECT.id, title="first", parent_id=story.id)
     second = core.create_card(conn, PROJECT.id, title="second", parent_id=story.id)
     dependent = core.create_card(conn, PROJECT.id, title="dependent", blocked_by=[story.id])
-    core.update_card(conn, first.id, status="done")
-    core.update_card(conn, second.id, status="done")
+    core.update_card(conn, PROJECT.id, first.id, status="done")
+    core.update_card(conn, PROJECT.id, second.id, status="done")
 
     ready_ids = [card.id for card in core.next_cards(conn)]
 

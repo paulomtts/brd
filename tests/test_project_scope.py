@@ -132,3 +132,62 @@ def test_owner_of_returns_the_owning_project(two):
     assert db.owner_of(two, "qi") == OTHER_PROJECT
     assert db.owner_of(two, "qd") == OTHER_PROJECT
     assert db.owner_of(two, "nope") is None
+
+
+def _foreign(entity_id, what="card"):
+    return re.escape(
+        f"no {what} with id {entity_id} in this project; "
+        f"it belongs to project {OTHER_PROJECT.name} ({OTHER_PROJECT.id})"
+    )
+
+
+def _state(conn):
+    return {
+        table: [tuple(row) for row in conn.execute(f"SELECT * FROM {table} ORDER BY 1, 2")]
+        for table in ("entities", "cards", "issues", "blocked_by", "comments")
+    }
+
+
+REFUSED = [
+    pytest.param(
+        lambda c: core.update_card(c, P, "q1", title="x"), "q1", "card", id="update_card"
+    ),
+    pytest.param(
+        lambda c: core.update_card(c, P, "q1", status="done"), "q1", "card",
+        id="update_card_status",
+    ),
+    pytest.param(
+        lambda c: core.update_card(c, P, "q-child", parent_id=core.CLEAR_PARENT),
+        "q-child", "card", id="update_card_clear_parent",
+    ),
+    pytest.param(
+        lambda c: core.update_card(c, P, "p1", title="x", parent_id="q1"), "q1", "card",
+        id="update_card_foreign_parent",
+    ),
+    pytest.param(
+        lambda c: core.create_card(c, P, "new", parent_id="q1"), "q1", "card",
+        id="create_card_foreign_parent",
+    ),
+]
+
+
+@pytest.mark.parametrize(("call", "foreign_id", "what"), REFUSED)
+def test_refused_call_names_the_owner_and_writes_nothing(two, call, foreign_id, what):
+    before = _state(two)
+    with pytest.raises(CardNotFoundError, match=_foreign(foreign_id, what)):
+        call(two)
+    assert _state(two) == before
+
+
+def test_require_card_returns_the_projects_card(two):
+    assert core.require_card(two, P, "p1").id == "p1"
+
+
+def test_require_card_on_a_missing_id_is_unchanged(two):
+    with pytest.raises(CardNotFoundError, match=r"^no card with id nope$"):
+        core.require_card(two, P, "nope")
+
+
+def test_update_card_on_a_foreign_issue_still_says_no_card(two):
+    with pytest.raises(CardNotFoundError, match=r"^no card with id qi$"):
+        core.update_card(two, P, "qi", title="x")

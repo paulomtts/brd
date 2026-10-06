@@ -4,8 +4,10 @@ import uuid
 import pytest
 from typer.testing import CliRunner
 
-from brd import paths
+from brd import db, paths
 from brd.cli import app
+from tests.cli_helpers import err, invoke, ok
+from tests.factories import OTHER_PROJECT, add_project, make_card
 
 runner = CliRunner()
 
@@ -746,3 +748,39 @@ def test_forget_reports_the_forgotten_project_id(isolated_env):
     result = runner.invoke(app, ["forget"])
     assert result.exit_code == 0
     assert json.loads(result.stdout)["data"]["id"] == project_id
+
+
+FOREIGN = "f0f0f0f0-0000-4000-8000-000000000000"
+
+
+@pytest.fixture
+def foreign(project):
+    """Seed another project and its card FOREIGN into the current board file.
+    No command can do this until every project shares one database."""
+    conn = db.connect(paths.project_db_path(project))
+    try:
+        add_project(conn, OTHER_PROJECT)
+        make_card(conn, FOREIGN, title="Foreign", project_id=OTHER_PROJECT.id)
+    finally:
+        conn.close()
+    return FOREIGN
+
+
+def _refused(*args) -> None:
+    result = invoke(*args)
+    assert result.exit_code == 1, result.output
+    error = json.loads(result.stdout)["error"]
+    assert error["type"] == "CardNotFoundError"
+    assert f"belongs to project {OTHER_PROJECT.name} ({OTHER_PROJECT.id})" in error["message"]
+
+
+def test_update_refuses_a_foreign_card(foreign):
+    _refused("update", foreign, "--title", "x")
+    assert ok("show", foreign)["title"] == "Foreign"
+
+
+def test_add_and_update_refuse_a_foreign_parent(foreign):
+    _refused("add", "--title", "t", "--parent", foreign)
+    mine = ok("add", "--title", "mine")["id"]
+    _refused("update", mine, "--parent", foreign)
+    assert ok("show", mine)["parent_id"] is None
