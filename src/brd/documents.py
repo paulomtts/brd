@@ -165,7 +165,7 @@ def add(
     if normalized_tags:
         tags.add(conn, doc.id, normalized_tags)
     refs.reindex(conn, doc.id)
-    refs.reindex_mentions(conn, stem)
+    refs.reindex_mentions(conn, project_id, stem)
     return doc
 
 
@@ -237,8 +237,8 @@ def update(
     doc = require(conn, project_id, doc_id)
     result = sync(conn, root, doc)
     if doc.stem.lower() != old_stem.lower():
-        refs.reindex_mentions(conn, old_stem)
-        refs.reindex_mentions(conn, doc.stem)
+        refs.reindex_mentions(conn, project_id, old_stem)
+        refs.reindex_mentions(conn, project_id, doc.stem)
     return require(conn, project_id, doc_id), result
 
 

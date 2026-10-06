@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from brd import comments, core, db, documents, entities, issues, snapshot, views
+from brd import comments, core, db, documents, entities, issues, pretty, refs, snapshot, views
 from brd.cli import cards as cli_cards
 from brd.errors import (
     CardNotFoundError,
@@ -532,3 +532,99 @@ def test_export_holds_only_the_projects_issues_and_documents(two, root):
     assert [i["id"] for i in data["issues"]] == ["pi"]
     assert [d["id"] for d in data["documents"]] == ["pd"]
     assert _doc_state(two, "qd") == q_before
+
+
+Q_UUID = "abababab-abab-4bab-8bab-abababababab"
+
+
+def _comment(conn, comment_id, entity_id, body):
+    conn.execute(
+        "INSERT INTO comments (id, entity_id, author, body, created_at) "
+        "VALUES (?, ?, 'me', ?, ?)",
+        (comment_id, entity_id, body, NOW),
+    )
+    conn.commit()
+
+
+def _link_targets(conn, entity_id):
+    return {r["id"] for r in refs.outgoing(conn, entity_id) if r["origin"] == "link"}
+
+
+@pytest.fixture
+def notes(two):
+    """Both projects have a document with stem `notes`: pn in P, qn in Q."""
+    make_document(two, "pn", "notes", title="P notes")
+    make_document(two, "qn", "notes", title="Q notes", project_id=Q)
+    return two
+
+
+def test_resolve_stems_within_the_project_and_uuids_globally(notes):
+    assert refs.resolve(notes, P, "notes") == "pn"
+    assert refs.resolve(notes, P, "docs/NOTES.md") == "pn"
+    assert refs.resolve(notes, Q, "notes") == "qn"
+    assert refs.resolve(notes, P, "qnotes") is None  # only Q has it
+    make_card(notes, Q_UUID, project_id=Q)
+    assert refs.resolve(notes, P, Q_UUID) == Q_UUID
+
+
+def test_reindex_resolves_stems_against_the_owning_project(notes):
+    make_card(notes, "pc", description="see [[notes]]")
+    make_card(notes, "qc", description="see [[notes]]", project_id=Q)
+    make_card(notes, Q_UUID, project_id=Q)
+    make_card(notes, "pu", description=f"see [[{Q_UUID}]]")
+    for card_id in ("pc", "qc", "pu"):
+        refs.reindex(notes, card_id)
+    assert _link_targets(notes, "pc") == {"pn"}
+    assert _link_targets(notes, "qc") == {"qn"}
+    assert _link_targets(notes, "pu") == {Q_UUID}
+
+
+def test_a_stem_only_another_project_has_stays_unresolved(two):
+    make_card(two, "pc")
+    _comment(two, "k-p", "pc", "see [[qnotes]]")
+    refs.reindex(two, "pc")
+    assert _link_targets(two, "pc") == set()
+    assert pretty.text(two, P, "see [[qnotes]]") == "see [[qnotes]] (unresolved)"
+
+
+def test_reindex_mentions_rescans_only_the_projects_texts(two):
+    make_card(two, "pc", description="[[notes]]")
+    make_issue(two, "pi", body="[[notes]]")
+    make_document(two, "ph", "phub", content="see [[notes]]")
+    _comment(two, "k-p", "p1", "[[notes]]")
+    make_card(two, "qc", description="[[notes]]", project_id=Q)
+    _comment(two, "k-q", "q1", "[[notes]]")
+    # Seeded without reindexing: no entity has a link ref yet.
+    make_document(two, "pn", "notes")
+    make_document(two, "qn", "notes", project_id=Q)
+    refs.reindex_mentions(two, P, "notes")
+    for entity_id in ("pc", "pi", "ph", "p1"):
+        assert _link_targets(two, entity_id) == {"pn"}
+    assert _link_targets(two, "qc") == set()  # not rescanned, though Q has `notes`
+    assert _link_targets(two, "q1") == set()
+
+
+def test_adding_or_renaming_a_document_rescans_only_its_project(two, root):
+    make_document(two, "qn", "notes", project_id=Q)
+    make_document(two, "qr", "renamed", project_id=Q)
+    make_card(two, "qc", description="[[notes]] and [[renamed]]", project_id=Q)
+    make_card(two, "pc", description="[[notes]] and [[renamed]]")
+    added = documents.add(two, P, root, _write(root, "docs/notes.md", ""))
+    assert _link_targets(two, "pc") == {added.id}
+    assert _link_targets(two, "qc") == set()
+    old = documents.add(two, P, root, _write(root, "docs/old.md", ""))
+    (root / "docs" / "old.md").rename(root / "docs" / "renamed.md")
+    documents.update(two, P, root, old.id, new_path=root / "docs" / "renamed.md")
+    assert _link_targets(two, "pc") == {added.id, old.id}
+    assert _link_targets(two, "qc") == set()
+
+
+def test_pretty_renders_stem_links_against_the_owning_project(notes):
+    make_card(notes, "qc", description="see [[notes]]", project_id=Q)
+    _comment(notes, "k-q", "qc", "also [[notes]]")
+    shown = views.detail(notes, "qc")
+    out = pretty.render_detail(notes, shown)
+    assert "see [[Q notes]]" in out
+    assert "  also [[Q notes]]" in out
+    assert "  also [[Q notes]]" in pretty.render_comments(notes, shown["comments"])
+    assert pretty.text(notes, P, "[[notes]]") == "[[P notes]]"

@@ -1,11 +1,11 @@
 import sqlite3
 
-from brd import entities, links, refs
+from brd import db, entities, links, refs
 
 
-def text(conn: sqlite3.Connection, value: str | None) -> str:
+def text(conn: sqlite3.Connection, project_id: str | None, value: str | None) -> str:
     def display(token: links.LinkToken) -> str | None:
-        dst = refs.resolve(conn, token.target)
+        dst = refs.resolve(conn, project_id, token.target)
         return entities.title_of(conn, dst) if dst else None
 
     return links.render(value, display)
@@ -33,11 +33,18 @@ def _blocker(conn: sqlite3.Connection, blocker_id: str) -> str:
     return f"[[{title}]] (card)"
 
 
+def _owner_id(conn: sqlite3.Connection, entity_id: str) -> str | None:
+    # Render stems against the project owning the text, as reindex resolves them.
+    owner = db.owner_of(conn, entity_id)
+    return owner.id if owner else None
+
+
 def _comment_lines(conn: sqlite3.Connection, items: list[dict]) -> list[str]:
     lines = []
     for comment in items:
         lines.append(f"{comment['author']} · {_stamp(comment['created_at'])}")
-        lines.extend(f"  {line}" for line in text(conn, comment["body"]).splitlines())
+        body = text(conn, _owner_id(conn, comment["entity_id"]), comment["body"])
+        lines.extend(f"  {line}" for line in body.splitlines())
     return lines
 
 
@@ -64,7 +71,7 @@ def render_detail(conn: sqlite3.Connection, data: dict) -> str:
 
     parts = [header, *[line for line in extra if line]]
     if body:
-        parts += ["", text(conn, body)]
+        parts += ["", text(conn, _owner_id(conn, data["id"]), body)]
     ref_lines = [
         line
         for line in (
