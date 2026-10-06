@@ -26,6 +26,10 @@ brd show <id>                             # full detail of a card, issue, or doc
 brd update <card-id> --status done        # move a card forward (todo, in_progress, done, merged, canceled, archived)
 brd delete <id>                           # delete (--cascade for cards with children)
 brd projects                              # list all registered projects
+brd init --relink <old-path-or-id>        # after a repo moved
+brd forget --project <id>                 # forget a project whose directory is gone
+brd export --all > board.json             # snapshot every project
+brd import --yes board.json               # restore it on another machine
 
 brd issue open --title "Grammar is ambiguous" --blocks <card-id>
 brd issue close <issue-id> --reason wontfix
