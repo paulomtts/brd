@@ -104,9 +104,10 @@ def reindex_mentions(conn: sqlite3.Connection, project_id: str, stem: str) -> No
         reindex(conn, entity_id)
 
 
-def add_explicit(conn: sqlite3.Connection, src_id: str, dst_id: str) -> None:
-    entities.require(conn, src_id)
-    entities.require(conn, dst_id)
+def add_explicit(conn: sqlite3.Connection, project_id: str, src_id: str, dst_id: str) -> None:
+    entities.require_in_project(conn, project_id, src_id)
+    # Ref targets stay in the current project until S4 lifts the check.
+    entities.require_in_project(conn, project_id, dst_id)
     if src_id == dst_id:
         raise SelfReferenceError(f"{src_id} can't reference itself")
     conn.execute(
@@ -116,8 +117,10 @@ def add_explicit(conn: sqlite3.Connection, src_id: str, dst_id: str) -> None:
     conn.commit()
 
 
-def remove_explicit(conn: sqlite3.Connection, src_id: str, dst_id: str) -> None:
-    entities.require(conn, src_id)
+def remove_explicit(conn: sqlite3.Connection, project_id: str, src_id: str, dst_id: str) -> None:
+    # Only the source is checked: like `unblock --by`, an edge to another
+    # project's entity can still be removed.
+    entities.require_in_project(conn, project_id, src_id)
     conn.execute(
         "DELETE FROM refs WHERE src_id = ? AND dst_id = ? AND origin = 'explicit'",
         (src_id, dst_id),

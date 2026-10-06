@@ -415,6 +415,18 @@ SCOPED_REFUSED = [
         lambda c: cli_cards.delete_entity(c, P, "qi", False), IssueNotFoundError, "qi", "issue",
         id="delete_entity_issue",
     ),
+    pytest.param(
+        lambda c: refs.add_explicit(c, P, "q1", "p1"), CardNotFoundError, "q1", "card",
+        id="ref_add_foreign_source",
+    ),
+    pytest.param(
+        lambda c: refs.add_explicit(c, P, "p1", "qi"), IssueNotFoundError, "qi", "issue",
+        id="ref_add_foreign_target",
+    ),
+    pytest.param(
+        lambda c: refs.remove_explicit(c, P, "q1", "p1"), CardNotFoundError, "q1", "card",
+        id="ref_remove_foreign_source",
+    ),
 ]
 
 
@@ -628,3 +640,15 @@ def test_pretty_renders_stem_links_against_the_owning_project(notes):
     assert "  also [[Q notes]]" in out
     assert "  also [[Q notes]]" in pretty.render_comments(notes, shown["comments"])
     assert pretty.text(notes, P, "[[notes]]") == "[[P notes]]"
+
+
+def test_ref_remove_checks_only_the_source(two):
+    two.executemany(
+        "INSERT INTO refs (src_id, dst_id, origin) VALUES (?, ?, 'explicit')",
+        [("q1", "p1"), ("p1", "q1")],
+    )
+    two.commit()
+    with pytest.raises(CardNotFoundError, match=_foreign("q1")):
+        refs.remove_explicit(two, P, "q1", "p1")
+    refs.remove_explicit(two, P, "p1", "q1")  # a foreign target: the edge still goes
+    assert [tuple(r) for r in two.execute("SELECT src_id, dst_id FROM refs")] == [("q1", "p1")]

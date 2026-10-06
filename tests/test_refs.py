@@ -53,7 +53,7 @@ def test_reindex_is_idempotent(pconn):
 def test_reindex_preserves_explicit_refs(pconn):
     make_card(pconn, B)
     make_card(pconn, A, description=f"[[{B}]]")
-    refs.add_explicit(pconn, A, B)
+    refs.add_explicit(pconn, PROJECT.id, A, B)
     pconn.execute("UPDATE cards SET description = NULL WHERE id = ?", (A,))
     refs.reindex(pconn, A)
     assert out(pconn, A) == {(B, "explicit")}
@@ -103,19 +103,19 @@ def test_deleted_target_disappears_from_refs(pconn):
 def test_add_explicit_validates(pconn):
     make_card(pconn, A)
     with pytest.raises(SelfReferenceError):
-        refs.add_explicit(pconn, A, A)
+        refs.add_explicit(pconn, PROJECT.id, A, A)
     with pytest.raises(EntityNotFoundError):
-        refs.add_explicit(pconn, A, B)
+        refs.add_explicit(pconn, PROJECT.id, A, B)
     with pytest.raises(EntityNotFoundError):
-        refs.add_explicit(pconn, B, A)
+        refs.add_explicit(pconn, PROJECT.id, B, A)
 
 
 def test_remove_explicit(pconn):
     make_card(pconn, A)
     make_card(pconn, B)
-    refs.add_explicit(pconn, A, B)
-    refs.add_explicit(pconn, A, B)  # idempotent
-    refs.remove_explicit(pconn, A, B)
+    refs.add_explicit(pconn, PROJECT.id, A, B)
+    refs.add_explicit(pconn, PROJECT.id, A, B)  # idempotent
+    refs.remove_explicit(pconn, PROJECT.id, A, B)
     assert refs.outgoing(pconn, A) == []
 
 

@@ -318,8 +318,8 @@ def test_delete_card_cascade_removes_incoming_edges_of_every_deleted_card(conn):
     core.block_card(conn, PROJECT.id, outsider.id, child.id)
     core.block_card(conn, PROJECT.id, outsider.id, grandchild.id)
     core.block_card(conn, PROJECT.id, outsider.id, unrelated.id)
-    _refs.add_explicit(conn, outsider.id, parent.id)
-    _refs.add_explicit(conn, outsider.id, grandchild.id)
+    _refs.add_explicit(conn, PROJECT.id, outsider.id, parent.id)
+    _refs.add_explicit(conn, PROJECT.id, outsider.id, grandchild.id)
     conn.commit()
     conn.execute("PRAGMA foreign_keys=OFF")
 
@@ -586,7 +586,7 @@ def test_update_card_removing_link_drops_link_ref_but_keeps_explicit(conn):
     target = core.create_card(conn, PROJECT.id, title="Target")
     other = core.create_card(conn, PROJECT.id, title="Other")
     source = core.create_card(conn, PROJECT.id, title="Source", description=f"[[{target.id}]] [[{other.id}]]")
-    _refs.add_explicit(conn, source.id, other.id)
+    _refs.add_explicit(conn, PROJECT.id, source.id, other.id)
     core.update_card(conn, PROJECT.id, source.id, description="no links now")
     assert {(r["id"], r["origin"]) for r in _refs.outgoing(conn, source.id)} == {
         (other.id, "explicit")

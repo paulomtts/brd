@@ -57,7 +57,7 @@ def test_delete_issue_removes_incoming_edges_without_fk_cascade(pconn):
     make_card(pconn, "blocked")
     make_card(pconn, "citer")
     issue = issues.open_issue(pconn, PROJECT.id, "Q", blocks=["blocked"])
-    refs.add_explicit(pconn, "citer", issue.id)
+    refs.add_explicit(pconn, PROJECT.id, "citer", issue.id)
     pconn.commit()
     pconn.execute("PRAGMA foreign_keys=OFF")
 

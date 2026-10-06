@@ -891,3 +891,12 @@ def test_document_commands_are_scoped_to_this_project(project, foreign_entities)
     assert ok("show", doc)["title"] == "notes"
     assert (project / "docs" / "notes.md").read_text() == "mine"
     assert [d["id"] for d in ok("export")["documents"]] == [mine]
+
+
+def test_ref_commands_are_scoped_to_this_project(foreign_entities):
+    mine = ok("add", "--title", "mine")["id"]
+    _refused("ref", "add", foreign_entities["card"], mine)
+    _refused("ref", "add", mine, foreign_entities["issue"], error_type="IssueNotFoundError")
+    _refused("ref", "remove", foreign_entities["card"], mine)
+    assert ok("show", mine)["refs"] == []
+    assert ok("show", foreign_entities["card"])["refs"] == []

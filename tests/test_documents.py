@@ -251,7 +251,7 @@ def test_delete_document_removes_incoming_refs_without_fk_cascade(pconn, root):
     path = write(root, "docs/a.md", "v1")
     doc = documents.add(pconn, PROJECT.id, root, path)
     explicit = core.create_card(pconn, PROJECT.id, title="Explicit")
-    refs.add_explicit(pconn, explicit.id, doc.id)
+    refs.add_explicit(pconn, PROJECT.id, explicit.id, doc.id)
     linker = core.create_card(pconn, PROJECT.id, title="Linker", description="see [[a]]")
     assert pconn.execute(
         "SELECT COUNT(*) FROM refs WHERE dst_id = ?", (doc.id,)

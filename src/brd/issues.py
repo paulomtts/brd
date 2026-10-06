@@ -97,7 +97,7 @@ def open_issue(
             (issue.id, issue.title, issue.body, issue.status, None, now, now),
         )
     for ref_id in ref_ids:
-        refs.add_explicit(conn, issue.id, ref_id)
+        refs.add_explicit(conn, project_id, issue.id, ref_id)
     for card_id in blocks:
         core.block_card(conn, project_id, card_id, issue.id)
     if body:
