@@ -26,19 +26,16 @@ def _card_owner(card_id):
     return tuple(row) if row else None
 
 
-def test_init_project_creates_brd_db_and_gitignored_marker(tmp_path, monkeypatch):
+def test_init_project_writes_nothing_into_the_repo(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
     repo = tmp_path / "myrepo"
     repo.mkdir()
 
     project = master.init_project(repo)
 
-    marker = repo / ".brd"
-    assert marker.is_file()
-    assert marker.read_text() == ""
+    assert list(repo.iterdir()) == []
     assert project.name == "myrepo"
     assert project.root_path == str(repo)
-
     db_path = paths.brd_db_path()
     assert db_path.is_file()
     assert str(db_path).startswith(str(tmp_path / "data"))
@@ -48,22 +45,45 @@ def test_init_project_creates_brd_db_and_gitignored_marker(tmp_path, monkeypatch
     finally:
         conn.close()
 
-    gitignore = repo / ".gitignore"
-    assert gitignore.exists()
-    assert ".brd" in gitignore.read_text().splitlines()
+
+LEGACY_ID = "07a7d240-444a-4b71-b585-b5bc7b50fdf3"
 
 
-def test_init_project_appends_to_existing_gitignore_once(tmp_path, monkeypatch):
+def test_init_project_leaves_gitignore_and_old_markers_alone(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
-    repo = tmp_path / "myrepo"
-    repo.mkdir()
-    (repo / ".gitignore").write_text("__pycache__/\n")
+    # The original design: a .brd file holding a UUID that keys a central board.
+    uuid_repo = tmp_path / "uuid-repo"
+    uuid_repo.mkdir()
+    gitignore_bytes = b"__pycache__/"  # no trailing newline: the old append added one
+    (uuid_repo / ".gitignore").write_bytes(gitignore_bytes)
+    (uuid_repo / ".brd").write_text(f"{LEGACY_ID}\n")
+    old_projects_dir = tmp_path / "data" / "brd" / "projects"
+    old_projects_dir.mkdir(parents=True)
+    legacy = db.connect(old_projects_dir / f"{LEGACY_ID}.db")
+    db.init_project_schema(legacy, PROJECT)
+    make_card(legacy, "c1", title="Old card")
+    legacy.close()
+    # The in-repo design: a .brd/ directory holding board.db.
+    dir_repo = tmp_path / "dir-repo"
+    brd_dir = dir_repo / ".brd"
+    brd_dir.mkdir(parents=True)
+    in_repo = db.connect(brd_dir / "board.db")
+    db.init_project_schema(in_repo, PROJECT)
+    make_card(in_repo, "c2", title="In-repo card")
+    in_repo.close()
+    board_bytes = (brd_dir / "board.db").read_bytes()
 
-    master.init_project(repo)
+    master.init_project(uuid_repo)
+    master.init_project(dir_repo)
 
-    lines = (repo / ".gitignore").read_text().splitlines()
-    assert lines.count(".brd") == 1
-    assert "__pycache__/" in lines
+    assert sorted(p.name for p in uuid_repo.iterdir()) == [".brd", ".gitignore"]
+    assert (uuid_repo / ".gitignore").read_bytes() == gitignore_bytes
+    assert (uuid_repo / ".brd").read_text() == f"{LEGACY_ID}\n"
+    assert [p.name for p in dir_repo.iterdir()] == [".brd"]
+    assert brd_dir.is_dir()
+    assert (brd_dir / "board.db").read_bytes() == board_bytes
+    assert _card_owner("c1") is None
+    assert _card_owner("c2") is None
 
 
 def test_init_project_twice_preserves_existing_cards(tmp_path, monkeypatch):
@@ -96,54 +116,6 @@ def test_init_project_upserts_name_on_rerun(tmp_path, monkeypatch):
     assert [p.name for p in all_projects] == ["second-name"]
 
 
-def test_init_project_migrates_legacy_uuid_marker_preserving_cards(
-    tmp_path, monkeypatch
-):
-    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
-    repo = tmp_path / "myrepo"
-    repo.mkdir()
-
-    legacy_id = "07a7d240-444a-4b71-b585-b5bc7b50fdf3"
-    (repo / ".brd").write_text(f"{legacy_id}\n")
-
-    old_projects_dir = tmp_path / "data" / "brd" / "projects"
-    old_projects_dir.mkdir(parents=True)
-    old_db_path = old_projects_dir / f"{legacy_id}.db"
-    old_conn = db.connect(old_db_path)
-    db.init_project_schema(old_conn, PROJECT)
-    make_card(old_conn, "c1", title="Old card")
-    old_conn.close()
-
-    project = master.init_project(repo)
-
-    assert _card_owner("c1") == ("Old card", project.id)
-    assert (repo / ".brd").read_text() == ""
-
-
-def test_init_project_migrates_in_repo_format_preserving_cards(tmp_path, monkeypatch):
-    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
-    repo = tmp_path / "myrepo"
-    repo.mkdir()
-
-    # Simulate a repo committed under the in-repo storage design: .brd/ is a
-    # directory holding board.db, and it's absent from .gitignore.
-    brd_dir = repo / ".brd"
-    brd_dir.mkdir()
-    old_db_path = brd_dir / "board.db"
-    old_conn = db.connect(old_db_path)
-    db.init_project_schema(old_conn, PROJECT)
-    make_card(old_conn, "c1", title="In-repo card")
-    old_conn.close()
-
-    project = master.init_project(repo)
-
-    assert brd_dir.is_file()  # the directory is gone; .brd is a marker file again
-    assert _card_owner("c1") == ("In-repo card", project.id)
-
-    gitignore_lines = (repo / ".gitignore").read_text().splitlines()
-    assert ".brd" in gitignore_lines
-
-
 def test_list_all_projects(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
     repo1 = tmp_path / "repo1"
@@ -157,16 +129,19 @@ def test_list_all_projects(tmp_path, monkeypatch):
     assert {p.name for p in results} == {"repo1", "repo2"}
 
 
-def test_forget_project_removes_marker_and_registry_row(tmp_path, monkeypatch):
+def test_forget_project_removes_the_registry_row_and_leaves_a_marker_alone(
+    tmp_path, monkeypatch
+):
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
     repo = tmp_path / "myrepo"
     repo.mkdir()
     master.init_project(repo)
+    (repo / ".brd").write_text("")
 
     forgotten = master.forget_project(repo)
 
     assert forgotten.name == "myrepo"
-    assert not (repo / ".brd").exists()
+    assert (repo / ".brd").read_text() == ""
     assert master.list_all_projects() == []
 
 
@@ -521,26 +496,32 @@ def test_resolve_project_writes_nothing(tmp_path, monkeypatch):
         conn.close()
 
 
-def test_copy_cards_drops_dangling_legacy_edges(tmp_path, monkeypatch):
+def test_init_project_inside_a_registered_project_adds_a_nested_one(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
-    repo = tmp_path / "myrepo"
-    brd_dir = repo / ".brd"
-    brd_dir.mkdir(parents=True)
-    old_conn = db.connect(brd_dir / "board.db")
-    db.init_project_schema(old_conn, PROJECT)
-    make_card(old_conn, "c1")
-    make_card(old_conn, "c2")
-    db.add_blocked_by_edge(old_conn, "c2", "c1")
-    db.add_blocked_by_edge(old_conn, "c1", "ghost")  # the legacy board's dangling edge
-    old_conn.close()
+    outer = tmp_path / "r"
+    inner = outer / "sub"
+    (inner / "x").mkdir(parents=True)
 
-    project = master.init_project(repo)
+    outer_project = master.init_project(outer)
+    inner_project = master.init_project(inner)
 
-    conn = _brd()
-    try:
-        entities = conn.execute("SELECT id, project_id FROM entities ORDER BY id").fetchall()
-        edges = conn.execute("SELECT card_id, blocks_on_id FROM blocked_by").fetchall()
-    finally:
-        conn.close()
-    assert [tuple(r) for r in entities] == [("c1", project.id), ("c2", project.id)]
-    assert [tuple(r) for r in edges] == [("c2", "c1")]
+    assert inner_project.id != outer_project.id
+    assert {p.root_path for p in master.list_all_projects()} == {str(outer), str(inner)}
+    assert _resolve(inner / "x") == inner_project
+    assert list(inner.iterdir()) == [inner / "x"]
+
+
+def test_forgetting_a_nested_project_hands_its_tree_back_to_the_outer_one(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    outer = tmp_path / "r"
+    inner = outer / "sub"
+    (inner / "x").mkdir(parents=True)
+    outer_project = master.init_project(outer)
+    master.init_project(inner)
+
+    master.forget_project(inner)
+
+    assert _resolve(inner / "x") == outer_project
+    assert master.list_all_projects() == [outer_project]

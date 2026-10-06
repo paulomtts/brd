@@ -55,7 +55,9 @@ def test_init_registers_project(isolated_env):
     payload = json.loads(result.stdout)
     assert payload["ok"] is True
     assert payload["data"]["name"] == "myrepo"
-    assert (isolated_env / ".brd").is_file()
+    assert set(payload["data"]) == {"id", "name", "root_path", "created_at"}
+    assert payload["data"]["root_path"] == str(isolated_env)
+    assert list(isolated_env.iterdir()) == []
     conn = db.connect(paths.brd_db_path())
     try:
         stored = conn.execute("SELECT name, root_path FROM projects").fetchall()

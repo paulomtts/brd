@@ -9,8 +9,6 @@ from brd import consolidate, db, paths
 from brd.models import Project
 from brd.errors import ProjectNotFoundError  # noqa: F401  (re-exported)
 
-MARKER_FILENAME = ".brd"
-
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -68,59 +66,13 @@ def _set_up(conn: sqlite3.Connection) -> consolidate.Report | None:
         conn.execute("PRAGMA foreign_keys=ON")
 
 
-def _copy_cards(conn: sqlite3.Connection, old_db_path: Path, project: Project) -> None:
-    """Copy a legacy board's cards, and the edges between them, into brd.db
-    under project, whose projects row is already there."""
-    old_conn = db.connect(old_db_path)
-    try:
-        copied: set[str] = set()
-        with conn:
-            for row in old_conn.execute("SELECT * FROM cards"):
-                db.insert_entity(conn, project.id, row["id"], "card")
-                conn.execute(
-                    "INSERT INTO cards (id, title, description, status, "
-                    "parent_id, created_at, updated_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    tuple(row),
-                )
-                copied.add(row["id"])
-            for row in old_conn.execute("SELECT card_id, blocks_on_id FROM blocked_by"):
-                # Same rule as _migrate_to_v1: keep only edges between copied
-                # cards. Edge targets have no FK, so nothing else would stop one.
-                if row["card_id"] in copied and row["blocks_on_id"] in copied:
-                    conn.execute(
-                        "INSERT INTO blocked_by (card_id, blocks_on_id) VALUES (?, ?)",
-                        tuple(row),
-                    )
-    finally:
-        old_conn.close()
-
-
-def _migrate_in_repo_format(conn: sqlite3.Connection, marker_dir: Path, project: Project) -> None:
-    """Migrate the in-repo format (.brd/ directory with board.db, committed
-    to git) back to central storage."""
-    old_db_path = marker_dir / "board.db"
-    if old_db_path.is_file():
-        _copy_cards(conn, old_db_path, project)
-    shutil.rmtree(marker_dir)
-
-
-def _migrate_legacy_uuid_marker(conn: sqlite3.Connection, marker_file: Path, project: Project) -> None:
-    """Migrate the original design (.brd file holding a UUID, cards in a
-    central per-project db keyed by that UUID)."""
-    legacy_id = marker_file.read_text().strip()
-    old_db_path = paths.data_dir() / "projects" / f"{legacy_id}.db"
-    if legacy_id and old_db_path.is_file():
-        _copy_cards(conn, old_db_path, project)
-
-
 def init_project(root_path: Path, name: str | None = None) -> Project:
-    marker = root_path / MARKER_FILENAME
+    """Register root_path in brd.db. Writes nothing under root_path."""
     conn = connect()
     try:
         # A root that is already registered keeps its id and created_at;
         # only the name changes.
-        project = db.upsert_project(
+        return db.upsert_project(
             conn,
             Project(
                 id=db.new_project_id(),
@@ -129,24 +81,8 @@ def init_project(root_path: Path, name: str | None = None) -> Project:
                 created_at=_now(),
             ),
         )
-        if marker.is_dir():
-            _migrate_in_repo_format(conn, marker, project)
-        elif marker.is_file():
-            _migrate_legacy_uuid_marker(conn, marker, project)
     finally:
         conn.close()
-
-    marker.write_text("")
-
-    gitignore = root_path / ".gitignore"
-    existing_lines = gitignore.read_text().splitlines() if gitignore.exists() else []
-    if MARKER_FILENAME not in existing_lines:
-        with gitignore.open("a") as f:
-            if existing_lines and existing_lines[-1] != "":
-                f.write("\n")
-            f.write(f"{MARKER_FILENAME}\n")
-
-    return project
 
 
 def resolve_project(conn: sqlite3.Connection, start: Path) -> Project:
@@ -188,10 +124,6 @@ def forget_project(root_path: Path) -> Project:
 
     for doc_id in doc_ids:
         (paths.docs_dir() / f"{doc_id}.md").unlink(missing_ok=True)
-
-    marker = root_path / MARKER_FILENAME
-    if marker.is_file():
-        marker.unlink()
 
     return project
 
