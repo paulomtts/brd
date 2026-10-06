@@ -829,3 +829,15 @@ def test_listings_exclude_a_foreign_card(foreign):
 def test_next_and_tree_refuse_a_foreign_root(foreign):
     _refused("next", "--parent", foreign)
     _refused("tree", foreign)
+
+
+def test_show_is_global_and_names_the_owner(foreign):
+    mine = ok("add", "--title", "mine")["id"]
+    assert ok("show", foreign)["project"] == {
+        "id": OTHER_PROJECT.id,
+        "name": OTHER_PROJECT.name,
+    }
+    registered = ok("projects")[0]
+    assert ok("show", mine)["project"] == {"id": registered["id"], "name": registered["name"]}
+    assert "project" not in ok("list")[0]
+    assert err("show", "nope") == "CardNotFoundError"

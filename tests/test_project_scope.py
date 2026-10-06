@@ -290,3 +290,34 @@ def _tree_ids(nodes):
 
 def test_export_cards_hold_only_the_projects_cards(two, tmp_path):
     assert set(_tree_ids(snapshot.export(two, P, tmp_path)["cards"])) == {"p1", "p2"}
+
+
+@pytest.mark.parametrize(
+    ("entity_id", "owner", "expected"),
+    [
+        ("p1", PROJECT, lambda c, root: views.card_detail(c, db.get_card(c, "p1"))),
+        ("q1", OTHER_PROJECT, lambda c, root: views.card_detail(c, db.get_card(c, "q1"))),
+        ("qi", OTHER_PROJECT, lambda c, root: views.issue_detail(c, issues.require(c, "qi"))),
+        (
+            "qd",
+            OTHER_PROJECT,
+            lambda c, root: views.document_detail(
+                c, documents.require(c, "qd"), documents.sync(c, root, documents.require(c, "qd"))
+            ),
+        ),
+    ],
+    ids=["own_card", "foreign_card", "foreign_issue", "foreign_document"],
+)
+def test_detail_is_global_and_names_the_owner(two, tmp_path, entity_id, owner, expected):
+    shown = views.detail(two, tmp_path, entity_id)
+    assert shown.pop("project") == {"id": owner.id, "name": owner.name}
+    assert shown == expected(two, tmp_path)
+
+
+def test_detail_of_a_missing_id_is_unchanged(two, tmp_path):
+    with pytest.raises(CardNotFoundError, match=r"^no card, issue, or document with id nope$"):
+        views.detail(two, tmp_path, "nope")
+
+
+def test_card_detail_has_no_project_key(two):
+    assert "project" not in views.card_detail(two, db.get_card(two, "p1"))

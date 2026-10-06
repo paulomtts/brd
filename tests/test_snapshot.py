@@ -55,6 +55,13 @@ def test_round_trip_into_fresh_project(populated, tmp_path, monkeypatch):
     assert after[populated["doc"]["id"]]["source_state"] == "missing"
     for data in (before, after):
         data[populated["doc"]["id"]].pop("source_state")
+    # `show` names the owning project, which differs between the two boards.
+    assert {s["project"]["id"] for s in before.values()}.isdisjoint(
+        {s["project"]["id"] for s in after.values()}
+    )
+    for data in (before, after):
+        for shown in data.values():
+            shown.pop("project")
     assert before == after
     ok("doc", "restore", populated["doc"]["id"])
     assert (other / "docs" / "notes.md").read_text().startswith("# Notes")

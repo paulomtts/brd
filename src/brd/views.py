@@ -78,11 +78,15 @@ def detail(conn: sqlite3.Connection, root: Path, entity_id: str) -> dict:
     kind = entities.kind_of(conn, entity_id)
     if kind is None:
         raise CardNotFoundError(f"no card, issue, or document with id {entity_id}")
+    # show is global: any project's entity, labelled with the project owning it.
+    owner = db.owner_of(conn, entity_id)
     # Documents may have been edited on disk; sync them all so backlinks
     # (referenced_by) reflect their current content.
     results = documents.sync_all(conn, root)
     if kind == "document":
-        return document_detail(conn, documents.require(conn, entity_id), results[entity_id])
-    if kind == "issue":
-        return issue_detail(conn, issues.require(conn, entity_id))
-    return card_detail(conn, db.get_card(conn, entity_id))
+        shown = document_detail(conn, documents.require(conn, entity_id), results[entity_id])
+    elif kind == "issue":
+        shown = issue_detail(conn, issues.require(conn, entity_id))
+    else:
+        shown = card_detail(conn, db.get_card(conn, entity_id))
+    return {**shown, "project": {"id": owner.id, "name": owner.name}}
