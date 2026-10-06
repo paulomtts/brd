@@ -1,5 +1,6 @@
 import sqlite3
 
+from brd import db
 from brd.errors import BrdError, EntityNotFoundError
 
 # Which kinds support which shared feature. Enabling a feature for another
@@ -55,5 +56,6 @@ def summary(conn: sqlite3.Connection, entity_id: str) -> dict | None:
 
 
 def delete(conn: sqlite3.Connection, entity_id: str) -> None:
+    db.delete_incoming_edges(conn, entity_id)
     conn.execute("DELETE FROM entities WHERE id = ?", (entity_id,))
     conn.commit()

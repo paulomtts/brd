@@ -244,3 +244,26 @@ def test_restore_and_sync_refuse_a_source_path_outside_root(pconn, root, escape)
     with pytest.raises(PathOutsideProjectError):
         documents.sync(pconn, root, documents.require(pconn, doc.id))
     assert documents.backup_path(pconn, doc.id).read_text() == "backup"
+
+
+def test_delete_document_removes_incoming_refs_without_fk_cascade(pconn, root):
+    path = write(root, "docs/a.md", "v1")
+    doc = documents.add(pconn, root, path)
+    explicit = core.create_card(pconn, title="Explicit")
+    refs.add_explicit(pconn, explicit.id, doc.id)
+    linker = core.create_card(pconn, title="Linker", description="see [[a]]")
+    assert pconn.execute(
+        "SELECT COUNT(*) FROM refs WHERE dst_id = ?", (doc.id,)
+    ).fetchone()[0] == 2
+    pconn.commit()
+    pconn.execute("PRAGMA foreign_keys=OFF")
+
+    documents.delete(pconn, doc.id)
+
+    assert pconn.execute(
+        "SELECT COUNT(*) FROM refs WHERE dst_id = ?", (doc.id,)
+    ).fetchone()[0] == 0
+    assert refs.outgoing(pconn, explicit.id) == []
+    assert refs.outgoing(pconn, linker.id) == []
+    assert not documents.backup_path(pconn, doc.id).exists()
+    assert path.read_text() == "v1"
