@@ -142,6 +142,7 @@ def test_old_tree_snapshot_still_imports(project, tmp_path, monkeypatch):
     assert (result["imported"], result["cards"]) == (2, 2)
     assert len(result["projects"]) == 1 and result["not_found_edges"] == 0
     assert err("import", snapshot) == "ProjectNotEmptyError"
+    assert ok("import", snapshot, "--yes")["projects"][0]["removed"]["cards"] == 2
 
 
 def test_import_rejects_unknown_format(project, tmp_path):
@@ -1172,3 +1173,107 @@ def test_malformed_entity_in_a_replace_leaves_old_state_and_backups_intact(popul
     assert error["message"].startswith("malformed snapshot: ")
     assert _backups() == backups
     assert _board() == before
+
+
+def test_incoming_edges_survive_replacement_and_reconnect(project, tmp_path, monkeypatch):
+    a1 = ok("add", "--title", "a1")["id"]
+    b_root, _ = _another_project(tmp_path, monkeypatch, "bproj")
+    b1 = ok("add", "--title", "b1")["id"]
+    ok("block", b1, "--by", a1)
+    ok("ref", "add", b1, a1)
+    monkeypatch.chdir(project)
+    ok("update", a1, "--status", "done")  # a finished blocker: b1 resolves todo
+    full = ok("export")
+    without = copy.deepcopy(full)
+    _entry(without)["cards"] = []
+    full_file = _snapshot_file(tmp_path, full, "full.json")
+    without_file = _snapshot_file(tmp_path, without, "without.json")
+
+    def b1_view():
+        monkeypatch.chdir(b_root)
+        shown = ok("show", b1)
+        monkeypatch.chdir(project)
+        return (
+            [(b["id"], b["status"]) for b in shown["blockers"]],
+            shown["status"],
+            [r["id"] for r in shown["refs"] if r["origin"] == "explicit"],
+        )
+
+    assert b1_view() == ([(a1, "done")], "todo", [a1])
+    result = ok("import", without_file, "--yes")
+    assert result["projects"][0]["removed"]["cards"] == 1
+    assert result["not_found_edges"] == 0  # b1's edge is not from the file
+    assert b1_view() == ([(a1, "not-found")], "blocked", [a1])
+
+    ok("import", full_file, "--yes")
+    assert b1_view() == ([(a1, "done")], "todo", [a1])
+
+
+def test_replace_keeps_the_project_row(populated, tmp_path):
+    data = ok("export")
+    _entry(data)["project"].update(name="renamed", created_at=T)
+    snapshot = _snapshot_file(tmp_path, data)
+    before = ok("projects")
+    result = ok("import", snapshot, "--yes")
+    assert ok("projects") == before
+    assert result["projects"][0]["project"] == before[0]
+
+
+def test_replace_never_touches_doc_source_files(project, populated, tmp_path):
+    data = ok("export")
+    _entry(data)["documents"].append(
+        {"id": "d9000000-0000-4000-8000-000000000009", "title": "Absent",
+         "source_path": "docs/absent.md", "content": "absent", "content_hash": "h",
+         "created_at": T, "updated_at": T}
+    )
+    snapshot = _snapshot_file(tmp_path, data)
+    write(project, "docs/notes.md", "local edits")
+    write(project, "docs/other.md", "keep")
+    ok("import", snapshot, "--yes")
+    assert (project / "docs" / "notes.md").read_bytes() == b"local edits"
+    assert (project / "docs" / "other.md").read_bytes() == b"keep"
+    assert not (project / "docs" / "absent.md").exists()
+
+
+def test_replacing_a_project_frees_its_document_paths_and_stems(populated, tmp_path, monkeypatch):
+    snapshot = _snapshot_file(tmp_path, ok("export"))
+    other = _fresh_project(tmp_path, monkeypatch)
+    write(other, "docs/notes.md", "local")
+    ok("doc", "add", "docs/notes.md")
+    result = ok("import", snapshot, "--yes")
+    assert result["projects"][0]["removed"]["documents"] == 1
+    assert [d["id"] for d in ok("doc", "list")] == [populated["doc"]["id"]]
+    assert (other / "docs" / "notes.md").read_text() == "local"
+
+
+def test_round_trip_across_two_machines(project, populated, tmp_path, monkeypatch):
+    a_card = populated["card"]["id"]
+    _another_project(tmp_path, monkeypatch, "bproj")
+    b_card = ok("add", "--title", "B card")["id"]
+    b_issue = ok("issue", "open", "--title", "B issue")["id"]
+    ok("block", b_card, "--by", a_card)
+    monkeypatch.chdir(project)
+    ok("ref", "add", a_card, b_issue)
+    machine1 = ok("export", "--all")
+    snapshot = _snapshot_file(tmp_path, machine1, "all.json")
+
+    def by_id(data):
+        return sorted(data["projects"], key=lambda entry: entry["project"]["id"])
+
+    # Machine 2: an empty install; the recorded roots exist on this disk.
+    _unregistered_dir(tmp_path, monkeypatch, "elsewhere", data_home="machine2")
+    result = invoke("import", snapshot, "--yes")
+    assert result.exit_code == 0, result.output
+    report = json.loads(result.stdout)["data"]
+    assert [item["registered"] for item in report["projects"]] == [True, True]
+    assert all(not any(item["removed"].values()) for item in report["projects"])
+    assert report["not_found_edges"] == 0
+    assert "replacing" not in result.stderr
+    assert by_id(ok("export", "--all")) == by_id(machine1)
+
+    # Re-importing the same file replaces both projects with themselves.
+    again = ok("import", snapshot, "--yes")
+    for item in again["projects"]:
+        assert item["registered"] is False
+        assert item["removed"] == {key: item[key] for key in ("cards", "issues", "documents", "comments")}
+    assert by_id(ok("export", "--all")) == by_id(machine1)
