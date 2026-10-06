@@ -971,7 +971,7 @@ def test_blocker_targets_may_live_in_another_project(foreign_entities):
 def test_show_pretty_renders_a_foreign_blocker(foreign):
     mine = ok("add", "--title", "mine")["id"]
     ok("block", mine, "--by", foreign)
-    assert "Foreign" in human("show", mine)
+    assert "blocked by: [[Foreign]] (card)" in human("show", mine)
 
 
 def test_issue_open_can_block_a_foreign_card(foreign):
