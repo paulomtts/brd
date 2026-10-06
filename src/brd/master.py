@@ -177,6 +177,17 @@ def registered_project(conn: sqlite3.Connection, root_path: Path) -> Project:
     return project
 
 
+def resolve_project(conn: sqlite3.Connection, start: Path) -> Project:
+    """The registered project whose root is start or its deepest ancestor."""
+    resolved = start.resolve()
+    project = db.deepest_project(conn, [str(p) for p in (resolved, *resolved.parents)])
+    if project is None:
+        raise ProjectNotFoundError(
+            f"no registered project at or above {resolved}; run `brd init` there"
+        )
+    return project
+
+
 def list_all_projects() -> list[Project]:
     conn = connect()
     try:

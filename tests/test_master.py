@@ -368,29 +368,172 @@ def test_forget_project_returns_project_with_its_id(tmp_path, monkeypatch):
 
     assert master.forget_project(repo) == project
 
+def _resolve(start):
+    conn = master.connect()
+    try:
+        return master.resolve_project(conn, start)
+    finally:
+        conn.close()
 
-def test_registered_project_returns_the_registered_row(tmp_path, monkeypatch):
+
+def _not_found(start):
+    return f"no registered project at or above {start.resolve()}; run `brd init` there"
+
+
+def test_resolve_project_at_the_registered_root(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
     repo = tmp_path / "myrepo"
     repo.mkdir()
     project = master.init_project(repo)
 
+    assert _resolve(repo) == project
+
+
+def test_resolve_project_from_a_nested_subdirectory(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    repo = tmp_path / "myrepo"
+    nested = repo / "a" / "b"
+    nested.mkdir(parents=True)
+    project = master.init_project(repo)
+
+    assert _resolve(nested) == project
+
+
+@pytest.mark.parametrize("deeper_first", [False, True])
+def test_resolve_project_picks_the_deepest_registered_root(tmp_path, monkeypatch, deeper_first):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    outer = tmp_path / "r"
+    inner = outer / "sub"
+    (inner / "x").mkdir(parents=True)
+    (outer / "other").mkdir()
+    if deeper_first:
+        inner_project = master.init_project(inner)
+        outer_project = master.init_project(outer)
+    else:
+        outer_project = master.init_project(outer)
+        inner_project = master.init_project(inner)
+
+    assert _resolve(inner / "x") == inner_project
+    assert _resolve(inner) == inner_project
+    assert _resolve(outer / "other") == outer_project
+    assert _resolve(outer) == outer_project
+
+
+def test_resolve_project_matches_whole_path_components(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    repo = tmp_path / "repo"
+    sibling = tmp_path / "repo2"
+    repo.mkdir()
+    sibling.mkdir()
+    master.init_project(repo)
+
+    with pytest.raises(master.ProjectNotFoundError):
+        _resolve(sibling)
+
+
+def test_resolve_project_with_nothing_registered_raises(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+
+    with pytest.raises(master.ProjectNotFoundError) as excinfo:
+        _resolve(tmp_path)
+
+    assert str(excinfo.value) == _not_found(tmp_path)
+
+
+def test_resolve_project_outside_any_root_names_the_path_and_brd_init(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    registered = tmp_path / "registered"
+    plain = tmp_path / "plain"
+    marked = tmp_path / "marked"
+    for directory in (registered, plain, marked):
+        directory.mkdir()
+    (marked / ".brd").write_text("")
+    master.init_project(registered)
+
+    with pytest.raises(master.ProjectNotFoundError) as plain_error:
+        _resolve(plain)
+    with pytest.raises(master.ProjectNotFoundError) as marked_error:
+        _resolve(marked)
+
+    assert str(plain_error.value) == _not_found(plain)
+    assert str(marked_error.value) == _not_found(marked)
+    assert "brd init" in str(plain_error.value)
+
+
+def test_resolve_project_treats_percent_and_underscore_literally(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    wild = tmp_path / "a_%b"
+    lookalike = tmp_path / "aXYb"
+    (wild / "x").mkdir(parents=True)
+    lookalike.mkdir()
+    project = master.init_project(wild)
+
+    assert _resolve(wild) == project
+    assert _resolve(wild / "x") == project
+    with pytest.raises(master.ProjectNotFoundError):
+        _resolve(lookalike)
+
+
+def test_resolve_project_follows_a_symlinked_start(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    repo = tmp_path / "repo"
+    (repo / "a").mkdir(parents=True)
+    project = master.init_project(repo)
+    link = tmp_path / "link"
+    link.symlink_to(repo, target_is_directory=True)
+
+    assert _resolve(link / "a") == project
+
+
+def test_resolve_project_reaches_a_project_registered_at_the_filesystem_root(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    repo = tmp_path / "repo"
+    repo.mkdir()
     conn = master.connect()
     try:
-        assert master.registered_project(conn, repo) == project
+        top = db.upsert_project(
+            conn, Project(db.new_project_id(), "top", "/", "2026-01-01T00:00:00+00:00")
+        )
+        deeper = db.upsert_project(
+            conn, Project(db.new_project_id(), "repo", str(repo), "2026-01-01T00:00:00+00:00")
+        )
+
+        assert master.resolve_project(conn, tmp_path) == top
+        assert master.resolve_project(conn, repo) == deeper
     finally:
         conn.close()
 
 
-def test_registered_project_raises_when_root_is_not_registered(tmp_path, monkeypatch):
+def test_resolve_project_ignores_a_brd_marker_in_an_unregistered_subdirectory(
+    tmp_path, monkeypatch
+):
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
-    repo = tmp_path / "myrepo"
-    repo.mkdir()
+    repo = tmp_path / "repo"
+    sub = repo / "sub"
+    sub.mkdir(parents=True)
+    project = master.init_project(repo)
+    (sub / ".brd").write_text("")
 
+    assert _resolve(sub) == project
+
+
+def test_resolve_project_writes_nothing(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    project = master.init_project(repo)
     conn = master.connect()
     try:
-        with pytest.raises(master.ProjectNotFoundError, match="brd init"):
-            master.registered_project(conn, repo)
+        before = conn.total_changes
+
+        assert master.resolve_project(conn, repo) == project
+        with pytest.raises(master.ProjectNotFoundError):
+            master.resolve_project(conn, tmp_path / "elsewhere")
+
+        assert conn.total_changes == before
+        assert not conn.in_transaction
     finally:
         conn.close()
 

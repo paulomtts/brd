@@ -509,6 +509,18 @@ def get_project(conn: sqlite3.Connection, root_path: str) -> Project | None:
     return _row_to_project(row) if row else None
 
 
+def deepest_project(conn: sqlite3.Connection, root_paths: list[str]) -> Project | None:
+    """The project registered at the longest of root_paths, or None. An exact
+    IN match, so `%` and `_` in a path are plain characters."""
+    marks = ", ".join("?" for _ in root_paths)
+    row = conn.execute(
+        f"SELECT * FROM projects WHERE root_path IN ({marks}) "
+        "ORDER BY length(root_path) DESC LIMIT 1",
+        root_paths,
+    ).fetchone()
+    return _row_to_project(row) if row else None
+
+
 def delete_project(conn: sqlite3.Connection, root_path: str) -> None:
     conn.execute("DELETE FROM projects WHERE root_path = ?", (root_path,))
     conn.commit()
