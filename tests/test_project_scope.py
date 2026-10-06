@@ -202,10 +202,6 @@ REFUSED = [
         id="block_card_foreign_source_foreign_target",
     ),
     pytest.param(
-        lambda c: issues.open_issue(c, P, "t", blocks=["p1", "q1"]), "q1", "card",
-        id="open_issue_foreign_blocks",
-    ),
-    pytest.param(
         lambda c: comments.add(c, P, "q1", "hi", "alice"), "q1", "card",
         id="comments_add_foreign_card",
     ),
@@ -344,6 +340,32 @@ def test_a_cycle_through_another_project_is_refused(two):
     # q1 is blocked by p2 (fixture), so p2 -> p1 would close p2 -> p1 -> q1 -> p2.
     with pytest.raises(CycleError, match=r"^blocking p2 on p1 would create a cycle$"):
         core.block_card(two, P, "p2", "p1")
+    assert _state(two) == before
+
+
+def test_an_issue_can_block_a_card_of_another_project(two):
+    # q-child inherits its parent's block, and q1 is blocked by p2 (fixture):
+    # release p2 first so q-child can resolve to todo once the issue closes.
+    core.update_card(two, P, "p2", status="done")
+    issue = issues.open_issue(two, P, "t", blocks=["p1", "q-child"])
+    assert db.owner_of(two, issue.id).id == P
+    assert issues.blocks_of(two, issue.id) == ["p1", "q-child"]
+    assert _status(two, "q-child") == "blocked"
+    assert "q-child" not in _next(two, Q)
+    issues.close(two, P, issue.id)
+    assert _status(two, "q-child") == "todo"
+    assert "q-child" in _next(two, Q)
+
+
+@pytest.mark.parametrize(
+    ("blocks", "bad"),
+    [(["q1", "qi"], "qi"), (["p1", "nope"], "nope"), (["p1", "qd"], "qd")],
+    ids=["foreign_issue", "missing", "foreign_document"],
+)
+def test_open_issue_refuses_a_blocks_id_that_is_no_card_and_writes_nothing(two, blocks, bad):
+    before = _state(two)
+    with pytest.raises(CardNotFoundError, match=rf"^no card with id {bad}$"):
+        issues.open_issue(two, P, "t", blocks=blocks)
     assert _state(two) == before
 
 

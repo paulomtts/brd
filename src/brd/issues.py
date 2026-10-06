@@ -86,7 +86,8 @@ def open_issue(
         # Ref targets stay in the current project until S4 lifts the check.
         entities.require_in_project(conn, project_id, ref_id)
     for card_id in blocks:
-        core.require_card(conn, project_id, card_id)
+        # The new issue is this project's; the card it blocks may be any project's.
+        core.require_any_card(conn, card_id)
     now = _now()
     issue = Issue(str(uuid.uuid4()), title, body, "open", None, now, now)
     with conn:
@@ -99,7 +100,7 @@ def open_issue(
     for ref_id in ref_ids:
         refs.add_explicit(conn, project_id, issue.id, ref_id)
     for card_id in blocks:
-        core.block_card(conn, project_id, card_id, issue.id)
+        core.add_block_edge(conn, card_id, issue.id)
     if body:
         refs.reindex(conn, issue.id)
     return issue

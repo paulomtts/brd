@@ -109,10 +109,16 @@ def _require_in_project(
         raise CardNotFoundError(entities.foreign_message(what, entity_id, owner))
 
 
-def require_card(conn: sqlite3.Connection, project_id: str, card_id: str) -> Card:
+def require_any_card(conn: sqlite3.Connection, card_id: str) -> Card:
+    # Whichever project owns it: for edge targets, which may be any project's.
     card = db.get_card(conn, card_id)
     if card is None:
         raise CardNotFoundError(f"no card with id {card_id}")
+    return card
+
+
+def require_card(conn: sqlite3.Connection, project_id: str, card_id: str) -> Card:
+    card = require_any_card(conn, card_id)
     _require_in_project(conn, project_id, card_id, "card")
     return card
 
@@ -218,14 +224,20 @@ def update_card(
     return require_card(conn, project_id, card_id)
 
 
-def block_card(
-    conn: sqlite3.Connection, project_id: str, card_id: str, blocker_id: str
-) -> None:
-    require_card(conn, project_id, card_id)
+def add_block_edge(conn: sqlite3.Connection, card_id: str, blocker_id: str) -> None:
+    # No ownership check on either side: `issue open --blocks` blocks another
+    # project's card. Callers that act on the card itself check it first.
     _require_blocker(conn, blocker_id)
     if would_create_block_cycle(conn, card_id, blocker_id):
         raise CycleError(f"blocking {card_id} on {blocker_id} would create a cycle")
     db.add_blocked_by_edge(conn, card_id, blocker_id)
+
+
+def block_card(
+    conn: sqlite3.Connection, project_id: str, card_id: str, blocker_id: str
+) -> None:
+    require_card(conn, project_id, card_id)
+    add_block_edge(conn, card_id, blocker_id)
 
 
 def unblock_card(

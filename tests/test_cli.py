@@ -974,9 +974,13 @@ def test_show_pretty_renders_a_foreign_blocker(foreign):
     assert "Foreign" in human("show", mine)
 
 
-def test_issue_open_refuses_a_foreign_blocks_card(foreign):
-    _refused("issue", "open", "--title", "q", "--blocks", foreign)
-    assert ok("issue", "list") == []
+def test_issue_open_can_block_a_foreign_card(foreign):
+    issue = ok("issue", "open", "--title", "q", "--blocks", foreign)
+    assert issue["blocks"] == [foreign]
+    shown = ok("show", foreign)
+    assert (shown["blocked_by"], shown["status"]) == ([issue["id"]], "blocked")
+    ok("issue", "close", issue["id"])
+    assert ok("show", foreign)["status"] == "todo"
 
 
 def test_comment_add_refuses_a_foreign_card(foreign):
