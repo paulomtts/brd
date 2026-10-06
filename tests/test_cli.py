@@ -974,6 +974,59 @@ def test_show_pretty_renders_a_foreign_blocker(foreign):
     assert "blocked by: [[Foreign]] (card)" in human("show", mine)
 
 
+def _blocker_entry(id_, kind, title, status, released, project=OTHER_PROJECT):
+    return {
+        "id": id_,
+        "kind": kind,
+        "project": {"id": project.id, "name": project.name},
+        "title": title,
+        "status": status,
+        "released": released,
+    }
+
+
+def test_card_outputs_carry_foreign_blockers(foreign_entities):
+    expected = {
+        FOREIGN: _blocker_entry(FOREIGN, "card", "Foreign", "todo", False),
+        FOREIGN_ISSUE: _blocker_entry(FOREIGN_ISSUE, "issue", "Foreign issue", "open", False),
+    }
+    mine = ok("add", "--title", "mine")["id"]
+    ok("block", mine, "--by", FOREIGN)
+    blocked = ok("block", mine, "--by", FOREIGN_ISSUE)
+    (listed,) = [c for c in ok("list") if c["id"] == mine]
+    (node,) = [n for n in ok("tree") if n["id"] == mine]
+    for card in (blocked, ok("show", mine), listed, node):
+        # blocked_by is still the plain list of ids; blockers follows its order.
+        assert sorted(card["blocked_by"]) == sorted([FOREIGN, FOREIGN_ISSUE])
+        assert card["blockers"] == [expected[b] for b in card["blocked_by"]]
+
+    added = ok("add", "--title", "t", "--blocked-by", FOREIGN)
+    assert (added["blocked_by"], added["blockers"]) == ([FOREIGN], [expected[FOREIGN]])
+    assert ok("update", added["id"], "--title", "t2")["blockers"] == [expected[FOREIGN]]
+    unblocked = ok("unblock", mine, "--by", FOREIGN)
+    assert (unblocked["blocked_by"], unblocked["blockers"]) == (
+        [FOREIGN_ISSUE],
+        [expected[FOREIGN_ISSUE]],
+    )
+    free = ok("add", "--title", "free")["id"]
+    assert [c["blockers"] for c in ok("next") if c["id"] == free] == [[]]
+
+
+def test_a_finished_foreign_blocker_is_released(foreign):
+    mine = ok("add", "--title", "mine", "--blocked-by", foreign)["id"]
+    conn = db.connect(paths.brd_db_path())
+    try:
+        conn.execute("UPDATE cards SET status = 'done' WHERE id = ?", (foreign,))
+        conn.commit()
+    finally:
+        conn.close()
+
+    shown = ok("show", mine)
+    assert shown["status"] == "todo"
+    assert shown["blockers"] == [_blocker_entry(foreign, "card", "Foreign", "done", True)]
+    assert mine in [c["id"] for c in ok("next")]
+
+
 def test_issue_open_can_block_a_foreign_card(foreign):
     issue = ok("issue", "open", "--title", "q", "--blocks", foreign)
     assert issue["blocks"] == [foreign]
@@ -1006,6 +1059,19 @@ def test_forget_leaves_a_foreign_card_blocked_until_unblocked(tmp_path, monkeypa
     assert mine not in [c["id"] for c in ok("next")]
     assert [(c["id"], c["status"]) for c in ok("list")] == [(mine, "blocked")]
     assert [(n["id"], n["status"]) for n in ok("tree")] == [(mine, "blocked")]
+    gone = [
+        {
+            "id": theirs,
+            "kind": None,
+            "project": None,
+            "title": None,
+            "status": "not-found",
+            "released": False,
+        }
+    ]
+    assert shown["blockers"] == gone
+    assert [c["blockers"] for c in ok("list")] == [gone]
+    assert [n["blockers"] for n in ok("tree")] == [gone]
     assert f"not-found {theirs}" in human("show", mine)
     human("list")
     human("tree")

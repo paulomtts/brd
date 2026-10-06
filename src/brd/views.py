@@ -19,6 +19,8 @@ def links_of(conn: sqlite3.Connection, entity_id: str) -> dict:
 
 
 def card_detail(conn: sqlite3.Connection, card: Card) -> dict:
+    # One read, so blocked_by and blockers keep the same order.
+    blockers = core.blockers_of(conn, card.id)
     return {
         "id": card.id,
         "kind": "card",
@@ -28,7 +30,8 @@ def card_detail(conn: sqlite3.Connection, card: Card) -> dict:
         "parent_id": card.parent_id,
         "created_at": card.created_at,
         "updated_at": card.updated_at,
-        "blocked_by": db.list_blockers_of(conn, card.id),
+        "blocked_by": [blocker["id"] for blocker in blockers],
+        "blockers": blockers,
         "children": [child.id for child in db.list_children(conn, card.id)],
         "comments": [comment_dict(c) for c in comments.for_entity(conn, card.id)],
         **links_of(conn, card.id),

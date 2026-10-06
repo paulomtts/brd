@@ -336,30 +336,45 @@ def next_cards(
     return ready[:limit] if limit is not None else ready
 
 
-def _build_node(conn: sqlite3.Connection, card: Card) -> dict:
-    return {
+def _build_node(conn: sqlite3.Connection, card: Card, with_blockers: bool) -> dict:
+    node = {
         "id": card.id,
         "title": card.title,
         "description": card.description,
         "status": resolve_status(conn, card),
-        "blocked_by": db.list_blockers_of(conn, card.id),
+    }
+    if with_blockers:
+        # One read, so blocked_by and blockers keep the same order.
+        blockers = blockers_of(conn, card.id)
+        node["blocked_by"] = [blocker["id"] for blocker in blockers]
+        node["blockers"] = blockers
+    else:
+        node["blocked_by"] = db.list_blockers_of(conn, card.id)
+    return {
+        **node,
         "created_at": card.created_at,
         "updated_at": card.updated_at,
         "children": [
-            _build_node(conn, child) for child in db.list_children(conn, card.id)
+            _build_node(conn, child, with_blockers)
+            for child in db.list_children(conn, card.id)
         ],
     }
 
 
 def build_tree(
-    conn: sqlite3.Connection, project_id: str, root_id: str | None = None
+    conn: sqlite3.Connection,
+    project_id: str,
+    root_id: str | None = None,
+    with_blockers: bool = True,
 ) -> list[dict]:
+    # Export turns with_blockers off: `blockers` is derived, never stored,
+    # and export card nodes keep the v1 shape.
     if root_id is not None:
         card = require_card(conn, project_id, root_id)
-        return [_build_node(conn, card)]
+        return [_build_node(conn, card, with_blockers)]
 
     top_level = db.list_cards(conn, project_id, parent_id=None)
-    return [_build_node(conn, card) for card in top_level]
+    return [_build_node(conn, card, with_blockers) for card in top_level]
 
 
 def _flatten_tree(

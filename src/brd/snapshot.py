@@ -12,7 +12,7 @@ def export(conn: sqlite3.Connection, project_id: str, root: Path) -> dict:
     results = documents.sync_all(conn, project_id, root)
     return {
         "brd_export": FORMAT_VERSION,
-        "cards": core.build_tree(conn, project_id),
+        "cards": core.build_tree(conn, project_id, with_blockers=False),
         "issues": [dataclasses.asdict(i) for i in issues.list_issues(conn, project_id)],
         "documents": [
             {

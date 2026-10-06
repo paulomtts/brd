@@ -963,3 +963,34 @@ def test_blockers_of_a_stored_cycle_terminates(conn):
     _blocked_on(conn, "b", "a")
     db.add_blocked_by_edge(conn, "a", "b")
     assert core.blockers_of(conn, "a") == [_entry("b", "card", "b", "blocked", False)]
+
+
+def test_build_tree_nodes_carry_blockers(conn):
+    parent = core.create_card(conn, PROJECT.id, title="Parent")
+    blocker = core.create_card(conn, PROJECT.id, title="Blocker")
+    child = core.create_card(
+        conn, PROJECT.id, title="Child", parent_id=parent.id, blocked_by=[blocker.id]
+    )
+    db.add_blocked_by_edge(conn, child.id, "ghost")
+
+    (root,) = core.build_tree(conn, PROJECT.id, root_id=parent.id)
+    (child_node,) = root["children"]
+    assert root["blocked_by"] == [] and root["blockers"] == []
+    assert sorted(child_node["blocked_by"]) == sorted([blocker.id, "ghost"])
+    assert child_node["blockers"] == core.blockers_of(conn, child.id)
+    assert [b["id"] for b in child_node["blockers"]] == child_node["blocked_by"]
+    assert {b["id"]: b["status"] for b in child_node["blockers"]} == {
+        blocker.id: "todo",
+        "ghost": "not-found",
+    }
+
+
+def test_build_tree_without_blockers_keeps_the_v1_node_shape(conn):
+    parent = core.create_card(conn, PROJECT.id, title="Parent")
+    blocker = core.create_card(conn, PROJECT.id, title="Blocker")
+    core.create_card(conn, PROJECT.id, title="Child", parent_id=parent.id, blocked_by=[blocker.id])
+
+    (root,) = core.build_tree(conn, PROJECT.id, root_id=parent.id, with_blockers=False)
+    (child_node,) = root["children"]
+    assert "blockers" not in root and "blockers" not in child_node
+    assert child_node["blocked_by"] == [blocker.id]
