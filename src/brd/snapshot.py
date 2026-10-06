@@ -4,14 +4,27 @@ from pathlib import Path, PurePosixPath
 
 from brd import core, db, documents, entities, issues, refs
 from brd.errors import EntityAlreadyExistsError, ImportFormatError
+from brd.models import Project
 
-FORMAT_VERSION = 1
+FORMAT_VERSION = 2
+V1_FORMAT_VERSION = 1
+ENTRY_BODY_KEYS = ("cards", "issues", "documents", "comments", "tags", "refs")
 
 
-def export(conn: sqlite3.Connection, project_id: str, root: Path) -> dict:
-    results = documents.sync_all(conn, project_id, root)
+def export_projects(conn: sqlite3.Connection, projects: list[Project]) -> dict:
+    """The v2 snapshot: one entry per project, in the order given."""
     return {
         "brd_export": FORMAT_VERSION,
+        "projects": [export_project(conn, project) for project in projects],
+    }
+
+
+def export_project(conn: sqlite3.Connection, project: Project) -> dict:
+    """One project's entry: its row plus today's v1 body, edges as stored."""
+    project_id = project.id
+    results = documents.sync_all(conn, project_id, Path(project.root_path))
+    return {
+        "project": dataclasses.asdict(project),
         "cards": core.build_tree(conn, project_id, with_blockers=False),
         "issues": [dataclasses.asdict(i) for i in issues.list_issues(conn, project_id)],
         "documents": [
@@ -71,13 +84,37 @@ def _load(conn: sqlite3.Connection, project_id: str, raw) -> dict:
     if isinstance(raw, dict) and isinstance(raw.get("data"), dict):
         raw = raw["data"]
     if isinstance(raw, dict) and "brd_export" in raw:
-        if raw["brd_export"] != FORMAT_VERSION:
+        if raw["brd_export"] == FORMAT_VERSION:
+            return _load_export(conn, project_id, _single_entry(raw))
+        if raw["brd_export"] != V1_FORMAT_VERSION:
             raise ImportFormatError(f"unsupported brd_export version {raw['brd_export']!r}")
         return _load_export(conn, project_id, raw)
     nodes = raw["data"] if isinstance(raw, dict) and "data" in raw else raw
     if not isinstance(nodes, list):
         raise ImportFormatError("expected a `brd export` object or a `brd tree` snapshot list")
     return {"imported": core.import_tree(conn, project_id, nodes)}
+
+
+def _single_entry(snap: dict) -> dict:
+    """Until multi-project import lands, a v2 snapshot imports only when it
+    holds exactly one project; that entry's body goes into the cwd project."""
+    entries = snap.get("projects")
+    if not isinstance(entries, list):
+        raise ImportFormatError(
+            f"malformed snapshot: `projects` must be a list, got {type(entries).__name__}"
+        )
+    if len(entries) != 1:
+        raise ImportFormatError(
+            f"snapshot has {len(entries)} project entries; importing anything but "
+            "exactly one project is not supported yet"
+        )
+    (entry,) = entries
+    if not isinstance(entry, dict) or not all(key in entry for key in ENTRY_BODY_KEYS):
+        raise ImportFormatError(
+            "malformed snapshot: a project entry must be an object with "
+            + ", ".join(ENTRY_BODY_KEYS)
+        )
+    return entry
 
 
 def _check_source_path(source_path) -> None:

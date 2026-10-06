@@ -1,3 +1,4 @@
+import dataclasses
 import re
 import sqlite3
 from pathlib import Path
@@ -407,8 +408,13 @@ def _tree_ids(nodes):
     ]
 
 
+def _export(conn, project, root):
+    """One project's export entry, with its documents rooted at `root`."""
+    return snapshot.export_project(conn, dataclasses.replace(project, root_path=str(root)))
+
+
 def test_export_cards_hold_only_the_projects_cards(two, tmp_path):
-    assert set(_tree_ids(snapshot.export(two, P, tmp_path)["cards"])) == {"p1", "p2"}
+    assert set(_tree_ids(_export(two, PROJECT, tmp_path)["cards"])) == {"p1", "p2"}
 
 
 @pytest.mark.parametrize(
@@ -676,7 +682,7 @@ def test_export_holds_only_the_projects_issues_and_documents(two, root):
     make_document(two, "pd", "pnotes")
     _write(root, "docs/qnotes.md", "changed")
     q_before = _doc_state(two, "qd")
-    data = snapshot.export(two, P, root)
+    data = _export(two, PROJECT, root)
     assert [i["id"] for i in data["issues"]] == ["pi"]
     assert [d["id"] for d in data["documents"]] == ["pd"]
     assert _doc_state(two, "qd") == q_before
@@ -898,7 +904,7 @@ def test_export_holds_only_the_projects_comments_tags_and_refs(two, root):
     _explicit_ref(two, "p1", "pi")
     _explicit_ref(two, "p1", "p2")
     _explicit_ref(two, "q1", "q-child")
-    data = snapshot.export(two, P, root)
+    data = _export(two, PROJECT, root)
     assert [c["id"] for c in data["comments"]] == ["k-p2", "k-p1"]
     assert data["comments"][0] == {
         "id": "k-p2", "entity_id": "p1", "author": "me", "body": "on p card", "created_at": NOW
@@ -919,16 +925,16 @@ def test_export_holds_only_the_projects_comments_tags_and_refs(two, root):
 def test_export_of_a_project_without_comments_tags_or_refs_is_empty(two, root):
     _comment(two, "k-qc", "q1", "on q card")
     _explicit_ref(two, "q1", "q-child")  # Q's qd is already tagged qtag
-    data = snapshot.export(two, P, root)
+    data = _export(two, PROJECT, root)
     assert (data["comments"], data["tags"], data["refs"]) == ([], [], [])
 
 
 def test_export_keeps_a_ref_to_another_projects_entity(two, root):
     _explicit_ref(two, "p1", "qi")
     _explicit_ref(two, "q1", "p1")
-    assert snapshot.export(two, P, root)["refs"] == [
+    assert _export(two, PROJECT, root)["refs"] == [
         {"src_id": "p1", "dst_id": "qi", "origin": "explicit"}
     ]
-    assert snapshot.export(two, Q, root)["refs"] == [
+    assert _export(two, OTHER_PROJECT, root)["refs"] == [
         {"src_id": "q1", "dst_id": "p1", "origin": "explicit"}
     ]

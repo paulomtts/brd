@@ -96,7 +96,8 @@ def _seed(name: str, root: Path) -> Side:
 def _check_seed(side: Side) -> None:
     """T5, guarding the guard: a seed that silently failed would let every case pass."""
     os.chdir(side.root)
-    exported = _ok("export")
+    (exported,) = _ok("export")["projects"]
+    assert exported["project"]["id"] == side.project
     assert len(_cards(exported["cards"])) == 3
     assert [i["id"] for i in exported["issues"]] == [side.issue]
     assert [d["id"] for d in exported["documents"]] == [side.doc]

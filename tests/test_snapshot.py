@@ -39,13 +39,44 @@ def _fresh_project(tmp_path, monkeypatch):
     return other
 
 
-def test_export_shape(populated):
+ENTRY_KEYS = {"project", "cards", "issues", "documents", "comments", "tags", "refs"}
+
+
+def _entry(data):
+    """The single project entry of a one-project export."""
+    (entry,) = data["projects"]
+    return entry
+
+
+def _another_project(tmp_path, monkeypatch, name):
+    """Init project `name` in the same install as `project` (same data dir,
+    unlike _fresh_project) and chdir into it."""
+    root = tmp_path / name
+    root.mkdir()
+    monkeypatch.chdir(root)
+    return root, ok("init")
+
+
+def test_export_is_a_one_entry_project_list(populated):
     data = ok("export")
-    assert data["brd_export"] == 1
-    assert [c["id"] for c in data["cards"]] == [populated["card"]["id"]]
-    assert data["documents"][0]["content"].startswith("# Notes")
-    assert data["tags"] == [{"entity_id": populated["doc"]["id"], "tag": "design"}]
-    assert all(r["origin"] == "explicit" for r in data["refs"])
+    assert set(data) == {"brd_export", "projects"}
+    assert data["brd_export"] == 2
+    entry = _entry(data)
+    assert set(entry) == ENTRY_KEYS
+    (registered,) = ok("projects")
+    assert entry["project"] == registered
+    assert set(entry["project"]) == {"id", "name", "root_path", "created_at"}
+    assert [c["id"] for c in entry["cards"]] == [populated["card"]["id"]]
+    assert entry["documents"][0]["content"].startswith("# Notes")
+    assert entry["tags"] == [{"entity_id": populated["doc"]["id"], "tag": "design"}]
+    assert entry["refs"] and all(r["origin"] == "explicit" for r in entry["refs"])
+
+
+def test_export_of_an_empty_project_has_empty_lists(project):
+    entry = _entry(ok("export"))
+    assert {k: v for k, v in entry.items() if k != "project"} == {
+        "cards": [], "issues": [], "documents": [], "comments": [], "tags": [], "refs": []
+    }
 
 
 def test_round_trip_into_fresh_project(populated, tmp_path, monkeypatch):
@@ -123,7 +154,7 @@ def test_import_rolls_back_document_backup_on_integrity_error(populated, tmp_pat
     # A comment referencing an entity that doesn't exist in the snapshot (or
     # the target board) violates the comments.entity_id foreign key, so the
     # DB transaction fails after the document's backup was already written.
-    data["comments"].append(
+    _entry(data)["comments"].append(
         {
             "id": "00000000-0000-0000-0000-000000000000",
             "entity_id": "does-not-exist",
@@ -164,7 +195,7 @@ def _import_into_fresh(tmp_path, monkeypatch, data):
 )
 def test_import_rejects_unsafe_document_source_path(populated, tmp_path, monkeypatch, source_path):
     data = ok("export")
-    data["documents"][0]["source_path"] = source_path
+    _entry(data)["documents"][0]["source_path"] = source_path
     other, error = _import_into_fresh(tmp_path, monkeypatch, data)
     assert error == "ImportFormatError"
     assert ok("list") == [] and ok("issue", "list") == [] and ok("doc", "list") == []
@@ -193,6 +224,10 @@ def test_old_tree_snapshot_with_unknown_blocker_imports_nothing(project, tmp_pat
                                      "created_at": "t", "updated_at": "t"}]},
         [{"id": "c"}],
         ["not a node"],
+        {"brd_export": 2, "projects": "x"},
+        {"brd_export": 2, "projects": [5]},
+        {"brd_export": 2},
+        {"brd_export": 2, "projects": [{"project": {}, "cards": []}]},
     ],
 )
 def test_malformed_snapshot_is_an_envelope(project, tmp_path, monkeypatch, raw):
@@ -221,7 +256,7 @@ def _assert_nothing_imported(other):
 
 def test_import_rejects_unknown_blocker(populated, tmp_path, monkeypatch):
     data = ok("export")
-    data["cards"][0]["blocked_by"].append(GHOST)
+    _entry(data)["cards"][0]["blocked_by"].append(GHOST)
     other, error = _import_error_into_fresh(tmp_path, monkeypatch, data)
     assert error["type"] == "ImportFormatError"
     assert GHOST in error["message"]
@@ -230,7 +265,9 @@ def test_import_rejects_unknown_blocker(populated, tmp_path, monkeypatch):
 
 def test_import_rejects_unknown_ref_target(populated, tmp_path, monkeypatch):
     data = ok("export")
-    data["refs"].append({"src_id": populated["card"]["id"], "dst_id": GHOST, "origin": "explicit"})
+    _entry(data)["refs"].append(
+        {"src_id": populated["card"]["id"], "dst_id": GHOST, "origin": "explicit"}
+    )
     other, error = _import_error_into_fresh(tmp_path, monkeypatch, data)
     assert error["type"] == "ImportFormatError"
     assert GHOST in error["message"]
@@ -270,12 +307,12 @@ def test_import_blocker_already_on_board_is_accepted(project, tmp_path, fmt):
 
 def test_round_trip_keeps_refs_between_snapshot_entities(populated, tmp_path, monkeypatch):
     data = ok("export")
-    assert data["refs"], "populated has an explicit issue -> document ref"
+    assert _entry(data)["refs"], "populated has an explicit issue -> document ref"
     snapshot = tmp_path / "snapshot.json"
     snapshot.write_text(json.dumps(data))
     other = _fresh_project(tmp_path, monkeypatch)
     ok("import", snapshot)
-    assert ok("export")["refs"] == data["refs"]
+    assert _entry(ok("export"))["refs"] == _entry(data)["refs"]
 
 
 def _card_nodes(nodes):
@@ -285,8 +322,23 @@ def _card_nodes(nodes):
 
 
 def test_export_card_nodes_have_no_blockers(populated):
-    nodes = list(_card_nodes(ok("export")["cards"]))
+    nodes = list(_card_nodes(_entry(ok("export"))["cards"]))
     assert {n["id"] for n in nodes} == {populated["card"]["id"], populated["child"]["id"]}
     assert all("blockers" not in n and "blocked_by" in n for n in nodes)
     (child,) = [n for n in nodes if n["id"] == populated["child"]["id"]]
     assert child["blocked_by"] == [populated["issue"]["id"]]
+
+
+@pytest.mark.parametrize("count", [0, 2])
+def test_import_refuses_a_multi_entry_export(project, tmp_path, monkeypatch, count):
+    ok("add", "--title", "A")
+    entries = [_entry(ok("export"))]
+    _another_project(tmp_path, monkeypatch, "second")
+    ok("add", "--title", "B")
+    entries.append(_entry(ok("export")))
+    data = {"brd_export": 2, "projects": entries[:count]}
+    other, error = _import_error_into_fresh(tmp_path, monkeypatch, data)
+    assert error["type"] == "ImportFormatError"
+    assert f"{count} project entries" in error["message"]
+    assert "not supported yet" in error["message"]
+    _assert_nothing_imported(other)

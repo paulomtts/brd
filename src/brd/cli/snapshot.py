@@ -10,11 +10,9 @@ from brd.errors import ImportReadError
 
 @app.command(name="export")
 def export_cmd(pretty: bool = pretty_option()) -> None:
-    """Print a full JSON snapshot: cards, issues, documents, comments, tags, refs."""
-    run(
-        pretty,
-        lambda ctx: snapshot.export(ctx.conn, ctx.project.id, Path(ctx.project.root_path)),
-    )
+    """Print a JSON snapshot: a list of project entries, each with its cards, issues,
+    documents, comments, tags and refs."""
+    run(pretty, lambda ctx: snapshot.export_projects(ctx.conn, [ctx.project]))
 
 
 @app.command(name="import")
