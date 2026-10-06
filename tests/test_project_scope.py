@@ -3,9 +3,15 @@ import sqlite3
 
 import pytest
 
-from brd import comments, core, db, documents, issues, snapshot, views
+from brd import comments, core, db, documents, entities, issues, snapshot, views
 from brd.cli import cards as cli_cards
-from brd.errors import CardNotFoundError, InvalidBlockerError
+from brd.errors import (
+    CardNotFoundError,
+    DocumentNotFoundError,
+    EntityNotFoundError,
+    InvalidBlockerError,
+    IssueNotFoundError,
+)
 from brd.models import Card
 from tests.factories import (
     NOW,
@@ -321,3 +327,31 @@ def test_detail_of_a_missing_id_is_unchanged(two, tmp_path):
 
 def test_card_detail_has_no_project_key(two):
     assert "project" not in views.card_detail(two, db.get_card(two, "p1"))
+
+
+@pytest.mark.parametrize(
+    ("entity_id", "error", "what"),
+    [
+        ("q1", CardNotFoundError, "card"),
+        ("qi", IssueNotFoundError, "issue"),
+        ("qd", DocumentNotFoundError, "document"),
+    ],
+)
+def test_require_in_project_names_the_owner_of_a_foreign_entity(two, entity_id, error, what):
+    with pytest.raises(error, match=_foreign(entity_id, what)):
+        entities.require_in_project(two, P, entity_id)
+
+
+def test_require_in_project_returns_the_kind_of_an_own_entity(two):
+    make_issue(two, "pi")
+    make_document(two, "pd", "pnotes")
+    assert entities.require_in_project(two, P, "p1") == "card"
+    assert entities.require_in_project(two, P, "pi") == "issue"
+    assert entities.require_in_project(two, P, "pd") == "document"
+    assert entities.require_in_project(two, Q, "q1") == "card"
+
+
+def test_require_in_project_on_a_missing_id_is_unchanged(two):
+    with pytest.raises(EntityNotFoundError, match=r"^no entity with id nope$") as raised:
+        entities.require_in_project(two, P, "nope")
+    assert type(raised.value) is EntityNotFoundError

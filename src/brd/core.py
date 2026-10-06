@@ -106,10 +106,7 @@ def _require_in_project(
     # copied from another project's board says where it lives.
     owner = db.owner_of(conn, entity_id)
     if owner is not None and owner.id != project_id:
-        raise CardNotFoundError(
-            f"no {what} with id {entity_id} in this project; "
-            f"it belongs to project {owner.name} ({owner.id})"
-        )
+        raise CardNotFoundError(entities.foreign_message(what, entity_id, owner))
 
 
 def require_card(conn: sqlite3.Connection, project_id: str, card_id: str) -> Card:
