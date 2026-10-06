@@ -1,10 +1,24 @@
+import re
 import sqlite3
 
 import pytest
 
-from brd import core, db, documents, issues, snapshot
+from brd import comments, core, db, documents, issues, snapshot, views
+from brd.cli import cards as cli_cards
+from brd.errors import CardNotFoundError, InvalidBlockerError
 from brd.models import Card
-from tests.factories import NOW, OTHER_PROJECT, PROJECT, add_project, make_card
+from tests.factories import (
+    NOW,
+    OTHER_PROJECT,
+    PROJECT,
+    add_project,
+    make_card,
+    make_document,
+    make_issue,
+)
+
+P = PROJECT.id
+Q = OTHER_PROJECT.id
 
 
 def test_migrate_project_requires_the_project(tmp_path):
@@ -88,3 +102,33 @@ def test_snapshot_load_records_its_project(pconn, tmp_path):
     assert rows == {"c": OTHER_PROJECT.id, "i": OTHER_PROJECT.id, "d": OTHER_PROJECT.id}
     stored = pconn.execute("SELECT project_id FROM documents WHERE id = 'd'").fetchone()
     assert stored[0] == OTHER_PROJECT.id
+
+
+@pytest.fixture
+def two(pconn):
+    """P owns cards p1 and p2. Q owns card q1 (parent of q-child, blocked by
+    p2 through a directly seeded cross-project edge), issue qi and
+    document qd."""
+    add_project(pconn, OTHER_PROJECT)
+    make_card(pconn, "p1")
+    make_card(pconn, "p2")
+    make_card(pconn, "q1", project_id=Q)
+    make_card(pconn, "q-child", parent_id="q1", project_id=Q)
+    make_issue(pconn, "qi", project_id=Q)
+    make_document(pconn, "qd", "qnotes", content="q body", project_id=Q)
+    db.add_blocked_by_edge(pconn, "q1", "p2")
+    return pconn
+
+
+def test_in_project_filters_a_raw_query_to_the_bound_project(two):
+    query = f"SELECT cards.id FROM cards {db.in_project('cards.id')} ORDER BY cards.id"
+    assert [row["id"] for row in two.execute(query, (P,))] == ["p1", "p2"]
+    assert [row["id"] for row in two.execute(query, (Q,))] == ["q-child", "q1"]
+
+
+def test_owner_of_returns_the_owning_project(two):
+    assert db.owner_of(two, "p1") == PROJECT
+    assert db.owner_of(two, "q1") == OTHER_PROJECT
+    assert db.owner_of(two, "qi") == OTHER_PROJECT
+    assert db.owner_of(two, "qd") == OTHER_PROJECT
+    assert db.owner_of(two, "nope") is None

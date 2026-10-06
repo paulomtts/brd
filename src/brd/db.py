@@ -477,6 +477,21 @@ def delete_project(conn: sqlite3.Connection, root_path: str) -> None:
     conn.commit()
 
 
+def in_project(id_column: str) -> str:
+    """The one join that scopes a query to a project: keeps rows whose
+    `id_column` is an entity owned by the project bound to its single `?`."""
+    return f"JOIN entities AS scope ON scope.id = {id_column} AND scope.project_id = ?"
+
+
+def owner_of(conn: sqlite3.Connection, entity_id: str) -> Project | None:
+    row = conn.execute(
+        "SELECT projects.* FROM entities "
+        "JOIN projects ON projects.id = entities.project_id WHERE entities.id = ?",
+        (entity_id,),
+    ).fetchone()
+    return _row_to_project(row) if row else None
+
+
 def _row_to_card(row: sqlite3.Row) -> Card:
     return Card(
         id=row["id"],
