@@ -3,10 +3,10 @@ import uuid
 
 import pytest
 
-from brd import db, master, paths
+from brd import core, db, master, paths
 from brd.errors import ProjectAlreadyExistsError, ProjectNotFoundError
 from brd.models import Project
-from tests.factories import PROJECT, make_card, make_document
+from tests.factories import PROJECT, make_card, make_document, make_issue
 
 
 def _brd():
@@ -683,3 +683,168 @@ def test_relink_project_into_another_projects_tree_nests_it(tmp_path, monkeypatc
     assert relinked.id == project.id
     assert _resolve(inner / "x") == relinked
     assert _resolve(outer / "y") == outer_project
+
+
+def _two_projects(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    a = tmp_path / "a"
+    b = tmp_path / "b"
+    a.mkdir()
+    b.mkdir()
+    return master.init_project(a), master.init_project(b)
+
+
+def _count(sql, *params):
+    conn = _brd()
+    try:
+        return conn.execute(sql, params).fetchone()[0]
+    finally:
+        conn.close()
+
+
+def test_forget_project_by_id_removes_what_it_owns_and_nothing_else(tmp_path, monkeypatch):
+    project_a, project_b = _two_projects(tmp_path, monkeypatch)
+    conn = _brd()
+    try:
+        make_card(conn, "ca", project_id=project_a.id)
+        make_issue(conn, "ia", project_id=project_a.id)
+        make_document(conn, "da", "a-notes", content="a", project_id=project_a.id)
+        make_card(conn, "cb", project_id=project_b.id)
+        make_document(conn, "db", "b-notes", content="b", project_id=project_b.id)
+        with conn:
+            for entity_id in ("ca", "cb"):
+                conn.execute(
+                    "INSERT INTO comments (id, entity_id, author, body, created_at) "
+                    "VALUES (?, ?, 'me', 'hi', 'now')",
+                    (f"cm-{entity_id}", entity_id),
+                )
+                conn.execute(
+                    "INSERT INTO tags (entity_id, tag) VALUES (?, 'x')", (entity_id,)
+                )
+    finally:
+        conn.close()
+
+    assert master.forget_project_by_id(project_a.id) == project_a
+
+    assert master.list_all_projects() == [project_b]
+    assert _count("SELECT COUNT(*) FROM entities WHERE project_id = ?", project_a.id) == 0
+    for table in ("cards", "issues", "documents"):
+        assert _count(f"SELECT COUNT(*) FROM {table} WHERE id IN ('ca', 'ia', 'da')") == 0
+    assert _count("SELECT COUNT(*) FROM comments WHERE entity_id = 'ca'") == 0
+    assert _count("SELECT COUNT(*) FROM tags WHERE entity_id = 'ca'") == 0
+    assert not (paths.docs_dir() / "da.md").exists()
+    assert _count("SELECT COUNT(*) FROM entities WHERE project_id = ?", project_b.id) == 2
+    assert _count("SELECT COUNT(*) FROM comments WHERE entity_id = 'cb'") == 1
+    assert _count("SELECT COUNT(*) FROM tags WHERE entity_id = 'cb'") == 1
+    assert (paths.docs_dir() / "db.md").read_text() == "b"
+
+
+def test_forget_project_by_id_works_when_the_root_is_gone_and_cwd_is_unregistered(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    repo = tmp_path / "repo"
+    elsewhere = tmp_path / "elsewhere"
+    repo.mkdir()
+    elsewhere.mkdir()
+    project = master.init_project(repo)
+    shutil.rmtree(repo)
+    monkeypatch.chdir(elsewhere)
+
+    assert master.forget_project_by_id(project.id) == project
+    assert master.list_all_projects() == []
+
+
+def test_forget_project_by_id_with_an_unknown_id_is_not_found(tmp_path, monkeypatch):
+    project_a, project_b = _two_projects(tmp_path, monkeypatch)
+    unknown = str(uuid.uuid4())
+
+    with pytest.raises(ProjectNotFoundError) as excinfo:
+        master.forget_project_by_id(unknown)
+
+    assert unknown in str(excinfo.value)
+    assert "brd projects" in str(excinfo.value)
+    assert len(master.list_all_projects()) == 2
+
+
+def test_forget_project_by_id_does_not_match_a_root_path(tmp_path, monkeypatch):
+    project_a, project_b = _two_projects(tmp_path, monkeypatch)
+
+    with pytest.raises(ProjectNotFoundError):
+        master.forget_project_by_id(project_a.root_path)
+
+    assert len(master.list_all_projects()) == 2
+
+
+def test_forgetting_a_project_removes_edges_other_projects_point_at_it(
+    tmp_path, monkeypatch
+):
+    project_a, project_b = _two_projects(tmp_path, monkeypatch)
+    conn = _brd()
+    try:
+        make_card(conn, "a1", project_id=project_a.id)
+        make_card(conn, "b1", project_id=project_b.id)
+        make_card(conn, "b2", status="done", project_id=project_b.id)
+        db.add_blocked_by_edge(conn, "b1", "a1")
+        db.add_blocked_by_edge(conn, "b1", "b2")
+        with conn:
+            for dst in ("a1", "b2"):
+                conn.execute(
+                    "INSERT INTO refs (src_id, dst_id, origin) VALUES ('b1', ?, 'explicit')",
+                    (dst,),
+                )
+        assert core.resolve_status(conn, db.get_card(conn, "b1")) == "blocked"
+    finally:
+        conn.close()
+
+    master.forget_project_by_id(project_a.id)
+
+    conn = _brd()
+    try:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM blocked_by WHERE blocks_on_id = 'a1'"
+        ).fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM refs WHERE dst_id = 'a1'").fetchone()[0] == 0
+        assert db.list_blockers_of(conn, "b1") == ["b2"]
+        assert [r["dst_id"] for r in conn.execute("SELECT dst_id FROM refs")] == ["b2"]
+        assert core.resolve_status(conn, db.get_card(conn, "b1")) == "todo"
+    finally:
+        conn.close()
+
+
+def test_forget_current_project_forgets_the_deepest_root_above_the_cwd(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    repo = tmp_path / "repo"
+    deeper = repo / "sub" / "deeper"
+    deeper.mkdir(parents=True)
+    project = master.init_project(repo)
+
+    assert master.forget_current_project(deeper) == project
+    assert master.list_all_projects() == []
+
+
+def test_forget_current_project_inside_a_nested_project_forgets_only_it(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    outer = tmp_path / "repo"
+    inner = outer / "inner"
+    (inner / "x").mkdir(parents=True)
+    outer_project = master.init_project(outer)
+    inner_project = master.init_project(inner)
+
+    assert master.forget_current_project(inner / "x") == inner_project
+    assert master.list_all_projects() == [outer_project]
+
+
+def test_forget_current_project_outside_any_project_is_not_found(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    nowhere = tmp_path / "nowhere"
+    nowhere.mkdir()
+
+    with pytest.raises(ProjectNotFoundError) as excinfo:
+        master.forget_current_project(nowhere)
+
+    assert str(excinfo.value) == _not_found(nowhere)

@@ -142,11 +142,43 @@ def list_all_projects() -> list[Project]:
 
 
 def forget_project(root_path: Path) -> Project:
-    conn = connect()
-    try:
+    """Forget the project registered exactly at root_path."""
+
+    def find(conn: sqlite3.Connection) -> Project:
         project = db.get_project(conn, str(root_path))
         if project is None:
             raise ProjectNotFoundError(f"no registered project at {root_path}")
+        return project
+
+    return _forget(find)
+
+
+def forget_current_project(cwd: Path) -> Project:
+    """Forget the project cwd belongs to: the deepest registered root at or
+    above it, as every other command resolves it."""
+    return _forget(lambda conn: resolve_project(conn, cwd))
+
+
+def forget_project_by_id(project_id: str) -> Project:
+    """Forget a project by id, from anywhere, e.g. one whose directory is gone."""
+
+    def find(conn: sqlite3.Connection) -> Project:
+        project = db.get_project_by_id(conn, project_id)
+        if project is None:
+            raise ProjectNotFoundError(
+                f"no project with id {project_id}; see `brd projects`"
+            )
+        return project
+
+    return _forget(find)
+
+
+def _forget(find: Callable[[sqlite3.Connection], Project]) -> Project:
+    """Delete the project find returns, the edges pointing at its entities,
+    and its document backups."""
+    conn = connect()
+    try:
+        project = find(conn)
         # Read before the delete: the cascade through entities removes them.
         doc_ids = [
             row["id"]
