@@ -116,6 +116,20 @@ def resolve_project_root(start: Path) -> Path:
     return marker.parent
 
 
+def registered_project(root_path: Path) -> Project:
+    conn = _master_conn()
+    try:
+        project = db.get_project(conn, str(root_path))
+    finally:
+        conn.close()
+    if project is None:
+        raise ProjectNotFoundError(
+            f"{root_path} has a {MARKER_FILENAME} marker but is not a registered "
+            "project; run `brd init` there"
+        )
+    return project
+
+
 def resolve_project_db(start: Path) -> Path:
     return paths.project_db_path(resolve_project_root(start))
 

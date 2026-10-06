@@ -333,3 +333,21 @@ def test_forget_project_returns_project_with_its_id(tmp_path, monkeypatch):
     project = master.init_project(repo)
 
     assert master.forget_project(repo) == project
+
+
+def test_registered_project_returns_the_registered_row(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    repo = tmp_path / "myrepo"
+    repo.mkdir()
+    project = master.init_project(repo)
+
+    assert master.registered_project(repo) == project
+
+
+def test_registered_project_raises_when_root_is_not_registered(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    repo = tmp_path / "myrepo"
+    repo.mkdir()
+
+    with pytest.raises(master.ProjectNotFoundError, match="brd init"):
+        master.registered_project(repo)

@@ -1,4 +1,5 @@
 import sqlite3
+from pathlib import Path
 
 import typer
 
@@ -51,7 +52,7 @@ def show(
     """Show a card, issue, or document in full."""
     run(
         pretty,
-        lambda ctx: views.detail(ctx.conn, ctx.root, entity_id),
+        lambda ctx: views.detail(ctx.conn, Path(ctx.project.root_path), entity_id),
         render=lambda ctx, data: pretty_render.render_detail(ctx.conn, data),
     )
 

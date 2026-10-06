@@ -20,7 +20,9 @@ def add(
     """Register a markdown file as a document; brd keeps a backup of it."""
 
     def action(ctx):
-        doc = documents.add(ctx.conn, ctx.root, path, title=title, tag_list=list(tag_list))
+        doc = documents.add(
+            ctx.conn, Path(ctx.project.root_path), path, title=title, tag_list=list(tag_list)
+        )
         return views.document_summary(ctx.conn, doc, "ok")
 
     run(pretty, action)
@@ -36,7 +38,7 @@ def list_cmd(
 
     def action(ctx):
         wanted = [tags.normalize(tag) for tag in tag_list]
-        results = documents.sync_all(ctx.conn, ctx.root)
+        results = documents.sync_all(ctx.conn, Path(ctx.project.root_path))
         items = []
         for doc in documents.list_all(ctx.conn):
             state = results[doc.id].source_state
@@ -60,7 +62,9 @@ def update(
     """Sync brd's backup after editing a document (run this after every edit)."""
 
     def action(ctx):
-        doc, result = documents.update(ctx.conn, ctx.root, doc_id, new_path=path, title=title)
+        doc, result = documents.update(
+            ctx.conn, Path(ctx.project.root_path), doc_id, new_path=path, title=title
+        )
         return views.document_summary(ctx.conn, doc, result.source_state)
 
     run(pretty, action)
@@ -75,7 +79,7 @@ def restore(
     """Write brd's backup back to the document's source path."""
 
     def action(ctx):
-        doc = documents.restore(ctx.conn, ctx.root, doc_id, force=force)
+        doc = documents.restore(ctx.conn, Path(ctx.project.root_path), doc_id, force=force)
         return views.document_summary(ctx.conn, doc, "ok")
 
     run(pretty, action)
