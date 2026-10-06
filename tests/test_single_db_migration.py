@@ -1,3 +1,4 @@
+import json
 import shutil
 import sqlite3
 import threading
@@ -553,3 +554,151 @@ def test_purge_counts_the_registry_without_migrating(data, tmp_path):
 
     assert ok("purge", "--yes") == {"projects_removed": 2}
     assert not data.exists()
+
+
+@pytest.mark.parametrize("args", [["list"], ["projects"], ["init"]])
+def test_unreadable_board_is_a_migration_error_envelope(data, tmp_path, monkeypatch, args):
+    owner = register(tmp_path, "owner")
+    board_path(owner).write_bytes(b"not a database " * 100)
+    root = Path(owner.root_path)
+    (root / ".brd").write_text("")
+    monkeypatch.chdir(root)
+
+    result = invoke(*args)
+
+    assert result.exit_code == 1
+    assert isinstance(result.exception, SystemExit)  # an envelope, not a traceback
+    error = json.loads(result.stdout)["error"]
+    assert error["type"] == "MigrationError"
+    assert "owner" in error["message"]
+    assert str(board_path(owner)) in error["message"]
+    assert result.stderr == ""
+
+
+def test_shared_ids_fail_the_command_and_a_retry_succeeds(data, tmp_path, monkeypatch):
+    first, second = seed_shared_ids(tmp_path)
+    (Path(first.root_path) / ".brd").write_text("")
+    monkeypatch.chdir(first.root_path)
+
+    result = invoke("list")
+
+    assert result.exit_code == 1
+    error = json.loads(result.stdout)["error"]
+    assert error["type"] == "MigrationError"
+    for text in ("first", "second", "dup", "k-dup"):
+        assert text in error["message"]
+    assert result.stderr == ""
+    assert_nothing_migrated([first, second])
+    assert not (data / "docs").exists()
+
+    conn = db.connect(board_path(second))
+    db.delete_card(conn, "dup")
+    conn.close()
+    retry = invoke("list")
+    assert retry.exit_code == 0
+    assert [c["id"] for c in json.loads(retry.stdout)["data"]] == ["dup"]
+    assert retry.stderr.startswith(NOTICE.format(n=2))
+
+
+def test_skipped_unregistered_boards_are_reported_on_stderr(data, tmp_path, monkeypatch):
+    kept = register(tmp_path, "kept")
+    (data / "projects").mkdir(parents=True, exist_ok=True)
+    stray = data / "projects" / "stray.db"
+    _make_v0(stray, cards=[("s-1", None)], edges=[])
+    monkeypatch.chdir(tmp_path)
+
+    result = invoke("projects")
+
+    assert result.exit_code == 0
+    assert [p["id"] for p in json.loads(result.stdout)["data"]] == [kept.id]
+    assert result.stderr == (
+        NOTICE.format(n=1)
+        + "\nbrd: skipped 1 unregistered board files: projects/stray.db\n"
+    )
+    assert stray.is_file() and not migrated(stray).exists()
+
+
+def test_commands_read_backups_from_the_shared_docs_dir(data, tmp_path, monkeypatch):
+    owner = register(tmp_path, "owner")
+    conn = v4_board(owner)
+    add_document(conn, owner, "doc-1", "notes", "# Notes\nbody\n")
+    conn.close()
+    root = Path(owner.root_path)
+    (root / ".brd").write_text("")
+    monkeypatch.chdir(root)
+
+    ok("doc", "restore", "doc-1")
+
+    assert (root / "docs" / "notes.md").read_text() == "# Notes\nbody\n"
+    assert not backups_path(owner).exists()
+    assert (paths.docs_dir() / "doc-1.md").is_file()
+
+
+def test_notice_goes_to_stderr_and_stdout_stays_one_envelope(data, tmp_path, monkeypatch):
+    for name in ("one", "two"):
+        project = register(tmp_path, name)
+        conn = v4_board(project)
+        make_card(conn, f"{name}-card", project_id=project.id)
+        conn.close()
+    root = tmp_path / "one"
+    (root / ".brd").write_text("")
+    monkeypatch.chdir(root)
+
+    first = invoke("list")
+    assert first.exit_code == 0
+    assert [c["id"] for c in json.loads(first.stdout)["data"]] == ["one-card"]
+    assert first.stderr.startswith(NOTICE.format(n=2))
+
+    second = invoke("list")
+    assert second.exit_code == 0
+    assert second.stderr == ""
+    assert json.loads(second.stdout) == json.loads(first.stdout)
+
+
+def test_fresh_install_init_creates_brd_db_without_notice(data, tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    monkeypatch.chdir(repo)
+
+    result = invoke("init")
+
+    assert result.exit_code == 0
+    assert json.loads(result.stdout)["ok"] is True
+    assert result.stderr == ""
+    conn = db.connect(paths.brd_db_path())
+    try:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION
+        assert [r[0] for r in conn.execute("SELECT root_path FROM projects")] == [str(repo)]
+    finally:
+        conn.close()
+    assert not paths.master_db_path().exists()
+    assert not (data / "projects").exists()
+
+
+def test_command_outside_any_project_still_migrates(data, tmp_path, monkeypatch):
+    owner = register(tmp_path, "owner")
+    conn = v4_board(owner)
+    make_card(conn, "c1", project_id=owner.id)
+    conn.close()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    monkeypatch.chdir(outside)
+
+    result = invoke("list")
+
+    assert result.exit_code == 1
+    assert json.loads(result.stdout)["error"]["type"] == "ProjectNotFoundError"
+    assert result.stderr.startswith(NOTICE.format(n=1))
+    assert migrated(paths.master_db_path()).is_file()
+
+
+@pytest.mark.parametrize("args", [["prompt"], ["--help"], ["doc", "--help"]])
+def test_commands_without_data_do_not_migrate(data, tmp_path, args):
+    register(tmp_path, "owner")
+
+    result = invoke(*args)
+
+    assert result.exit_code == 0
+    assert result.stderr == ""
+    assert paths.master_db_path().is_file()
+    assert not paths.brd_db_path().exists()

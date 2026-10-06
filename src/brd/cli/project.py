@@ -22,14 +22,20 @@ def init(
     pretty: bool = pretty_option(),
 ) -> None:
     """Register the current directory as a brd project."""
-    project = master.init_project(Path.cwd(), name=name)
+    try:
+        project = master.init_project(Path.cwd(), name=name)
+    except BrdError as exc:
+        fail(exc, pretty)
     output.print_result(output.ok_envelope(dataclasses.asdict(project)), pretty)
 
 
 @app.command()
 def projects(pretty: bool = pretty_option()) -> None:
     """List all registered projects."""
-    all_projects = master.list_all_projects()
+    try:
+        all_projects = master.list_all_projects()
+    except BrdError as exc:
+        fail(exc, pretty)
     envelope = output.ok_envelope([dataclasses.asdict(p) for p in all_projects])
     output.print_result(envelope, pretty)
 
