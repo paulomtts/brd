@@ -423,7 +423,17 @@ def list_children(conn: sqlite3.Connection, parent_id: str) -> list[Card]:
     return [_row_to_card(row) for row in rows]
 
 
+def delete_incoming_edges(conn: sqlite3.Connection, entity_id: str) -> None:
+    # Edges pointing at entity_id. Explicit rather than an FK cascade so it
+    # holds without one; no commit, so callers delete the entity in the same
+    # transaction.
+    conn.execute("DELETE FROM blocked_by WHERE blocks_on_id = ?", (entity_id,))
+    conn.execute("DELETE FROM refs WHERE dst_id = ?", (entity_id,))
+
+
 def delete_card(conn: sqlite3.Connection, card_id: str) -> None:
-    # Cascades to the cards row, its block edges, comments, tags, and refs.
+    # Incoming edges are deleted explicitly; the entities cascade takes the
+    # cards row, its outgoing block edges and refs, comments, and tags.
+    delete_incoming_edges(conn, card_id)
     conn.execute("DELETE FROM entities WHERE id = ?", (card_id,))
     conn.commit()

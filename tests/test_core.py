@@ -309,6 +309,33 @@ def test_delete_card_removes_blocked_by_edges(conn):
     assert db.list_blockers_of(conn, a.id) == []
 
 
+def test_delete_card_cascade_removes_incoming_edges_of_every_deleted_card(conn):
+    parent = core.create_card(conn, title="P")
+    child = core.create_card(conn, title="C", parent_id=parent.id)
+    grandchild = core.create_card(conn, title="G", parent_id=child.id)
+    outsider = core.create_card(conn, title="O")
+    unrelated = core.create_card(conn, title="U")
+    core.block_card(conn, outsider.id, child.id)
+    core.block_card(conn, outsider.id, grandchild.id)
+    core.block_card(conn, outsider.id, unrelated.id)
+    _refs.add_explicit(conn, outsider.id, parent.id)
+    _refs.add_explicit(conn, outsider.id, grandchild.id)
+    conn.commit()
+    conn.execute("PRAGMA foreign_keys=OFF")
+
+    deleted = core.delete_card(conn, parent.id, cascade=True)
+
+    assert set(deleted) == {parent.id, child.id, grandchild.id}
+    for card_id in deleted:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM blocked_by WHERE blocks_on_id = ?", (card_id,)
+        ).fetchone()[0] == 0
+        assert conn.execute(
+            "SELECT COUNT(*) FROM refs WHERE dst_id = ?", (card_id,)
+        ).fetchone()[0] == 0
+    assert db.list_blockers_of(conn, outsider.id) == [unrelated.id]
+
+
 def test_update_card_rejects_unknown_parent(conn):
     card = core.create_card(conn, title="Card")
     with pytest.raises(core.CardNotFoundError):

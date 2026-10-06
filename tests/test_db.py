@@ -571,6 +571,48 @@ def test_delete_card_removes_blocked_by_edges_in_both_directions(project_conn):
     assert db.get_card(project_conn, "c2") is not None
 
 
+def _count(conn, sql, *params):
+    return conn.execute(sql, params).fetchone()[0]
+
+
+def test_delete_card_removes_incoming_edges_without_fk_cascade(project_conn):
+    for card_id in ("c1", "c2", "c3"):
+        db.insert_card(project_conn, _sample_card(card_id))
+    db.add_blocked_by_edge(project_conn, "c3", "c1")
+    db.add_blocked_by_edge(project_conn, "c3", "c2")
+    project_conn.execute(
+        "INSERT INTO refs (src_id, dst_id, origin) VALUES "
+        "('c2', 'c1', 'explicit'), ('c3', 'c1', 'link')"
+    )
+    project_conn.commit()
+    project_conn.execute("PRAGMA foreign_keys=OFF")
+
+    db.delete_card(project_conn, "c1")
+
+    assert _count(
+        project_conn, "SELECT COUNT(*) FROM blocked_by WHERE blocks_on_id = ?", "c1"
+    ) == 0
+    assert _count(project_conn, "SELECT COUNT(*) FROM refs WHERE dst_id = ?", "c1") == 0
+    assert db.list_blockers_of(project_conn, "c3") == ["c2"]
+
+
+def test_delete_incoming_edges_does_not_commit(project_conn):
+    db.insert_card(project_conn, _sample_card("c1"))
+    db.insert_card(project_conn, _sample_card("c2"))
+    db.add_blocked_by_edge(project_conn, "c2", "c1")
+    project_conn.execute(
+        "INSERT INTO refs (src_id, dst_id, origin) VALUES ('c2', 'c1', 'explicit')"
+    )
+    project_conn.commit()
+
+    db.delete_incoming_edges(project_conn, "c1")
+    assert project_conn.in_transaction
+    project_conn.rollback()
+
+    assert db.list_blockers_of(project_conn, "c2") == ["c1"]
+    assert _count(project_conn, "SELECT COUNT(*) FROM refs WHERE dst_id = ?", "c1") == 1
+
+
 def test_insert_card_commits_so_another_connection_sees_it(tmp_path):
     db_path = tmp_path / "project.db"
     writer = db.connect(db_path)
