@@ -5,7 +5,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from brd import entities, refs
+from brd import core, entities, refs
 from brd.errors import CommentNotFoundError, EmptyCommentError, NotCommentableError
 
 
@@ -26,10 +26,15 @@ def _row(row: sqlite3.Row) -> Comment:
     return Comment(row["id"], row["entity_id"], row["author"], row["body"], row["created_at"])
 
 
-def add(conn: sqlite3.Connection, entity_id: str, body: str, author: str) -> Comment:
-    entities.require_capability(
+def add(
+    conn: sqlite3.Connection, project_id: str, entity_id: str, body: str, author: str
+) -> Comment:
+    kind = entities.require_capability(
         conn, entity_id, entities.COMMENTABLE, NotCommentableError, "commented on"
     )
+    if kind == "card":
+        # Only cards are scoped to the current project so far; issues follow.
+        core.require_card(conn, project_id, entity_id)
     if not body.strip():
         raise EmptyCommentError("comment body is empty")
     comment = Comment(

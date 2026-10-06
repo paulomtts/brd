@@ -24,7 +24,9 @@ def add(
     run(
         pretty,
         lambda ctx: views.comment_dict(
-            comments.add(ctx.conn, entity_id, text, comments.resolve_author(author))
+            comments.add(
+                ctx.conn, ctx.project.id, entity_id, text, comments.resolve_author(author)
+            )
         ),
     )
 

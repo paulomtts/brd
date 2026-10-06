@@ -809,3 +809,8 @@ def test_blocker_targets_must_be_in_this_project(foreign):
 def test_issue_open_refuses_a_foreign_blocks_card(foreign):
     _refused("issue", "open", "--title", "q", "--blocks", foreign)
     assert ok("issue", "list") == []
+
+
+def test_comment_add_refuses_a_foreign_card(foreign):
+    _refused("comment", "add", foreign, "hi")
+    assert ok("show", foreign)["comments"] == []

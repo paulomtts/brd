@@ -203,6 +203,10 @@ REFUSED = [
         lambda c: issues.open_issue(c, P, "t", blocks=["p1", "q1"]), "q1", "card",
         id="open_issue_foreign_blocks",
     ),
+    pytest.param(
+        lambda c: comments.add(c, P, "q1", "hi", "alice"), "q1", "card",
+        id="comments_add_foreign_card",
+    ),
 ]
 
 
