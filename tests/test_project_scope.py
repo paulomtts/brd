@@ -15,11 +15,12 @@ from brd.errors import (
     DuplicatePathError,
     DuplicateStemError,
     EntityNotFoundError,
+    ImportFormatError,
     InvalidBlockerError,
     IssueNotFoundError,
     SelfReferenceError,
 )
-from brd.models import Card
+from brd.models import Card, Project
 from tests.factories import (
     NOW,
     OTHER_PROJECT,
@@ -55,9 +56,8 @@ def test_migrate_project_requires_the_project(tmp_path):
         lambda conn, root, source: core.import_tree(conn, []),
         lambda conn, root, source: issues.open_issue(conn, title="i"),
         lambda conn, root, source: documents.add(conn, root, source),
-        lambda conn, root, source: snapshot.load(conn, root, []),
     ],
-    ids=["insert_card", "create_card", "import_tree", "open_issue", "documents.add", "snapshot.load"],
+    ids=["insert_card", "create_card", "import_tree", "open_issue", "documents.add"],
 )
 def test_insert_paths_require_a_project_id(pconn, tmp_path, call):
     root = tmp_path / "repo"
@@ -94,7 +94,8 @@ def test_failed_document_insert_leaves_no_entity_row(pconn, tmp_path, monkeypatc
 
 
 def test_snapshot_load_records_its_project(pconn, tmp_path):
-    add_project(pconn, OTHER_PROJECT)
+    other = dataclasses.replace(OTHER_PROJECT, root_path=str(tmp_path.resolve()))
+    add_project(pconn, other)
     snap = {
         "brd_export": 1,
         "cards": [
@@ -110,11 +111,11 @@ def test_snapshot_load_records_its_project(pconn, tmp_path):
              "content_hash": "h", "created_at": NOW, "updated_at": NOW}
         ],
     }
-    snapshot.load(pconn, OTHER_PROJECT.id, tmp_path, snap)
+    snapshot.load(pconn, tmp_path, snap)
     rows = {r[0]: r[1] for r in pconn.execute("SELECT id, project_id FROM entities")}
-    assert rows == {"c": OTHER_PROJECT.id, "i": OTHER_PROJECT.id, "d": OTHER_PROJECT.id}
+    assert rows == {"c": other.id, "i": other.id, "d": other.id}
     stored = pconn.execute("SELECT project_id FROM documents WHERE id = 'd'").fetchone()
-    assert stored[0] == OTHER_PROJECT.id
+    assert stored[0] == other.id
 
 
 @pytest.fixture
@@ -689,19 +690,24 @@ def test_export_holds_only_the_projects_issues_and_documents(two, root):
 
 
 def test_import_checks_document_uniqueness_per_project(two, root):
-    def snap(doc_id):
-        return {
-            "brd_export": 1,
-            "documents": [
-                {"id": doc_id, "title": "N", "source_path": "docs/qnotes.md", "content": "x",
-                 "content_hash": "h", "created_at": NOW, "updated_at": NOW}
-            ],
-        }
+    def doc(doc_id):
+        return {"id": doc_id, "title": "N", "source_path": "docs/qnotes.md", "content": "x",
+                "content_hash": "h", "created_at": NOW, "updated_at": NOW}
 
-    snapshot.load(two, P, root, snap("pn"))  # Q's qd has this path and stem
-    assert [d.id for d in documents.list_all(two, P)] == ["pn"]
-    with pytest.raises(DuplicatePathError):
-        snapshot.load(two, P, root, snap("pn2"))
+    third = Project(
+        id="33333333-3333-4333-8333-333333333333",
+        name="third",
+        root_path=str(root.resolve()),
+        created_at=NOW,
+    )
+    add_project(two, third)
+    before = _state(two)
+    with pytest.raises(ImportFormatError):
+        snapshot.load(two, root, {"brd_export": 1, "documents": [doc("pn"), doc("pn2")]})
+    assert _state(two) == before
+    # Q's qd has this path and stem; uniqueness is per project.
+    snapshot.load(two, root, {"brd_export": 1, "documents": [doc("pn")]})
+    assert [d.id for d in documents.list_all(two, third.id)] == ["pn"]
 
 
 Q_UUID = "abababab-abab-4bab-8bab-abababababab"

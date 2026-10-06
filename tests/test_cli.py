@@ -717,7 +717,7 @@ def test_import_rejects_colliding_ids(isolated_env):
     result = runner.invoke(app, ["import", str(snapshot_file)])
     assert result.exit_code != 0
     payload = json.loads(result.stdout)
-    assert payload["error"]["type"] == "CardAlreadyExistsError"
+    assert payload["error"]["type"] == "ProjectNotEmptyError"
 
 
 def test_import_missing_file_errors(isolated_env):

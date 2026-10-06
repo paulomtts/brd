@@ -62,13 +62,14 @@ def import_cmd(
     ),
     pretty: bool = pretty_option(),
 ) -> None:
-    """Restore a board from a snapshot; touches nothing if any id already exists."""
+    """Restore a snapshot into the current project; refuses, writing nothing, if the
+    target project already has entities."""
 
-    def action(ctx):
+    def action(conn: sqlite3.Connection) -> dict:
         try:
             raw = json.loads(file.read_text())
         except (OSError, json.JSONDecodeError) as exc:
             raise ImportReadError(f"could not read a JSON snapshot from {file}: {exc}") from exc
-        return snapshot.load(ctx.conn, ctx.project.id, Path(ctx.project.root_path), raw)
+        return snapshot.load(conn, Path.cwd(), raw)
 
-    run(pretty, action)
+    _run_global(pretty, action)

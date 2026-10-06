@@ -116,3 +116,7 @@ class ImportFormatError(BrdError):
 
 class ImportReadError(BrdError):
     pass
+
+
+class ProjectNotEmptyError(BrdError):
+    pass

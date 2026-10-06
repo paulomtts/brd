@@ -116,8 +116,9 @@ def test_import_collision_touches_nothing(populated, tmp_path):
     snapshot = tmp_path / "snapshot.json"
     snapshot.write_text(json.dumps(ok("export")))
     before = len(ok("list"))
-    assert err("import", snapshot) == "EntityAlreadyExistsError"
+    assert err("import", snapshot) == "ProjectNotEmptyError"
     assert len(ok("list")) == before
+    assert len(ok("projects")) == 1
 
 
 def test_import_accepts_wrapped_export_envelope(populated, tmp_path, monkeypatch):
@@ -136,8 +137,10 @@ def test_old_tree_snapshot_still_imports(project, tmp_path, monkeypatch):
     snapshot = tmp_path / "tree.json"
     snapshot.write_text(json.dumps({"ok": True, "data": tree}))
     other = _fresh_project(tmp_path, monkeypatch)
-    assert ok("import", snapshot) == {"imported": 2}
-    assert err("import", snapshot) == "CardAlreadyExistsError"
+    result = ok("import", snapshot)
+    assert (result["imported"], result["cards"]) == (2, 2)
+    assert len(result["projects"]) == 1 and result["not_found_edges"] == 0
+    assert err("import", snapshot) == "ProjectNotEmptyError"
 
 
 def test_import_rejects_unknown_format(project, tmp_path):
@@ -180,8 +183,10 @@ def test_import_stem_collision_touches_nothing(populated, tmp_path, monkeypatch)
     other = _fresh_project(tmp_path, monkeypatch)
     write(other, "docs/notes.md", "local")
     ok("doc", "add", "docs/notes.md")
-    assert err("import", snapshot) == "DuplicatePathError"
+    assert err("import", snapshot) == "ProjectNotEmptyError"
     assert ok("list") == [] and ok("issue", "list") == []
+    assert len(ok("doc", "list")) == 1
+    assert len(ok("projects")) == 1
 
 
 def _import_into_fresh(tmp_path, monkeypatch, data):
@@ -202,17 +207,6 @@ def test_import_rejects_unsafe_document_source_path(populated, tmp_path, monkeyp
     assert ok("list") == [] and ok("issue", "list") == [] and ok("doc", "list") == []
     docs_dir = paths.docs_dir()
     assert not docs_dir.exists() or list(docs_dir.iterdir()) == []
-
-
-def test_old_tree_snapshot_with_unknown_blocker_imports_nothing(project, tmp_path, monkeypatch):
-    a = ok("add", "--title", "A")
-    issue = ok("issue", "open", "--title", "Q", "--blocks", a["id"])
-    ok("add", "--title", "B")
-    tree = ok("tree")
-    assert issue["id"] in tree[0]["blocked_by"]
-    other, error = _import_into_fresh(tmp_path, monkeypatch, tree)
-    assert error == "ImportFormatError"
-    assert ok("list") == []
 
 
 @pytest.mark.parametrize(
@@ -239,6 +233,8 @@ def test_malformed_snapshot_is_an_envelope(project, tmp_path, monkeypatch, raw):
 
 GHOST = "0b6f4c1e-dead-4222-8333-444455556666"
 
+_EMPTY_BODY = {key: [] for key in ("cards", "issues", "documents", "comments", "tags", "refs")}
+
 
 @pytest.mark.parametrize(
     "raw",
@@ -247,6 +243,11 @@ GHOST = "0b6f4c1e-dead-4222-8333-444455556666"
         {"brd_export": 2, "projects": [5]},
         {"brd_export": 2},
         {"brd_export": 2, "projects": [{"project": {}, "cards": []}]},
+        {"brd_export": 2, "projects": [dict(_EMPTY_BODY)]},
+        {"brd_export": 2, "projects": [{"project": 5, **_EMPTY_BODY}]},
+        {"brd_export": 2, "projects": [
+            {"project": {"id": "x", "name": "n", "created_at": "t"}, **_EMPTY_BODY}
+        ]},
     ],
 )
 def test_malformed_v2_snapshot_says_malformed(project, tmp_path, monkeypatch, raw):
@@ -271,55 +272,20 @@ def _assert_nothing_imported(other):
     assert not docs_dir.exists() or list(docs_dir.iterdir()) == []
 
 
-def test_import_rejects_unknown_blocker(populated, tmp_path, monkeypatch):
-    data = ok("export")
-    _entry(data)["cards"][0]["blocked_by"].append(GHOST)
-    other, error = _import_error_into_fresh(tmp_path, monkeypatch, data)
-    assert error["type"] == "ImportFormatError"
-    assert GHOST in error["message"]
-    _assert_nothing_imported(other)
-
-
-def test_import_rejects_unknown_ref_target(populated, tmp_path, monkeypatch):
-    data = ok("export")
-    _entry(data)["refs"].append(
-        {"src_id": populated["card"]["id"], "dst_id": GHOST, "origin": "explicit"}
-    )
-    other, error = _import_error_into_fresh(tmp_path, monkeypatch, data)
-    assert error["type"] == "ImportFormatError"
-    assert GHOST in error["message"]
-    _assert_nothing_imported(other)
-
-
-def test_old_tree_snapshot_names_the_unknown_blocker(project, tmp_path, monkeypatch):
-    a = ok("add", "--title", "A")
-    issue = ok("issue", "open", "--title", "Q", "--blocks", a["id"])
-    tree = ok("tree")
-    other, error = _import_error_into_fresh(tmp_path, monkeypatch, tree)
-    assert error["type"] == "ImportFormatError"
-    assert issue["id"] in error["message"]
-    assert ok("list") == []
-
 
 @pytest.mark.parametrize("fmt", ["export", "tree"])
-def test_import_blocker_already_on_board_is_accepted(project, tmp_path, fmt):
+def test_import_blocker_already_on_board_is_accepted(project, tmp_path, monkeypatch, fmt):
     issue = ok("issue", "open", "--title", "Q")
-    card_id = "5d0f6a52-7c55-4a8e-9d0b-0c1f2e3a4b5c"
-    node = {
-        "id": card_id,
-        "title": "Imported",
-        "description": None,
-        "status": "todo",
-        "blocked_by": [issue["id"]],
-        "created_at": "2026-01-01T00:00:00+00:00",
-        "updated_at": "2026-01-01T00:00:00+00:00",
-        "children": [],
-    }
+    node = _card_node(CARD_1, blocked_by=[issue["id"]])
     data = {"brd_export": 1, "cards": [node]} if fmt == "export" else [node]
-    snapshot = tmp_path / "snapshot.json"
-    snapshot.write_text(json.dumps(data))
-    ok("import", snapshot)
-    assert ok("show", card_id)["blocked_by"] == [issue["id"]]
+    snapshot = _snapshot_file(tmp_path, data)
+    # The issue lives in another project of this install; the target is empty.
+    _another_project(tmp_path, monkeypatch, "second")
+    result = ok("import", snapshot)
+    assert result["not_found_edges"] == 0
+    shown = ok("show", CARD_1)
+    assert shown["blocked_by"] == [issue["id"]]
+    assert [b["status"] for b in shown["blockers"]] == ["open"]
 
 
 def test_round_trip_keeps_refs_between_snapshot_entities(populated, tmp_path, monkeypatch):
@@ -346,18 +312,10 @@ def test_export_card_nodes_have_no_blockers(populated):
     assert child["blocked_by"] == [populated["issue"]["id"]]
 
 
-@pytest.mark.parametrize("count", [0, 2])
-def test_import_refuses_a_multi_entry_export(project, tmp_path, monkeypatch, count):
-    ok("add", "--title", "A")
-    entries = [_entry(ok("export"))]
-    _another_project(tmp_path, monkeypatch, "second")
-    ok("add", "--title", "B")
-    entries.append(_entry(ok("export")))
-    data = {"brd_export": 2, "projects": entries[:count]}
-    other, error = _import_error_into_fresh(tmp_path, monkeypatch, data)
+def test_import_refuses_a_snapshot_with_no_entries(project, tmp_path, monkeypatch):
+    other, error = _import_error_into_fresh(tmp_path, monkeypatch, _v2())
     assert error["type"] == "ImportFormatError"
-    assert f"{count} project entries" in error["message"]
-    assert "not supported yet" in error["message"]
+    assert "no project entries" in error["message"]
     _assert_nothing_imported(other)
 
 
@@ -472,3 +430,251 @@ def test_export_help_mentions_all():
     text = " ".join(result.stdout.replace("│", " ").split())
     assert "--all" in text
     assert "every registered project" in text
+
+
+T = "2026-01-01T00:00:00+00:00"
+CARD_1 = "c1000000-0000-4000-8000-000000000001"
+CARD_2 = "c2000000-0000-4000-8000-000000000002"
+PROJECT_X = "aaaaaaaa-0000-4000-8000-00000000000a"
+PROJECT_Y = "bbbbbbbb-0000-4000-8000-00000000000b"
+
+
+def _unregistered_dir(tmp_path, monkeypatch, name, data_home=None):
+    """chdir into a new directory that no `brd init` registered; with
+    data_home, on a fresh install whose data lives there. Returns the
+    resolved path, the string `brd init` would store for it."""
+    if data_home is not None:
+        monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / data_home))
+    path = tmp_path / name
+    path.mkdir(parents=True)
+    monkeypatch.chdir(path)
+    return path.resolve()
+
+
+def _snapshot_file(tmp_path, data, name="snapshot.json"):
+    path = tmp_path / name
+    path.write_text(json.dumps(data))
+    return path
+
+
+def _import_error(snapshot):
+    result = invoke("import", snapshot)
+    assert result.exit_code == 1, result.output
+    return json.loads(result.stdout)["error"]
+
+
+def _card_node(card_id, blocked_by=()):
+    return {
+        "id": card_id,
+        "title": f"card {card_id[:2]}",
+        "description": None,
+        "status": "todo",
+        "blocked_by": list(blocked_by),
+        "created_at": T,
+        "updated_at": T,
+        "children": [],
+    }
+
+
+def _hand_entry(project_id, root_path, name="hand", cards=(), issues=(), refs=()):
+    """A v2 project entry built by hand: a recorded project plus its body."""
+    return {
+        "project": {"id": project_id, "name": name, "root_path": str(root_path), "created_at": T},
+        "cards": list(cards),
+        "issues": list(issues),
+        "documents": [],
+        "comments": [],
+        "tags": [],
+        "refs": list(refs),
+    }
+
+
+def _v2(*entries):
+    return {"brd_export": 2, "projects": list(entries)}
+
+def test_one_entry_import_registers_an_unregistered_cwd_with_the_entry_id(
+    populated, tmp_path, monkeypatch
+):
+    data = ok("export")
+    recorded = _entry(data)["project"]
+    snapshot = _snapshot_file(tmp_path, data)
+    restored = _unregistered_dir(tmp_path, monkeypatch, "restored", data_home="other-data")
+    result = ok("import", snapshot)
+    (registered,) = ok("projects")
+    assert registered == {
+        "id": recorded["id"],
+        "name": recorded["name"],
+        "root_path": str(restored),
+        "created_at": recorded["created_at"],
+    }
+    (item,) = result["projects"]
+    assert item["registered"] is True
+    assert item["project"] == registered
+    assert populated["card"]["id"] in {c["id"] for c in ok("list")}
+
+
+def test_one_entry_import_mints_an_id_when_the_entry_id_is_taken(project, tmp_path, monkeypatch):
+    (a,) = ok("projects")
+    snapshot = _snapshot_file(
+        tmp_path, _v2(_hand_entry(a["id"], tmp_path / "nowhere", cards=[_card_node(CARD_1)]))
+    )
+    restored = _unregistered_dir(tmp_path, monkeypatch, "restored")
+    result = ok("import", snapshot)
+    (item,) = result["projects"]
+    assert item["registered"] is True
+    assert item["project"]["id"] != a["id"]
+    assert item["project"]["root_path"] == str(restored)
+    assert item["project"]["name"] == "hand"
+    projects = {p["id"]: p for p in ok("projects")}
+    assert projects == {a["id"]: a, item["project"]["id"]: item["project"]}
+    assert [c["id"] for c in ok("list")] == [CARD_1]
+
+
+@pytest.mark.parametrize("fmt", ["v1", "tree"])
+def test_v1_and_tree_import_register_an_unregistered_cwd(tmp_path, monkeypatch, fmt):
+    node = _card_node(CARD_1)
+    data = {"brd_export": 1, "cards": [node]} if fmt == "v1" else [node]
+    snapshot = _snapshot_file(tmp_path, data)
+    restored = _unregistered_dir(tmp_path, monkeypatch, "restored", data_home="data")
+    result = ok("import", snapshot)
+    (registered,) = ok("projects")
+    assert registered["name"] == "restored"
+    assert registered["root_path"] == str(restored)
+    assert registered["id"]
+    (item,) = result["projects"]
+    assert item["project"] == registered and item["registered"] is True
+    assert [c["id"] for c in ok("list")] == [CARD_1]
+
+
+def test_one_entry_import_lands_in_the_cwd_project_from_a_subdirectory(
+    project, tmp_path, monkeypatch
+):
+    (a,) = ok("projects")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()  # an existing directory, still ignored for a one-entry file
+    snapshot = _snapshot_file(
+        tmp_path, _v2(_hand_entry(PROJECT_X, elsewhere, cards=[_card_node(CARD_1)]))
+    )
+    sub = project / "src" / "deep"
+    sub.mkdir(parents=True)
+    monkeypatch.chdir(sub)
+    result = ok("import", snapshot)
+    assert ok("projects") == [a]
+    (item,) = result["projects"]
+    assert item["project"] == a and item["registered"] is False
+    assert [c["id"] for c in ok("list")] == [CARD_1]
+
+
+@pytest.mark.parametrize("fmt", ["export", "tree"])
+def test_unknown_edge_targets_are_kept_and_counted(tmp_path, monkeypatch, fmt):
+    node = _card_node(CARD_1, blocked_by=[GHOST])
+    if fmt == "export":
+        ghost_ref = {"src_id": CARD_1, "dst_id": GHOST, "origin": "explicit"}
+        data = _v2(_hand_entry(PROJECT_X, tmp_path / "x", cards=[node], refs=[ghost_ref]))
+        expected = 2
+    else:
+        data = [node]
+        expected = 1
+    snapshot = _snapshot_file(tmp_path, data)
+    _unregistered_dir(tmp_path, monkeypatch, "restored", data_home="data")
+    assert ok("import", snapshot)["not_found_edges"] == expected
+    shown = ok("show", CARD_1)
+    assert [(b["id"], b["status"]) for b in shown["blockers"]] == [(GHOST, "not-found")]
+    assert shown["status"] == "blocked"
+    if fmt == "export":
+        assert [r["id"] for r in shown["refs"] if r["origin"] == "explicit"] == [GHOST]
+
+
+def test_importing_the_missing_project_later_reconnects_edges(project, tmp_path, monkeypatch):
+    a1 = ok("add", "--title", "a1")["id"]
+    second, _ = _another_project(tmp_path, monkeypatch, "second")
+    b1 = ok("add", "--title", "b1")["id"]
+    b_snapshot = _snapshot_file(tmp_path, ok("export"), "b.json")
+    monkeypatch.chdir(project)
+    ok("block", a1, "--by", b1)
+    a_snapshot = _snapshot_file(tmp_path, ok("export"), "a.json")
+
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "other-data"))
+    assert ok("import", a_snapshot)["not_found_edges"] == 1
+    assert [(b["id"], b["status"]) for b in ok("show", a1)["blockers"]] == [(b1, "not-found")]
+    monkeypatch.chdir(second)
+    assert ok("import", b_snapshot)["not_found_edges"] == 0
+    monkeypatch.chdir(project)
+    assert [(b["id"], b["status"]) for b in ok("show", a1)["blockers"]] == [(b1, "todo")]
+
+
+def test_id_owned_by_another_project_is_refused(populated, tmp_path, monkeypatch):
+    snapshot = _snapshot_file(tmp_path, ok("export"))
+    _another_project(tmp_path, monkeypatch, "second")
+    error = _import_error(snapshot)
+    assert error["type"] == "EntityAlreadyExistsError"
+    assert populated["card"]["id"] in error["message"]
+    assert ok("list") == [] and ok("issue", "list") == [] and ok("doc", "list") == []
+    assert len(ok("projects")) == 2
+
+
+def test_import_report_shape_and_pretty(populated, tmp_path, monkeypatch):
+    snapshot = _snapshot_file(tmp_path, ok("export"))
+    _fresh_project(tmp_path, monkeypatch)
+    result = ok("import", snapshot)
+    assert set(result) == {
+        "imported", "cards", "issues", "documents", "comments", "projects", "not_found_edges"
+    }
+    assert (
+        result["imported"], result["cards"], result["issues"], result["documents"],
+        result["comments"],
+    ) == (4, 2, 1, 1, 1)
+    (registered,) = ok("projects")
+    assert result["projects"] == [
+        {
+            "project": registered,
+            "registered": False,
+            "imported": 4,
+            "cards": 2,
+            "issues": 1,
+            "documents": 1,
+            "comments": 1,
+        }
+    ]
+    assert result["not_found_edges"] == 0
+
+
+def test_failed_import_registers_no_project(populated, tmp_path, monkeypatch):
+    data = ok("export")
+    _entry(data)["comments"].append(
+        {
+            "id": "00000000-0000-0000-0000-000000000000",
+            "entity_id": "does-not-exist",
+            "author": "x",
+            "body": "y",
+            "created_at": T,
+        }
+    )
+    snapshot = _snapshot_file(tmp_path, data)
+    _unregistered_dir(tmp_path, monkeypatch, "restored", data_home="other-data")
+    error = _import_error(snapshot)
+    assert error["type"] == "ImportFormatError"
+    assert "internally inconsistent" in error["message"]
+    assert ok("projects") == []
+    docs_dir = paths.docs_dir()
+    assert not docs_dir.exists() or list(docs_dir.iterdir()) == []
+
+
+def test_import_refuses_two_documents_with_one_path(populated, tmp_path, monkeypatch):
+    data = ok("export")
+    docs = _entry(data)["documents"]
+    docs.append({**docs[0], "id": "d0c00000-0000-4000-8000-000000000001"})
+    snapshot = _snapshot_file(tmp_path, data)
+    _unregistered_dir(tmp_path, monkeypatch, "restored", data_home="other-data")
+    error = _import_error(snapshot)
+    assert error["type"] == "ImportFormatError"
+    assert ok("projects") == []
+    docs_dir = paths.docs_dir()
+    assert not docs_dir.exists() or list(docs_dir.iterdir()) == []
+
+
+def test_import_refuses_a_snapshot_with_no_entries(project, tmp_path, monkeypatch):
+    other, error = _import_error_into_fresh(tmp_path, monkeypatch, _v2())
+    assert error["type"] == "ImportFormatError"
+    assert "no project entries" in error["message"]
+    _assert_nothing_imported(other)
