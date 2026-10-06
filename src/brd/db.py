@@ -3,7 +3,7 @@ import time
 import uuid
 from pathlib import Path
 
-from brd.errors import MigrationError
+from brd.errors import MigrationError, ProjectAlreadyExistsError
 from brd.models import Card, Project
 
 _BUSY_TIMEOUT = 10
@@ -509,6 +509,32 @@ def get_project(conn: sqlite3.Connection, root_path: str) -> Project | None:
     return _row_to_project(row) if row else None
 
 
+def get_project_by_id(conn: sqlite3.Connection, project_id: str) -> Project | None:
+    row = conn.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
+    return _row_to_project(row) if row else None
+
+
+def relink_project(
+    conn: sqlite3.Connection, project_id: str, root_path: str, name: str | None
+) -> Project:
+    """Point project_id at root_path, renaming it when name is given; id and
+    created_at stay. No commit: the caller's transaction covers its lookup
+    and this update. The UNIQUE root_path is the conflict check."""
+    try:
+        conn.execute(
+            "UPDATE projects SET root_path = ?, name = COALESCE(?, name) WHERE id = ?",
+            (root_path, name, project_id),
+        )
+    except sqlite3.IntegrityError:
+        other = get_project(conn, root_path)
+        if other is None:
+            raise
+        raise ProjectAlreadyExistsError(
+            f"{root_path} is already the root of project {other.name} ({other.id})"
+        ) from None
+    return get_project_by_id(conn, project_id)
+
+
 def deepest_project(conn: sqlite3.Connection, root_paths: list[str]) -> Project | None:
     """The project registered at the longest of root_paths, or None. An exact
     IN match, so `%` and `_` in a path are plain characters."""
@@ -521,9 +547,15 @@ def deepest_project(conn: sqlite3.Connection, root_paths: list[str]) -> Project 
     return _row_to_project(row) if row else None
 
 
-def delete_project(conn: sqlite3.Connection, root_path: str) -> None:
-    conn.execute("DELETE FROM projects WHERE root_path = ?", (root_path,))
-    conn.commit()
+def delete_project(conn: sqlite3.Connection, project_id: str) -> None:
+    """Delete the project and, through the cascade, everything it owns. Edges
+    from other projects that point at its entities have no foreign key to
+    cascade through, so they go explicitly, in the same transaction."""
+    owned = "SELECT id FROM entities WHERE project_id = ?"
+    with conn:
+        conn.execute(f"DELETE FROM blocked_by WHERE blocks_on_id IN ({owned})", (project_id,))
+        conn.execute(f"DELETE FROM refs WHERE dst_id IN ({owned})", (project_id,))
+        conn.execute("DELETE FROM projects WHERE id = ?", (project_id,))
 
 
 def in_project(id_column: str) -> str:

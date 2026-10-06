@@ -118,7 +118,7 @@ def forget_project(root_path: Path) -> Project:
                 (project.id,),
             )
         ]
-        db.delete_project(conn, str(root_path))
+        db.delete_project(conn, project.id)
     finally:
         conn.close()
 

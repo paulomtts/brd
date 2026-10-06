@@ -4,6 +4,7 @@ import uuid
 import pytest
 
 from brd import db
+from brd.errors import ProjectAlreadyExistsError
 from brd.models import Card, Project
 from tests.factories import (
     OTHER_PROJECT,
@@ -417,41 +418,138 @@ def test_get_project_returns_none_when_absent(conn):
     assert db.get_project(conn, "/nope") is None
 
 
-def test_delete_project_removes_matching_row(conn):
-    db.init_master_schema(conn)
-    db.upsert_project(conn, _sample_project("/repo1", "brd", id="id-1"))
-    db.upsert_project(conn, _sample_project("/repo2", "other", id="id-2"))
-    db.delete_project(conn, "/repo1")
-    assert [p.root_path for p in db.list_projects(conn)] == ["/repo2"]
-
-
-def test_delete_project_is_a_noop_when_absent(conn):
-    db.init_master_schema(conn)
-    db.upsert_project(conn, _sample_project())
-    db.delete_project(conn, "/nope")
-    assert [p.root_path for p in db.list_projects(conn)] == ["/repo"]
-
-
-def test_delete_project_commits_so_another_connection_sees_it(tmp_path):
-    db_path = tmp_path / "master.db"
-    writer = db.connect(db_path)
-    db.init_master_schema(writer)
-    db.upsert_project(writer, _sample_project())
-    db.delete_project(writer, "/repo")
-    reader = db.connect(db_path)
-    try:
-        assert db.list_projects(reader) == []
-    finally:
-        reader.close()
-        writer.close()
-
-
 @pytest.fixture
 def project_conn(tmp_path):
     connection = db.connect(tmp_path / "project.db")
     db.init_project_schema(connection, PROJECT)
     yield connection
     connection.close()
+
+
+def _project_ids(conn):
+    return {row["id"] for row in conn.execute("SELECT id FROM projects")}
+
+
+def _blocked_by_rows(conn):
+    return set(map(tuple, conn.execute("SELECT card_id, blocks_on_id FROM blocked_by")))
+
+
+def _ref_rows(conn):
+    return set(map(tuple, conn.execute("SELECT src_id, dst_id FROM refs")))
+
+
+def _add_ref(conn, src_id, dst_id):
+    conn.execute(
+        "INSERT INTO refs (src_id, dst_id, origin) VALUES (?, ?, 'explicit')", (src_id, dst_id)
+    )
+    conn.commit()
+
+
+def test_get_project_by_id_returns_matching_project(project_conn):
+    add_project(project_conn, OTHER_PROJECT)
+    assert db.get_project_by_id(project_conn, OTHER_PROJECT.id) == OTHER_PROJECT
+
+
+def test_get_project_by_id_returns_none_when_absent(project_conn):
+    assert db.get_project_by_id(project_conn, "nope") is None
+    assert db.get_project_by_id(project_conn, PROJECT.root_path) is None
+
+
+def test_relink_project_moves_the_root_and_keeps_id_name_and_created_at(project_conn):
+    relinked = db.relink_project(project_conn, PROJECT.id, "/moved", None)
+    assert relinked == Project(PROJECT.id, PROJECT.name, "/moved", PROJECT.created_at)
+    assert db.get_project(project_conn, PROJECT.root_path) is None
+
+
+def test_relink_project_renames_when_name_given(project_conn):
+    relinked = db.relink_project(project_conn, PROJECT.id, "/moved", "renamed")
+    assert relinked.name == "renamed"
+
+
+def test_relink_project_does_not_commit(project_conn):
+    db.relink_project(project_conn, PROJECT.id, "/moved", None)
+    assert project_conn.in_transaction
+    project_conn.rollback()
+    assert db.get_project_by_id(project_conn, PROJECT.id) == PROJECT
+
+
+def test_relink_project_onto_another_projects_root_raises_already_exists(project_conn):
+    add_project(project_conn, OTHER_PROJECT)
+
+    with pytest.raises(ProjectAlreadyExistsError) as excinfo:
+        db.relink_project(project_conn, PROJECT.id, OTHER_PROJECT.root_path, None)
+
+    message = str(excinfo.value)
+    assert OTHER_PROJECT.root_path in message
+    assert OTHER_PROJECT.name in message
+    assert OTHER_PROJECT.id in message
+    project_conn.rollback()
+    assert sorted(db.list_projects(project_conn), key=lambda p: p.id) == [
+        PROJECT,
+        OTHER_PROJECT,
+    ]
+
+
+def test_delete_project_removes_the_row_and_everything_it_owns(project_conn):
+    add_project(project_conn, OTHER_PROJECT)
+    make_card(project_conn, "c1")
+    make_card(project_conn, "o1", project_id=OTHER_PROJECT.id)
+
+    db.delete_project(project_conn, PROJECT.id)
+
+    assert _project_ids(project_conn) == {OTHER_PROJECT.id}
+    assert [row["id"] for row in project_conn.execute("SELECT id FROM cards")] == ["o1"]
+    assert [row["id"] for row in project_conn.execute("SELECT id FROM entities")] == ["o1"]
+
+
+def test_delete_project_removes_incoming_edges_from_other_projects(project_conn):
+    add_project(project_conn, OTHER_PROJECT)
+    make_card(project_conn, "a1")
+    make_card(project_conn, "b1", project_id=OTHER_PROJECT.id)
+    make_card(project_conn, "b2", project_id=OTHER_PROJECT.id)
+    db.add_blocked_by_edge(project_conn, "b1", "a1")
+    db.add_blocked_by_edge(project_conn, "b1", "b2")
+    _add_ref(project_conn, "b1", "a1")
+    _add_ref(project_conn, "b1", "b2")
+
+    db.delete_project(project_conn, PROJECT.id)
+
+    assert _blocked_by_rows(project_conn) == {("b1", "b2")}
+    assert _ref_rows(project_conn) == {("b1", "b2")}
+
+
+def test_delete_project_is_a_noop_when_absent(project_conn):
+    db.delete_project(project_conn, "nope")
+    assert _project_ids(project_conn) == {PROJECT.id}
+
+
+def test_delete_project_commits_so_another_connection_sees_it(tmp_path, project_conn):
+    db.delete_project(project_conn, PROJECT.id)
+    reader = db.connect(tmp_path / "project.db")
+    try:
+        assert db.list_projects(reader) == []
+    finally:
+        reader.close()
+
+
+def test_delete_project_keeps_incoming_edges_when_the_project_delete_fails(project_conn):
+    add_project(project_conn, OTHER_PROJECT)
+    make_card(project_conn, "a1")
+    make_card(project_conn, "b1", project_id=OTHER_PROJECT.id)
+    db.add_blocked_by_edge(project_conn, "b1", "a1")
+    _add_ref(project_conn, "b1", "a1")
+    project_conn.execute(
+        "CREATE TEMP TRIGGER refuse_project_delete BEFORE DELETE ON projects "
+        "BEGIN SELECT RAISE(ABORT, 'refused'); END"
+    )
+
+    with pytest.raises(sqlite3.DatabaseError):
+        db.delete_project(project_conn, PROJECT.id)
+
+    assert not project_conn.in_transaction
+    assert _blocked_by_rows(project_conn) == {("b1", "a1")}
+    assert _ref_rows(project_conn) == {("b1", "a1")}
+    assert _project_ids(project_conn) == {PROJECT.id, OTHER_PROJECT.id}
 
 
 def _sample_card(
