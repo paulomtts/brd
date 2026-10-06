@@ -4,6 +4,7 @@ import uuid
 import pytest
 
 from brd import db, master, paths
+from tests.factories import PROJECT
 
 
 def test_init_project_creates_central_db_and_gitignored_marker(tmp_path, monkeypatch):
@@ -96,7 +97,7 @@ def test_init_project_migrates_legacy_uuid_marker_preserving_cards(
     old_projects_dir.mkdir(parents=True)
     old_db_path = old_projects_dir / f"{legacy_id}.db"
     old_conn = db.connect(old_db_path)
-    db.init_project_schema(old_conn)
+    db.init_project_schema(old_conn, PROJECT)
     old_conn.execute(
         "INSERT INTO cards (id, title, description, status, parent_id, "
         "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -129,7 +130,7 @@ def test_init_project_migrates_in_repo_format_preserving_cards(tmp_path, monkeyp
     brd_dir.mkdir()
     old_db_path = brd_dir / "board.db"
     old_conn = db.connect(old_db_path)
-    db.init_project_schema(old_conn)
+    db.init_project_schema(old_conn, PROJECT)
     old_conn.execute(
         "INSERT INTO cards (id, title, description, status, parent_id, "
         "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",

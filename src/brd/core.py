@@ -116,6 +116,7 @@ def _require_blocker(conn: sqlite3.Connection, blocker_id: str) -> None:
 
 def create_card(
     conn: sqlite3.Connection,
+    project_id: str,
     title: str,
     description: str | None = None,
     parent_id: str | None = None,
@@ -138,7 +139,7 @@ def create_card(
         created_at=now,
         updated_at=now,
     )
-    db.insert_card(conn, card)
+    db.insert_card(conn, project_id, card)
 
     for blocker_id in blocked_by:
         if would_create_block_cycle(conn, card.id, blocker_id):
@@ -276,7 +277,7 @@ def _flatten_tree(
     return flattened
 
 
-def import_tree(conn: sqlite3.Connection, nodes: list[dict]) -> int:
+def import_tree(conn: sqlite3.Connection, project_id: str, nodes: list[dict]) -> int:
     """Restore cards from a brd tree JSON snapshot (build_tree's own output
     shape). Preserves original ids, descriptions, and timestamps. Fails
     before creating anything if any id already exists in this board."""

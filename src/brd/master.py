@@ -19,11 +19,11 @@ def _master_conn():
     return conn
 
 
-def _copy_cards(old_db_path: Path, new_db_path: Path) -> None:
+def _copy_cards(old_db_path: Path, new_db_path: Path, project: Project) -> None:
     old_conn = db.connect(old_db_path)
     new_conn = db.connect(new_db_path)
     try:
-        db.init_project_schema(new_conn)
+        db.init_project_schema(new_conn, project)
         for row in old_conn.execute("SELECT * FROM cards"):
             new_conn.execute(
                 "INSERT INTO cards (id, title, description, status, "
@@ -42,37 +42,62 @@ def _copy_cards(old_db_path: Path, new_db_path: Path) -> None:
         new_conn.close()
 
 
-def _migrate_in_repo_format(marker_dir: Path, new_db_path: Path) -> None:
+def _migrate_in_repo_format(marker_dir: Path, new_db_path: Path, project: Project) -> None:
     """Migrate the in-repo format (.brd/ directory with board.db, committed
     to git) back to central storage."""
     old_db_path = marker_dir / "board.db"
     if old_db_path.is_file():
-        _copy_cards(old_db_path, new_db_path)
+        _copy_cards(old_db_path, new_db_path, project)
     shutil.rmtree(marker_dir)
 
 
-def _migrate_legacy_uuid_marker(marker_file: Path, new_db_path: Path) -> None:
+def _migrate_legacy_uuid_marker(marker_file: Path, new_db_path: Path, project: Project) -> None:
     """Migrate the original design (.brd file holding a UUID, cards in a
     central per-project db keyed by that UUID)."""
-    project_id = marker_file.read_text().strip()
-    old_db_path = paths.data_dir() / "projects" / f"{project_id}.db"
+    legacy_id = marker_file.read_text().strip()
+    old_db_path = paths.data_dir() / "projects" / f"{legacy_id}.db"
     if old_db_path.is_file() and old_db_path != new_db_path:
-        _copy_cards(old_db_path, new_db_path)
+        _copy_cards(old_db_path, new_db_path, project)
+
+
+def _settle_project(root_path: Path, name: str | None) -> Project:
+    """The project this root is, settled before any board file is touched so
+    the board and the registry agree on its id: the registered row when
+    there is one, else a new project."""
+    project_name = name or root_path.name
+    conn = _master_conn()
+    try:
+        stored = db.get_project(conn, str(root_path))
+    finally:
+        conn.close()
+    if stored is not None:
+        return Project(
+            id=stored.id,
+            name=project_name,
+            root_path=str(root_path),
+            created_at=stored.created_at,
+        )
+    return Project(
+        id=db.new_project_id(),
+        name=project_name,
+        root_path=str(root_path),
+        created_at=_now(),
+    )
 
 
 def init_project(root_path: Path, name: str | None = None) -> Project:
-    project_name = name or root_path.name
+    project = _settle_project(root_path, name)
     marker = root_path / MARKER_FILENAME
     db_path = paths.project_db_path(root_path)
 
     if marker.is_dir():
-        _migrate_in_repo_format(marker, db_path)
+        _migrate_in_repo_format(marker, db_path, project)
     elif marker.is_file():
-        _migrate_legacy_uuid_marker(marker, db_path)
+        _migrate_legacy_uuid_marker(marker, db_path, project)
 
     project_conn = db.connect(db_path)
     try:
-        db.init_project_schema(project_conn)
+        db.init_project_schema(project_conn, project)
     finally:
         project_conn.close()
 
@@ -86,12 +111,6 @@ def init_project(root_path: Path, name: str | None = None) -> Project:
                 f.write("\n")
             f.write(f"{MARKER_FILENAME}\n")
 
-    project = Project(
-        id=db.new_project_id(),
-        name=project_name,
-        root_path=str(root_path),
-        created_at=_now(),
-    )
     conn = _master_conn()
     try:
         return db.upsert_project(conn, project)

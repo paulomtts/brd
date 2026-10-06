@@ -21,7 +21,12 @@ def add(
 
     def action(ctx):
         doc = documents.add(
-            ctx.conn, Path(ctx.project.root_path), path, title=title, tag_list=list(tag_list)
+            ctx.conn,
+            ctx.project.id,
+            Path(ctx.project.root_path),
+            path,
+            title=title,
+            tag_list=list(tag_list),
         )
         return views.document_summary(ctx.conn, doc, "ok")
 

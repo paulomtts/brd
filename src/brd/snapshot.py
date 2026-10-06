@@ -47,27 +47,27 @@ def export(conn: sqlite3.Connection, root: Path) -> dict:
     }
 
 
-def load(conn: sqlite3.Connection, root: Path, raw) -> dict:
+def load(conn: sqlite3.Connection, project_id: str, root: Path, raw) -> dict:
     try:
-        return _load(conn, raw)
+        return _load(conn, project_id, raw)
     except (KeyError, TypeError, AttributeError, sqlite3.ProgrammingError) as exc:
         # Missing keys or wrong value types in the snapshot. Any backups the
         # import wrote were already cleaned up by the time this is caught.
         raise ImportFormatError(f"malformed snapshot: {type(exc).__name__}: {exc}") from exc
 
 
-def _load(conn: sqlite3.Connection, raw) -> dict:
+def _load(conn: sqlite3.Connection, project_id: str, raw) -> dict:
     # `brd export > file` writes the whole envelope; accept it unwrapped too.
     if isinstance(raw, dict) and isinstance(raw.get("data"), dict):
         raw = raw["data"]
     if isinstance(raw, dict) and "brd_export" in raw:
         if raw["brd_export"] != FORMAT_VERSION:
             raise ImportFormatError(f"unsupported brd_export version {raw['brd_export']!r}")
-        return _load_export(conn, raw)
+        return _load_export(conn, project_id, raw)
     nodes = raw["data"] if isinstance(raw, dict) and "data" in raw else raw
     if not isinstance(nodes, list):
         raise ImportFormatError("expected a `brd export` object or a `brd tree` snapshot list")
-    return {"imported": core.import_tree(conn, nodes)}
+    return {"imported": core.import_tree(conn, project_id, nodes)}
 
 
 def _check_source_path(source_path) -> None:
@@ -83,7 +83,7 @@ def _check_source_path(source_path) -> None:
         )
 
 
-def _load_export(conn: sqlite3.Connection, snap: dict) -> dict:
+def _load_export(conn: sqlite3.Connection, project_id: str, snap: dict) -> dict:
     flattened = core._flatten_tree(snap.get("cards", []))
     issue_rows = snap.get("issues", [])
     doc_rows = snap.get("documents", [])

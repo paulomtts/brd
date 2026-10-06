@@ -1,12 +1,21 @@
 from brd import db
-from brd.models import Card
+from brd.models import Card, Project
 
 NOW = "2026-09-24T00:00:00+00:00"
 
+PROJECT = Project(
+    id="11111111-1111-4111-8111-111111111111",
+    name="test",
+    root_path="/test",
+    created_at=NOW,
+)
 
-def make_card(conn, id_, title=None, description=None, parent_id=None, status="todo"):
+
+def make_card(
+    conn, id_, title=None, description=None, parent_id=None, status="todo", project_id=PROJECT.id
+):
     db.insert_card(
-        conn, Card(id_, title or id_, description, status, parent_id, NOW, NOW)
+        conn, project_id, Card(id_, title or id_, description, status, parent_id, NOW, NOW)
     )
     return id_
 

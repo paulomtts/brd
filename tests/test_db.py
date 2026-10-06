@@ -5,6 +5,7 @@ import pytest
 
 from brd import db
 from brd.models import Card, Project
+from tests.factories import PROJECT
 
 
 @pytest.fixture
@@ -229,7 +230,7 @@ def test_init_master_schema_migration_is_atomic(conn, monkeypatch):
 
 
 def test_init_project_schema_creates_cards_and_blocked_by_tables(conn):
-    db.init_project_schema(conn)
+    db.init_project_schema(conn, PROJECT)
     card_columns = {row[1] for row in conn.execute("PRAGMA table_info(cards)")}
     assert card_columns == {
         "id",
@@ -245,12 +246,12 @@ def test_init_project_schema_creates_cards_and_blocked_by_tables(conn):
 
 
 def test_init_project_schema_is_idempotent(conn):
-    db.init_project_schema(conn)
-    db.init_project_schema(conn)  # must not raise
+    db.init_project_schema(conn, PROJECT)
+    db.init_project_schema(conn, PROJECT)  # must not raise
 
 
 def test_cards_status_check_constraint_rejects_blocked(conn):
-    db.init_project_schema(conn)
+    db.init_project_schema(conn, PROJECT)
     with pytest.raises(sqlite3.IntegrityError):
         conn.execute(
             "INSERT INTO cards (id, title, description, status, parent_id, "
@@ -299,13 +300,13 @@ def _insert_card(conn, card_id, parent_id=None):
 
 
 def test_cards_parent_id_foreign_key_is_enforced(conn):
-    db.init_project_schema(conn)
+    db.init_project_schema(conn, PROJECT)
     with pytest.raises(sqlite3.IntegrityError):
         _insert_card(conn, "c1", parent_id="ghost")
 
 
 def test_blocked_by_foreign_keys_are_enforced(conn):
-    db.init_project_schema(conn)
+    db.init_project_schema(conn, PROJECT)
     _insert_card(conn, "c1")
     with pytest.raises(sqlite3.IntegrityError):
         conn.execute(
@@ -320,7 +321,7 @@ def test_blocked_by_foreign_keys_are_enforced(conn):
 
 
 def test_blocked_by_rejects_duplicate_edge(conn):
-    db.init_project_schema(conn)
+    db.init_project_schema(conn, PROJECT)
     _insert_card(conn, "c1")
     _insert_card(conn, "c2")
     conn.execute(
@@ -438,7 +439,7 @@ def test_delete_project_commits_so_another_connection_sees_it(tmp_path):
 @pytest.fixture
 def project_conn(tmp_path):
     connection = db.connect(tmp_path / "project.db")
-    db.init_project_schema(connection)
+    db.init_project_schema(connection, PROJECT)
     yield connection
     connection.close()
 
@@ -462,7 +463,7 @@ def _sample_card(
 
 
 def test_insert_and_get_card(project_conn):
-    db.insert_card(project_conn, _sample_card())
+    db.insert_card(project_conn, PROJECT.id, _sample_card())
     result = db.get_card(project_conn, "c1")
     assert result == _sample_card()
 
@@ -472,7 +473,7 @@ def test_get_card_returns_none_when_missing(project_conn):
 
 
 def test_update_card_fields(project_conn):
-    db.insert_card(project_conn, _sample_card())
+    db.insert_card(project_conn, PROJECT.id, _sample_card())
     db.update_card_fields(project_conn, "c1", title="New title", updated_at="later")
     result = db.get_card(project_conn, "c1")
     assert result.title == "New title"
@@ -481,87 +482,83 @@ def test_update_card_fields(project_conn):
 
 
 def test_list_cards_no_filter_returns_all(project_conn):
-    db.insert_card(project_conn, _sample_card("c1"))
-    db.insert_card(project_conn, _sample_card("c2"))
+    db.insert_card(project_conn, PROJECT.id, _sample_card("c1"))
+    db.insert_card(project_conn, PROJECT.id, _sample_card("c2"))
     results = db.list_cards(project_conn)
     assert {c.id for c in results} == {"c1", "c2"}
 
 
 def test_list_cards_filters_by_status(project_conn):
-    db.insert_card(project_conn, _sample_card("c1", status="todo"))
-    db.insert_card(project_conn, _sample_card("c2", status="done"))
+    db.insert_card(project_conn, PROJECT.id, _sample_card("c1", status="todo"))
+    db.insert_card(project_conn, PROJECT.id, _sample_card("c2", status="done"))
     results = db.list_cards(project_conn, status="done")
     assert [c.id for c in results] == ["c2"]
 
 
 def test_list_cards_filters_by_parent_id(project_conn):
-    db.insert_card(project_conn, _sample_card("parent"))
-    db.insert_card(project_conn, _sample_card("child", parent_id="parent"))
+    db.insert_card(project_conn, PROJECT.id, _sample_card("parent"))
+    db.insert_card(project_conn, PROJECT.id, _sample_card("child", parent_id="parent"))
     results = db.list_cards(project_conn, parent_id="parent")
     assert [c.id for c in results] == ["child"]
 
 
 def test_list_cards_filters_by_explicit_none_parent(project_conn):
-    db.insert_card(project_conn, _sample_card("top"))
-    db.insert_card(project_conn, _sample_card("parent2"))
-    db.insert_card(project_conn, _sample_card("child", parent_id="parent2"))
+    db.insert_card(project_conn, PROJECT.id, _sample_card("top"))
+    db.insert_card(project_conn, PROJECT.id, _sample_card("parent2"))
+    db.insert_card(project_conn, PROJECT.id, _sample_card("child", parent_id="parent2"))
     results = db.list_cards(project_conn, parent_id=None)
     assert {c.id for c in results} == {"top", "parent2"}
 
 
 def test_add_and_list_blockers_of(project_conn):
-    db.insert_card(project_conn, _sample_card("c1"))
-    db.insert_card(project_conn, _sample_card("c2"))
+    db.insert_card(project_conn, PROJECT.id, _sample_card("c1"))
+    db.insert_card(project_conn, PROJECT.id, _sample_card("c2"))
     db.add_blocked_by_edge(project_conn, "c1", "c2")
     assert db.list_blockers_of(project_conn, "c1") == ["c2"]
 
 
 def test_remove_blocked_by_edge(project_conn):
-    db.insert_card(project_conn, _sample_card("c1"))
-    db.insert_card(project_conn, _sample_card("c2"))
+    db.insert_card(project_conn, PROJECT.id, _sample_card("c1"))
+    db.insert_card(project_conn, PROJECT.id, _sample_card("c2"))
     db.add_blocked_by_edge(project_conn, "c1", "c2")
     db.remove_blocked_by_edge(project_conn, "c1", "c2")
     assert db.list_blockers_of(project_conn, "c1") == []
 
 
 def test_list_children(project_conn):
-    db.insert_card(project_conn, _sample_card("parent"))
-    db.insert_card(project_conn, _sample_card("child1", parent_id="parent"))
-    db.insert_card(project_conn, _sample_card("child2", parent_id="parent"))
+    db.insert_card(project_conn, PROJECT.id, _sample_card("parent"))
+    db.insert_card(project_conn, PROJECT.id, _sample_card("child1", parent_id="parent"))
+    db.insert_card(project_conn, PROJECT.id, _sample_card("child2", parent_id="parent"))
     results = db.list_children(project_conn, "parent")
     assert {c.id for c in results} == {"child1", "child2"}
 
 
 def test_list_cards_orders_by_created_at(project_conn):
-    db.insert_card(project_conn, _sample_card("c1", created_at="2026-09-17T12:00:00"))
-    db.insert_card(project_conn, _sample_card("c2", created_at="2026-09-16T08:00:00"))
+    db.insert_card(project_conn, PROJECT.id, _sample_card("c1", created_at="2026-09-17T12:00:00"))
+    db.insert_card(project_conn, PROJECT.id, _sample_card("c2", created_at="2026-09-16T08:00:00"))
     assert [c.id for c in db.list_cards(project_conn)] == ["c2", "c1"]
 
 
 def test_list_children_orders_by_created_at(project_conn):
-    db.insert_card(project_conn, _sample_card("parent"))
-    db.insert_card(
-        project_conn,
-        _sample_card("child1", parent_id="parent", created_at="2026-09-17T12:00:00"),
+    db.insert_card(project_conn, PROJECT.id, _sample_card("parent"))
+    db.insert_card(project_conn, PROJECT.id, _sample_card("child1", parent_id="parent", created_at="2026-09-17T12:00:00"),
     )
-    db.insert_card(
-        project_conn,
-        _sample_card("child2", parent_id="parent", created_at="2026-09-16T08:00:00"),
+    db.insert_card(project_conn, PROJECT.id, _sample_card("child2", parent_id="parent", created_at="2026-09-16T08:00:00"),
     )
     results = db.list_children(project_conn, "parent")
     assert [c.id for c in results] == ["child2", "child1"]
 
 
 def test_delete_card_removes_row(project_conn):
-    db.insert_card(project_conn, _sample_card("c1"))
+    db.insert_card(project_conn, PROJECT.id, _sample_card("c1"))
     db.delete_card(project_conn, "c1")
     assert db.get_card(project_conn, "c1") is None
 
 
 def test_delete_card_removes_blocked_by_edges_in_both_directions(project_conn):
-    db.insert_card(project_conn, _sample_card("c1"))
-    db.insert_card(project_conn, _sample_card("c2"))
-    db.insert_card(project_conn, _sample_card("c3"))
+    db.insert_card(project_conn, PROJECT.id, _sample_card("c1"))
+    db.insert_card(project_conn, PROJECT.id, _sample_card("c2"))
+    db.insert_card(project_conn, PROJECT.id, _sample_card("c3"))
     db.add_blocked_by_edge(project_conn, "c1", "c2")
     db.add_blocked_by_edge(project_conn, "c3", "c1")
 
@@ -577,7 +574,7 @@ def _count(conn, sql, *params):
 
 def test_delete_card_removes_incoming_edges_without_fk_cascade(project_conn):
     for card_id in ("c1", "c2", "c3"):
-        db.insert_card(project_conn, _sample_card(card_id))
+        db.insert_card(project_conn, PROJECT.id, _sample_card(card_id))
     db.add_blocked_by_edge(project_conn, "c3", "c1")
     db.add_blocked_by_edge(project_conn, "c3", "c2")
     project_conn.execute(
@@ -597,8 +594,8 @@ def test_delete_card_removes_incoming_edges_without_fk_cascade(project_conn):
 
 
 def test_delete_incoming_edges_does_not_commit(project_conn):
-    db.insert_card(project_conn, _sample_card("c1"))
-    db.insert_card(project_conn, _sample_card("c2"))
+    db.insert_card(project_conn, PROJECT.id, _sample_card("c1"))
+    db.insert_card(project_conn, PROJECT.id, _sample_card("c2"))
     db.add_blocked_by_edge(project_conn, "c2", "c1")
     project_conn.execute(
         "INSERT INTO refs (src_id, dst_id, origin) VALUES ('c2', 'c1', 'explicit')"
@@ -616,8 +613,8 @@ def test_delete_incoming_edges_does_not_commit(project_conn):
 def test_insert_card_commits_so_another_connection_sees_it(tmp_path):
     db_path = tmp_path / "project.db"
     writer = db.connect(db_path)
-    db.init_project_schema(writer)
-    db.insert_card(writer, _sample_card())
+    db.init_project_schema(writer, PROJECT)
+    db.insert_card(writer, PROJECT.id, _sample_card())
     reader = db.connect(db_path)
     try:
         assert db.get_card(reader, "c1") == _sample_card()
@@ -629,8 +626,8 @@ def test_insert_card_commits_so_another_connection_sees_it(tmp_path):
 def test_update_card_fields_commits_so_another_connection_sees_it(tmp_path):
     db_path = tmp_path / "project.db"
     writer = db.connect(db_path)
-    db.init_project_schema(writer)
-    db.insert_card(writer, _sample_card())
+    db.init_project_schema(writer, PROJECT)
+    db.insert_card(writer, PROJECT.id, _sample_card())
     db.update_card_fields(writer, "c1", title="New title")
     reader = db.connect(db_path)
     try:
@@ -643,9 +640,9 @@ def test_update_card_fields_commits_so_another_connection_sees_it(tmp_path):
 def test_blocked_by_edge_writes_commit_so_another_connection_sees_them(tmp_path):
     db_path = tmp_path / "project.db"
     writer = db.connect(db_path)
-    db.init_project_schema(writer)
-    db.insert_card(writer, _sample_card("c1"))
-    db.insert_card(writer, _sample_card("c2"))
+    db.init_project_schema(writer, PROJECT)
+    db.insert_card(writer, PROJECT.id, _sample_card("c1"))
+    db.insert_card(writer, PROJECT.id, _sample_card("c2"))
     db.add_blocked_by_edge(writer, "c1", "c2")
     reader = db.connect(db_path)
     try:

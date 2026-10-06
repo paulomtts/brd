@@ -19,7 +19,9 @@ def open_cmd(
     """Open an issue."""
 
     def action(ctx):
-        issue = issues.open_issue(ctx.conn, title, body=body, ref_ids=list(ref), blocks=list(blocks))
+        issue = issues.open_issue(
+            ctx.conn, ctx.project.id, title, body=body, ref_ids=list(ref), blocks=list(blocks)
+        )
         return views.issue_detail(ctx.conn, issue)
 
     run(pretty, action)

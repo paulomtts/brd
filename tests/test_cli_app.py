@@ -126,7 +126,7 @@ def test_open_project_closes_connection_when_migration_fails(project, monkeypatc
         opened.append(conn)
         return conn
 
-    def failing_migrate(conn):
+    def failing_migrate(conn, project):
         raise MigrationError("boom")
 
     monkeypatch.setattr(db, "connect", tracking_connect)

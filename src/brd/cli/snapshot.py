@@ -28,6 +28,6 @@ def import_cmd(
             raw = json.loads(file.read_text())
         except (OSError, json.JSONDecodeError) as exc:
             raise ImportReadError(f"could not read a JSON snapshot from {file}: {exc}") from exc
-        return snapshot.load(ctx.conn, Path(ctx.project.root_path), raw)
+        return snapshot.load(ctx.conn, ctx.project.id, Path(ctx.project.root_path), raw)
 
     run(pretty, action)

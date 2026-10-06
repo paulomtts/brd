@@ -70,6 +70,7 @@ def list_issues(conn: sqlite3.Connection, status: str | None = None) -> list[Iss
 
 def open_issue(
     conn: sqlite3.Connection,
+    project_id: str,
     title: str,
     body: str | None = None,
     ref_ids: list[str] | None = None,

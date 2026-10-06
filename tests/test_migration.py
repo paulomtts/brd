@@ -3,6 +3,7 @@ import sqlite3
 import pytest
 
 from brd import db, paths
+from tests.factories import PROJECT
 
 V0_SCHEMA = [
     """CREATE TABLE cards (
@@ -52,7 +53,7 @@ def _tables(conn):
 
 def test_fresh_db_gets_current_schema(tmp_path):
     conn = db.connect(tmp_path / "p.db")
-    db.migrate_project(conn)
+    db.migrate_project(conn, PROJECT)
     assert {
         "entities", "cards", "blocked_by", "issues", "documents", "comments", "tags", "refs"
     } <= _tables(conn)
@@ -61,35 +62,35 @@ def test_fresh_db_gets_current_schema(tmp_path):
 
 def test_v0_cards_are_backfilled_into_entities(v0_path):
     conn = db.connect(v0_path)
-    db.migrate_project(conn)
+    db.migrate_project(conn, PROJECT)
     rows = {(r["id"], r["kind"]) for r in conn.execute("SELECT * FROM entities")}
     assert rows == {("p", "card"), ("c", "card"), ("o", "card")}
 
 
 def test_v0_rows_and_edges_survive(v0_path):
     conn = db.connect(v0_path)
-    db.migrate_project(conn)
+    db.migrate_project(conn, PROJECT)
     assert db.get_card(conn, "c").parent_id == "p"
     assert db.list_blockers_of(conn, "c") == ["o"]
 
 
 def test_migration_is_idempotent(v0_path):
     conn = db.connect(v0_path)
-    db.migrate_project(conn)
-    db.migrate_project(conn)
+    db.migrate_project(conn, PROJECT)
+    db.migrate_project(conn, PROJECT)
     assert conn.execute("SELECT COUNT(*) FROM entities").fetchone()[0] == 3
     assert conn.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION
 
 
 def test_foreign_keys_are_on_after_migration(v0_path):
     conn = db.connect(v0_path)
-    db.migrate_project(conn)
+    db.migrate_project(conn, PROJECT)
     assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
 
 
 def test_deleting_entity_cascades_to_card_and_edges(v0_path):
     conn = db.connect(v0_path)
-    db.migrate_project(conn)
+    db.migrate_project(conn, PROJECT)
     conn.execute("DELETE FROM entities WHERE id = 'o'")
     conn.commit()
     assert db.get_card(conn, "o") is None
@@ -98,7 +99,7 @@ def test_deleting_entity_cascades_to_card_and_edges(v0_path):
 
 def test_inserting_a_card_registers_its_entity(tmp_path):
     conn = db.connect(tmp_path / "p.db")
-    db.migrate_project(conn)
+    db.migrate_project(conn, PROJECT)
     conn.execute(INSERT_CARD, ("x", "x", None))
     kind = conn.execute("SELECT kind FROM entities WHERE id = 'x'").fetchone()[0]
     assert kind == "card"
@@ -112,14 +113,14 @@ def test_dangling_legacy_rows_are_dropped_not_fatal(tmp_path):
         edges=[("a", "ghost-blocker"), ("ghost-card", "a")],
     )
     conn = db.connect(path)
-    db.migrate_project(conn)
+    db.migrate_project(conn, PROJECT)
     assert db.get_card(conn, "a").parent_id is None
     assert conn.execute("SELECT COUNT(*) FROM blocked_by").fetchone()[0] == 0
 
 
 def test_delete_card_goes_through_entities(v0_path):
     conn = db.connect(v0_path)
-    db.migrate_project(conn)
+    db.migrate_project(conn, PROJECT)
     db.delete_card(conn, "o")
     assert conn.execute("SELECT COUNT(*) FROM entities WHERE id = 'o'").fetchone()[0] == 0
 
@@ -153,7 +154,7 @@ def test_concurrent_first_run_migrations_all_succeed(tmp_path):
             try:
                 conn = db.connect(path)
                 barrier.wait()
-                db.migrate_project(conn)
+                db.migrate_project(conn, PROJECT)
                 conn.close()
             except Exception as exc:  # noqa: BLE001 — collected and asserted below
                 errors.append(exc)
@@ -172,7 +173,7 @@ def test_concurrent_first_run_migrations_all_succeed(tmp_path):
 
 def test_migration_preserves_cards_and_accepts_new_statuses(v0_path):
     conn = db.connect(v0_path)
-    db.migrate_project(conn)
+    db.migrate_project(conn, PROJECT)
 
     assert [r["id"] for r in conn.execute("SELECT id FROM cards ORDER BY id")] == ["c", "o", "p"]
     assert conn.execute("SELECT COUNT(*) FROM blocked_by").fetchone()[0] == 1
@@ -185,7 +186,7 @@ def test_migration_preserves_cards_and_accepts_new_statuses(v0_path):
 def test_v1_db_upgrades_to_v2_and_keeps_entity_trigger(tmp_path):
     path = tmp_path / "p.db"
     conn = db.connect(path)
-    db.migrate_project(conn)
+    db.migrate_project(conn, PROJECT)
     # Roll the db back to a v1 shape: old CHECK, version 1.
     conn.execute("PRAGMA foreign_keys=OFF")
     conn.execute("DROP TRIGGER cards_register_entity")
@@ -198,7 +199,7 @@ def test_v1_db_upgrades_to_v2_and_keeps_entity_trigger(tmp_path):
     conn.close()
 
     conn = db.connect(path)
-    db.migrate_project(conn)
+    db.migrate_project(conn, PROJECT)
 
     assert conn.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION
     conn.execute(
@@ -211,7 +212,7 @@ def test_v1_db_upgrades_to_v2_and_keeps_entity_trigger(tmp_path):
 def test_v2_db_upgrades_to_v3_and_accepts_archived(tmp_path):
     path = tmp_path / "p.db"
     conn = db.connect(path)
-    db.migrate_project(conn)
+    db.migrate_project(conn, PROJECT)
     # Roll the db back to a v2 shape: the pre-archived CHECK, version 2.
     conn.execute("PRAGMA foreign_keys=OFF")
     conn.execute("DROP TRIGGER cards_register_entity")
@@ -224,7 +225,7 @@ def test_v2_db_upgrades_to_v3_and_accepts_archived(tmp_path):
     conn.close()
 
     conn = db.connect(path)
-    db.migrate_project(conn)
+    db.migrate_project(conn, PROJECT)
 
     assert conn.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION
     conn.execute(

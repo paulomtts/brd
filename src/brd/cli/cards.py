@@ -34,6 +34,7 @@ def add(
     def action(ctx):
         card = core.create_card(
             ctx.conn,
+            ctx.project.id,
             title=title,
             description=description,
             parent_id=parent,

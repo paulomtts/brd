@@ -128,6 +128,7 @@ def _check_unique(
 
 def add(
     conn: sqlite3.Connection,
+    project_id: str,
     root: Path,
     path: Path,
     title: str | None = None,

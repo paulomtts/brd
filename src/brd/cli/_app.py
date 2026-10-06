@@ -66,7 +66,7 @@ def open_project() -> Ctx:
     project = master.registered_project(root)
     conn = db.connect(paths.project_db_path(root))
     try:
-        db.migrate_project(conn)
+        db.migrate_project(conn, project)
     except BaseException:
         conn.close()
         raise

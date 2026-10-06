@@ -240,7 +240,7 @@ def _migrate_to_v3(conn: sqlite3.Connection) -> None:
     conn.execute(_register_trigger("cards", "card"))
 
 
-def migrate_project(conn: sqlite3.Connection) -> None:
+def migrate_project(conn: sqlite3.Connection, project: Project) -> None:
     version = conn.execute("PRAGMA user_version").fetchone()[0]
     if version >= SCHEMA_VERSION:
         return
@@ -276,8 +276,8 @@ def migrate_project(conn: sqlite3.Connection) -> None:
         conn.execute("PRAGMA foreign_keys=ON")
 
 
-def init_project_schema(conn: sqlite3.Connection) -> None:
-    migrate_project(conn)
+def init_project_schema(conn: sqlite3.Connection, project: Project) -> None:
+    migrate_project(conn, project)
 
 
 def docs_dir(conn: sqlite3.Connection) -> Path:
@@ -336,7 +336,7 @@ def _row_to_card(row: sqlite3.Row) -> Card:
     )
 
 
-def insert_card(conn: sqlite3.Connection, card: Card) -> None:
+def insert_card(conn: sqlite3.Connection, project_id: str, card: Card) -> None:
     conn.execute(
         "INSERT INTO cards (id, title, description, status, parent_id, "
         "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
