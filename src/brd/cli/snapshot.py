@@ -14,9 +14,13 @@ def _indented(data: dict) -> str:
     return json.dumps(data, indent=2)
 
 
-def _run_global(pretty: bool, fn: Callable[[sqlite3.Connection], dict]) -> None:
-    """Like run(), but never resolves the cwd project: for a command whose
-    scope is every project, so it works from any directory."""
+def _run_global(
+    pretty: bool,
+    fn: Callable[[sqlite3.Connection], dict],
+    render: Callable[[dict], str] = _indented,
+) -> None:
+    """Like run(), but never resolves the cwd project: for a command that
+    works from any directory. --pretty prints render's text."""
     try:
         conn = master.connect()
     except BrdError as exc:
@@ -28,9 +32,25 @@ def _run_global(pretty: bool, fn: Callable[[sqlite3.Connection], dict]) -> None:
     finally:
         conn.close()
     if pretty:
-        print(_indented(data))
+        print(render(data))
     else:
         output.print_result(output.ok_envelope(data), pretty)
+
+
+def _import_text(data: dict) -> str:
+    lines = []
+    for item in data["projects"]:
+        project = item["project"]
+        line = (
+            f"{project['name']} ({project['root_path']}): +{item['cards']} cards, "
+            f"+{item['issues']} issues, +{item['documents']} documents, "
+            f"+{item['comments']} comments"
+        )
+        if item["registered"]:
+            line += " [registered]"
+        lines.append(line)
+    lines.append(f"not-found edge targets: {data['not_found_edges']}")
+    return "\n".join(lines)
 
 
 @app.command(name="export")
@@ -62,8 +82,11 @@ def import_cmd(
     ),
     pretty: bool = pretty_option(),
 ) -> None:
-    """Restore a snapshot into the current project; refuses, writing nothing, if the
-    target project already has entities."""
+    """Restore a snapshot. A one-project snapshot lands in the current project,
+    registering the current directory if it is not in one. A multi-project
+    snapshot places each entry in the registered project with its id, else
+    registers it at its recorded root; it works from any directory. Refuses,
+    writing nothing, if a target project already has entities."""
 
     def action(conn: sqlite3.Connection) -> dict:
         try:
@@ -72,4 +95,4 @@ def import_cmd(
             raise ImportReadError(f"could not read a JSON snapshot from {file}: {exc}") from exc
         return snapshot.load(conn, Path.cwd(), raw)
 
-    _run_global(pretty, action)
+    _run_global(pretty, action, _import_text)

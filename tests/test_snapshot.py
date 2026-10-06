@@ -639,6 +639,13 @@ def test_import_report_shape_and_pretty(populated, tmp_path, monkeypatch):
     ]
     assert result["not_found_edges"] == 0
 
+    restored = _unregistered_dir(tmp_path, monkeypatch, "restored", data_home="third-data")
+    text = human("import", snapshot)
+    assert text.splitlines() == [
+        f"repo ({restored}): +2 cards, +1 issues, +1 documents, +1 comments [registered]",
+        "not-found edge targets: 0",
+    ]
+
 
 def test_failed_import_registers_no_project(populated, tmp_path, monkeypatch):
     data = ok("export")
@@ -859,3 +866,14 @@ def test_duplicate_ids_across_entries_are_refused(tmp_path, monkeypatch):
         assert error["type"] == "ImportFormatError"
         assert words in error["message"]
         assert ok("projects") == []
+
+
+def test_import_help_describes_placement():
+    result = invoke("import", "--help")
+    assert result.exit_code == 0, result.output
+    # Rich wraps help inside a bordered panel; compare with borders and
+    # line breaks folded away.
+    text = " ".join(result.stdout.replace("│", " ").split())
+    assert "current project" in text
+    assert "multi-project" in text
+    assert "already has entities" in text

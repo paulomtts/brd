@@ -62,7 +62,7 @@ machines, commit a snapshot and restore from it:
 
 ```bash
 brd export > docs/board/snapshot.json   # commit this
-brd import docs/board/snapshot.json     # on another machine/clone, after brd init
+brd import docs/board/snapshot.json     # on another machine/clone
 ```
 
 A snapshot is a list of project entries: each one is a project (id, name,
@@ -70,7 +70,7 @@ root path) with its cards, issues, documents, comments, tags and refs.
 `brd export` writes the current project; `brd export --all` writes every
 registered project and works from any directory.
 
-`import` restores a one-project snapshot into the current project. It preserves the original ids, content, and timestamps — including document backups (restore a missing file with `brd doc restore <id>`) — and refuses to run (touching nothing) if any id in the snapshot already exists in the target board. Older one-object `brd export` snapshots and `brd tree` snapshots still import.
+`brd import` restores a snapshot, preserving the original ids, content, and timestamps — including document backups (restore a missing file with `brd doc restore <id>`). A one-project snapshot lands in the current project; outside any project, the current directory is registered first (keeping the snapshot's project id when no project has it), so no `brd init` is needed. A multi-project snapshot (from `brd export --all`) places each entry in the registered project with the same id, else registers it at its recorded root path if that directory exists, and works from any directory. Import refuses, touching nothing, when a target project already has entities, when an id in the snapshot already exists, or when an entry cannot be placed. Edges to ids that are not in the database are kept and counted as not-found; importing the missing project later reconnects them. Older one-object `brd export` snapshots and `brd tree` snapshots still import.
 
 ## Documents
 
