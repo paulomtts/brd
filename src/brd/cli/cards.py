@@ -116,12 +116,14 @@ def update(
     run(pretty, action)
 
 
-def delete_entity(conn: sqlite3.Connection, entity_id: str, cascade: bool) -> list[str]:
+def delete_entity(
+    conn: sqlite3.Connection, project_id: str, entity_id: str, cascade: bool
+) -> list[str]:
     kind = entities.kind_of(conn, entity_id)
     if kind is None:
         raise CardNotFoundError(f"no card, issue, or document with id {entity_id}")
     if kind == "card":
-        return core.delete_card(conn, entity_id, cascade=cascade)
+        return core.delete_card(conn, project_id, entity_id, cascade=cascade)
     if kind == "document":
         documents.delete(conn, entity_id)
         return [entity_id]
@@ -138,7 +140,10 @@ def delete(
     pretty: bool = pretty_option(),
 ) -> None:
     """Delete a card, issue, or document (a document's source file is kept)."""
-    run(pretty, lambda ctx: {"deleted": delete_entity(ctx.conn, entity_id, cascade)})
+    run(
+        pretty,
+        lambda ctx: {"deleted": delete_entity(ctx.conn, ctx.project.id, entity_id, cascade)},
+    )
 
 
 @app.command()

@@ -168,6 +168,14 @@ REFUSED = [
         lambda c: core.create_card(c, P, "new", parent_id="q1"), "q1", "card",
         id="create_card_foreign_parent",
     ),
+    pytest.param(lambda c: core.delete_card(c, P, "q1"), "q1", "card", id="delete_card"),
+    pytest.param(
+        lambda c: core.delete_card(c, P, "q1", cascade=True), "q1", "card",
+        id="delete_card_cascade",
+    ),
+    pytest.param(
+        lambda c: cli_cards.delete_entity(c, P, "q1", True), "q1", "card", id="delete_entity"
+    ),
 ]
 
 

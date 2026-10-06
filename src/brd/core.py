@@ -240,8 +240,10 @@ def unblock_card(conn: sqlite3.Connection, card_id: str, blocker_id: str) -> Non
     db.remove_blocked_by_edge(conn, card_id, blocker_id)
 
 
-def delete_card(conn: sqlite3.Connection, card_id: str, cascade: bool = False) -> list[str]:
-    _require_card(conn, card_id)
+def delete_card(
+    conn: sqlite3.Connection, project_id: str, card_id: str, cascade: bool = False
+) -> list[str]:
+    require_card(conn, project_id, card_id)
 
     children = db.list_children(conn, card_id)
     if children and not cascade:
@@ -251,7 +253,7 @@ def delete_card(conn: sqlite3.Connection, card_id: str, cascade: bool = False) -
 
     deleted: list[str] = []
     for child in children:
-        deleted.extend(delete_card(conn, child.id, cascade=True))
+        deleted.extend(delete_card(conn, project_id, child.id, cascade=True))
 
     db.delete_card(conn, card_id)
     deleted.append(card_id)

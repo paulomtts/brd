@@ -268,21 +268,21 @@ def test_update_card_rejects_unknown_card(conn):
 
 def test_delete_card_removes_leaf_card(conn):
     card = core.create_card(conn, PROJECT.id, title="A")
-    deleted = core.delete_card(conn, card.id)
+    deleted = core.delete_card(conn, PROJECT.id, card.id)
     assert deleted == [card.id]
     assert db.get_card(conn, card.id) is None
 
 
 def test_delete_card_rejects_unknown_card(conn):
     with pytest.raises(core.CardNotFoundError):
-        core.delete_card(conn, "nope")
+        core.delete_card(conn, PROJECT.id, "nope")
 
 
 def test_delete_card_with_children_without_cascade_raises(conn):
     parent = core.create_card(conn, PROJECT.id, title="P")
     core.create_card(conn, PROJECT.id, title="C", parent_id=parent.id)
     with pytest.raises(core.CardHasChildrenError):
-        core.delete_card(conn, parent.id)
+        core.delete_card(conn, PROJECT.id, parent.id)
     assert db.get_card(conn, parent.id) is not None
 
 
@@ -291,7 +291,7 @@ def test_delete_card_with_cascade_removes_subtree(conn):
     child = core.create_card(conn, PROJECT.id, title="C", parent_id=parent.id)
     grandchild = core.create_card(conn, PROJECT.id, title="GC", parent_id=child.id)
 
-    deleted = core.delete_card(conn, parent.id, cascade=True)
+    deleted = core.delete_card(conn, PROJECT.id, parent.id, cascade=True)
 
     assert set(deleted) == {parent.id, child.id, grandchild.id}
     assert db.get_card(conn, parent.id) is None
@@ -304,7 +304,7 @@ def test_delete_card_removes_blocked_by_edges(conn):
     b = core.create_card(conn, PROJECT.id, title="B")
     core.block_card(conn, a.id, b.id)
 
-    core.delete_card(conn, b.id)
+    core.delete_card(conn, PROJECT.id, b.id)
 
     assert db.list_blockers_of(conn, a.id) == []
 
@@ -323,7 +323,7 @@ def test_delete_card_cascade_removes_incoming_edges_of_every_deleted_card(conn):
     conn.commit()
     conn.execute("PRAGMA foreign_keys=OFF")
 
-    deleted = core.delete_card(conn, parent.id, cascade=True)
+    deleted = core.delete_card(conn, PROJECT.id, parent.id, cascade=True)
 
     assert set(deleted) == {parent.id, child.id, grandchild.id}
     for card_id in deleted:

@@ -784,3 +784,9 @@ def test_add_and_update_refuse_a_foreign_parent(foreign):
     mine = ok("add", "--title", "mine")["id"]
     _refused("update", mine, "--parent", foreign)
     assert ok("show", mine)["parent_id"] is None
+
+
+def test_delete_refuses_a_foreign_card(foreign):
+    _refused("delete", foreign)
+    _refused("delete", foreign, "--cascade")
+    assert ok("show", foreign)["id"] == foreign
