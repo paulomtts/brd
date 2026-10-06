@@ -15,36 +15,36 @@ from tests.factories import OTHER_PROJECT, PROJECT, add_project, make_document
 def test_open_and_get(pconn):
     issue = issues.open_issue(pconn, PROJECT.id, "Grammar ambiguity", body="details")
     assert (issue.status, issue.close_reason) == ("open", None)
-    assert issues.require(pconn, issue.id) == issue
+    assert issues.require(pconn, PROJECT.id, issue.id) == issue
 
 
 def test_require_unknown(pconn):
     with pytest.raises(IssueNotFoundError):
-        issues.require(pconn, "nope")
+        issues.require(pconn, PROJECT.id, "nope")
 
 
 def test_close_reopen_and_reasons(pconn):
     issue = issues.open_issue(pconn, PROJECT.id, "x")
-    assert issues.close(pconn, issue.id).close_reason == "resolved"
-    reopened = issues.reopen(pconn, issue.id)
+    assert issues.close(pconn, PROJECT.id, issue.id).close_reason == "resolved"
+    reopened = issues.reopen(pconn, PROJECT.id, issue.id)
     assert (reopened.status, reopened.close_reason) == ("open", None)
-    assert issues.close(pconn, issue.id, reason="wontfix").close_reason == "wontfix"
+    assert issues.close(pconn, PROJECT.id, issue.id, reason="wontfix").close_reason == "wontfix"
     with pytest.raises(InvalidCloseReasonError):
-        issues.close(pconn, issue.id, reason="meh")
+        issues.close(pconn, PROJECT.id, issue.id, reason="meh")
 
 
 def test_list_filters_by_status(pconn):
     a = issues.open_issue(pconn, PROJECT.id, "a")
     b = issues.open_issue(pconn, PROJECT.id, "b")
-    issues.close(pconn, b.id)
-    assert [i.id for i in issues.list_issues(pconn)] == [a.id, b.id]
-    assert [i.id for i in issues.list_issues(pconn, status="open")] == [a.id]
+    issues.close(pconn, PROJECT.id, b.id)
+    assert [i.id for i in issues.list_issues(pconn, PROJECT.id)] == [a.id, b.id]
+    assert [i.id for i in issues.list_issues(pconn, PROJECT.id, status="open")] == [a.id]
 
 
 def test_update_body_reindexes_links(pconn):
     card = core.create_card(pconn, PROJECT.id, title="Target")
     issue = issues.open_issue(pconn, PROJECT.id, "x")
-    issues.update(pconn, issue.id, body=f"about [[{card.id}]]")
+    issues.update(pconn, PROJECT.id, issue.id, body=f"about [[{card.id}]]")
     assert [r["id"] for r in refs.outgoing(pconn, issue.id)] == [card.id]
 
 
@@ -60,7 +60,7 @@ def test_open_with_unknown_ref_writes_nothing(pconn):
         issues.open_issue(pconn, PROJECT.id, "x", ref_ids=["ghost"])
     with pytest.raises(CardNotFoundError):
         issues.open_issue(pconn, PROJECT.id, "x", blocks=["ghost"])
-    assert issues.list_issues(pconn) == []
+    assert issues.list_issues(pconn, PROJECT.id) == []
 
 
 def test_open_issue_blocks_card_until_closed_any_reason(pconn):
@@ -70,12 +70,12 @@ def test_open_issue_blocks_card_until_closed_any_reason(pconn):
         core.block_card(pconn, PROJECT.id, card.id, issue.id)
         assert core.resolve_status(pconn, card) == "blocked"
         assert card.id not in [c.id for c in core.next_cards(pconn, PROJECT.id)]
-        issues.close(pconn, issue.id, reason=reason)
+        issues.close(pconn, PROJECT.id, issue.id, reason=reason)
         assert core.resolve_status(pconn, card) == "todo"
         assert card.id in [c.id for c in core.next_cards(pconn, PROJECT.id)]
-        issues.reopen(pconn, issue.id)
+        issues.reopen(pconn, PROJECT.id, issue.id)
         assert core.resolve_status(pconn, card) == "blocked"
-        issues.close(pconn, issue.id)
+        issues.close(pconn, PROJECT.id, issue.id)
 
 
 def test_create_card_blocked_by_issue(pconn):
@@ -117,8 +117,8 @@ def test_open_issue_ignores_duplicate_refs_and_blocks(pconn):
 
 def test_list_issues_rejects_unknown_status(pconn):
     with pytest.raises(InvalidStatusError, match="opne"):
-        issues.list_issues(pconn, "opne")
-    assert issues.list_issues(pconn, "closed") == []
+        issues.list_issues(pconn, PROJECT.id, "opne")
+    assert issues.list_issues(pconn, PROJECT.id, "closed") == []
 
 
 def test_open_issue_records_its_project(pconn):

@@ -7,7 +7,7 @@ from typer.testing import CliRunner
 from brd import db, paths
 from brd.cli import app
 from tests.cli_helpers import err, invoke, ok
-from tests.factories import OTHER_PROJECT, add_project, make_card
+from tests.factories import OTHER_PROJECT, add_project, make_card, make_document, make_issue
 
 runner = CliRunner()
 
@@ -766,11 +766,32 @@ def foreign(project):
     return FOREIGN
 
 
-def _refused(*args) -> None:
+FOREIGN_ISSUE = "f1f1f1f1-0000-4000-8000-000000000000"
+FOREIGN_DOC = "f2f2f2f2-0000-4000-8000-000000000000"
+
+
+@pytest.fixture
+def foreign_entities(project, foreign):
+    """Besides card FOREIGN, the other project owns the open issue
+    FOREIGN_ISSUE and the document FOREIGN_DOC (stem `notes`, tag `t`)."""
+    conn = db.connect(paths.project_db_path(project))
+    try:
+        make_issue(conn, FOREIGN_ISSUE, title="Foreign issue", project_id=OTHER_PROJECT.id)
+        make_document(
+            conn, FOREIGN_DOC, "notes", content="foreign body", project_id=OTHER_PROJECT.id
+        )
+        conn.execute("INSERT INTO tags (entity_id, tag) VALUES (?, 't')", (FOREIGN_DOC,))
+        conn.commit()
+    finally:
+        conn.close()
+    return {"card": foreign, "issue": FOREIGN_ISSUE, "document": FOREIGN_DOC}
+
+
+def _refused(*args, error_type: str = "CardNotFoundError") -> None:
     result = invoke(*args)
     assert result.exit_code == 1, result.output
     error = json.loads(result.stdout)["error"]
-    assert error["type"] == "CardNotFoundError"
+    assert error["type"] == error_type
     assert f"belongs to project {OTHER_PROJECT.name} ({OTHER_PROJECT.id})" in error["message"]
 
 
@@ -841,3 +862,18 @@ def test_show_is_global_and_names_the_owner(foreign):
     assert ok("show", mine)["project"] == {"id": registered["id"], "name": registered["name"]}
     assert "project" not in ok("list")[0]
     assert err("show", "nope") == "CardNotFoundError"
+
+
+def test_issue_commands_are_scoped_to_this_project(foreign_entities):
+    issue = foreign_entities["issue"]
+    mine = ok("issue", "open", "--title", "mine")["id"]
+    assert [i["id"] for i in ok("issue", "list")] == [mine]
+    assert [i["id"] for i in ok("issue", "list", "--status", "open")] == [mine]
+    _refused("issue", "update", issue, "--title", "x", error_type="IssueNotFoundError")
+    _refused("issue", "close", issue, error_type="IssueNotFoundError")
+    _refused("issue", "reopen", issue, error_type="IssueNotFoundError")
+    _refused("delete", issue, error_type="IssueNotFoundError")
+    _refused("issue", "open", "--title", "q", "--ref", foreign_entities["card"])
+    shown = ok("show", issue)
+    assert (shown["title"], shown["status"]) == ("Foreign issue", "open")
+    assert [i["id"] for i in ok("issue", "list")] == [mine]

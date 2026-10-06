@@ -150,7 +150,9 @@ def _foreign(entity_id, what="card"):
 def _state(conn):
     return {
         table: [tuple(row) for row in conn.execute(f"SELECT * FROM {table} ORDER BY 1, 2")]
-        for table in ("entities", "cards", "issues", "blocked_by", "comments")
+        for table in (
+            "entities", "cards", "issues", "documents", "blocked_by", "comments", "tags", "refs"
+        )
     }
 
 
@@ -303,7 +305,7 @@ def test_export_cards_hold_only_the_projects_cards(two, tmp_path):
     [
         ("p1", PROJECT, lambda c, root: views.card_detail(c, db.get_card(c, "p1"))),
         ("q1", OTHER_PROJECT, lambda c, root: views.card_detail(c, db.get_card(c, "q1"))),
-        ("qi", OTHER_PROJECT, lambda c, root: views.issue_detail(c, issues.require(c, "qi"))),
+        ("qi", OTHER_PROJECT, lambda c, root: views.issue_detail(c, issues.require(c, Q, "qi"))),
         (
             "qd",
             OTHER_PROJECT,
@@ -355,3 +357,65 @@ def test_require_in_project_on_a_missing_id_is_unchanged(two):
     with pytest.raises(EntityNotFoundError, match=r"^no entity with id nope$") as raised:
         entities.require_in_project(two, P, "nope")
     assert type(raised.value) is EntityNotFoundError
+
+
+def test_list_issues_returns_only_the_projects_issues(two):
+    make_issue(two, "pi")
+    make_issue(two, "pi-closed", status="closed")
+    assert [i.id for i in issues.list_issues(two, P)] == ["pi", "pi-closed"]
+    assert [i.id for i in issues.list_issues(two, P, "open")] == ["pi"]
+    assert [i.id for i in issues.list_issues(two, Q)] == ["qi"]
+
+
+def test_require_issue_returns_the_projects_issue(two):
+    make_issue(two, "pi")
+    assert issues.require(two, P, "pi").id == "pi"
+
+
+@pytest.mark.parametrize("missing", ["nope", "p1", "q1"])
+def test_require_issue_on_a_missing_or_non_issue_id_is_unchanged(two, missing):
+    with pytest.raises(IssueNotFoundError, match=rf"^no issue with id {missing}$"):
+        issues.require(two, P, missing)
+
+
+SCOPED_REFUSED = [
+    pytest.param(
+        lambda c: issues.update(c, P, "qi", title="x"), IssueNotFoundError, "qi", "issue",
+        id="issue_update",
+    ),
+    pytest.param(
+        lambda c: issues.update(c, P, "qi"), IssueNotFoundError, "qi", "issue",
+        id="issue_update_no_fields",
+    ),
+    pytest.param(
+        lambda c: issues.update(c, P, "qi", body="[[qnotes]]"), IssueNotFoundError, "qi",
+        "issue", id="issue_update_body",
+    ),
+    pytest.param(
+        lambda c: issues.close(c, P, "qi"), IssueNotFoundError, "qi", "issue", id="issue_close"
+    ),
+    pytest.param(
+        lambda c: issues.reopen(c, P, "qi"), IssueNotFoundError, "qi", "issue",
+        id="issue_reopen",
+    ),
+    pytest.param(
+        lambda c: issues.open_issue(c, P, "t", ref_ids=["q1"]), CardNotFoundError, "q1", "card",
+        id="open_issue_foreign_ref",
+    ),
+    pytest.param(
+        lambda c: issues.open_issue(c, P, "t", ref_ids=["p1", "qd"]), DocumentNotFoundError,
+        "qd", "document", id="open_issue_mixed_refs",
+    ),
+    pytest.param(
+        lambda c: cli_cards.delete_entity(c, P, "qi", False), IssueNotFoundError, "qi", "issue",
+        id="delete_entity_issue",
+    ),
+]
+
+
+@pytest.mark.parametrize(("call", "error", "foreign_id", "what"), SCOPED_REFUSED)
+def test_scoped_refusal_names_the_owner_and_writes_nothing(two, call, error, foreign_id, what):
+    before = _state(two)
+    with pytest.raises(error, match=_foreign(foreign_id, what)):
+        call(two)
+    assert _state(two) == before

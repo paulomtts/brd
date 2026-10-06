@@ -3,7 +3,7 @@ from pathlib import Path
 
 import typer
 
-from brd import core, db, documents, entities, output, views
+from brd import core, db, documents, entities, issues, output, views
 from brd import pretty as pretty_render
 from brd.cli._app import app, pretty_option, run
 from brd.errors import CardNotFoundError
@@ -122,6 +122,7 @@ def delete_entity(
     if kind == "document":
         documents.delete(conn, entity_id)
         return [entity_id]
+    issues.require(conn, project_id, entity_id)
     entities.delete(conn, entity_id)
     return [entity_id]
 

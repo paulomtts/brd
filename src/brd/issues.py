@@ -46,24 +46,27 @@ def get(conn: sqlite3.Connection, issue_id: str) -> Issue | None:
     return _row(row) if row else None
 
 
-def require(conn: sqlite3.Connection, issue_id: str) -> Issue:
+def require(conn: sqlite3.Connection, project_id: str, issue_id: str) -> Issue:
     issue = get(conn, issue_id)
     if issue is None:
         raise IssueNotFoundError(f"no issue with id {issue_id}")
+    entities.require_in_project(conn, project_id, issue_id)
     return issue
 
 
-def list_issues(conn: sqlite3.Connection, status: str | None = None) -> list[Issue]:
+def list_issues(
+    conn: sqlite3.Connection, project_id: str, status: str | None = None
+) -> list[Issue]:
     if status is not None and status not in STATUSES:
         raise InvalidStatusError(
             f"invalid issue status {status!r}; use one of {', '.join(STATUSES)}"
         )
-    if status is None:
-        rows = conn.execute("SELECT * FROM issues ORDER BY created_at, rowid").fetchall()
-    else:
-        rows = conn.execute(
-            "SELECT * FROM issues WHERE status = ? ORDER BY created_at, rowid", (status,)
-        ).fetchall()
+    query = f"SELECT issues.* FROM issues {db.in_project('issues.id')}"
+    params = [project_id]
+    if status is not None:
+        query += " WHERE issues.status = ?"
+        params.append(status)
+    rows = conn.execute(query + " ORDER BY issues.created_at, issues.rowid", params).fetchall()
     return [_row(row) for row in rows]
 
 
@@ -80,7 +83,8 @@ def open_issue(
     ref_ids = list(dict.fromkeys(ref_ids or []))
     blocks = list(dict.fromkeys(blocks or []))
     for ref_id in ref_ids:
-        entities.require(conn, ref_id)
+        # Ref targets stay in the current project until S4 lifts the check.
+        entities.require_in_project(conn, project_id, ref_id)
     for card_id in blocks:
         core.require_card(conn, project_id, card_id)
     now = _now()
@@ -101,37 +105,43 @@ def open_issue(
     return issue
 
 
-def _set(conn: sqlite3.Connection, issue_id: str, **fields) -> Issue:
-    require(conn, issue_id)
+def _set(conn: sqlite3.Connection, project_id: str, issue_id: str, **fields) -> Issue:
+    require(conn, project_id, issue_id)
     fields["updated_at"] = _now()
     columns = ", ".join(f"{key} = ?" for key in fields)
     conn.execute(f"UPDATE issues SET {columns} WHERE id = ?", [*fields.values(), issue_id])
     conn.commit()
-    return require(conn, issue_id)
+    return require(conn, project_id, issue_id)
 
 
 def update(
-    conn: sqlite3.Connection, issue_id: str, title: str | None = None, body: str | None = None
+    conn: sqlite3.Connection,
+    project_id: str,
+    issue_id: str,
+    title: str | None = None,
+    body: str | None = None,
 ) -> Issue:
     fields = {key: value for key, value in (("title", title), ("body", body)) if value is not None}
     if not fields:
-        return require(conn, issue_id)
-    issue = _set(conn, issue_id, **fields)
+        return require(conn, project_id, issue_id)
+    issue = _set(conn, project_id, issue_id, **fields)
     if body is not None:
         refs.reindex(conn, issue_id)
     return issue
 
 
-def close(conn: sqlite3.Connection, issue_id: str, reason: str = "resolved") -> Issue:
+def close(
+    conn: sqlite3.Connection, project_id: str, issue_id: str, reason: str = "resolved"
+) -> Issue:
     if reason not in CLOSE_REASONS:
         raise InvalidCloseReasonError(
             f"invalid close reason {reason!r}; use one of {', '.join(CLOSE_REASONS)}"
         )
-    return _set(conn, issue_id, status="closed", close_reason=reason)
+    return _set(conn, project_id, issue_id, status="closed", close_reason=reason)
 
 
-def reopen(conn: sqlite3.Connection, issue_id: str) -> Issue:
-    return _set(conn, issue_id, status="open", close_reason=None)
+def reopen(conn: sqlite3.Connection, project_id: str, issue_id: str) -> Issue:
+    return _set(conn, project_id, issue_id, status="open", close_reason=None)
 
 
 def blocks_of(conn: sqlite3.Connection, issue_id: str) -> list[str]:

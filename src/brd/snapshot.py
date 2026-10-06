@@ -13,7 +13,7 @@ def export(conn: sqlite3.Connection, project_id: str, root: Path) -> dict:
     return {
         "brd_export": FORMAT_VERSION,
         "cards": core.build_tree(conn, project_id),
-        "issues": [dataclasses.asdict(i) for i in issues.list_issues(conn)],
+        "issues": [dataclasses.asdict(i) for i in issues.list_issues(conn, project_id)],
         "documents": [
             {
                 "id": d.id,

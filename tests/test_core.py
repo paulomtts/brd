@@ -659,7 +659,7 @@ def test_resolve_status_dependent_of_story_with_blocked_child_is_blocked(conn):
 
     assert core.resolve_status(conn, dependent) == "blocked"
 
-    issues.close(conn, issue.id)
+    issues.close(conn, PROJECT.id, issue.id)
     db.update_card_fields(conn, "s-c1", status="done")
     assert core.resolve_status(conn, db.get_card(conn, "d")) == "todo"
 
