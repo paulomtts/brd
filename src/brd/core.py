@@ -33,17 +33,22 @@ def resolve_status(conn: sqlite3.Connection, card: Card, _seen: set[str] | None 
     seen = seen | {card.id}
 
     for blocker_id in db.list_blockers_of(conn, card.id):
-        blocker = db.get_card(conn, blocker_id)
-        if blocker is None:
+        kind = entities.kind_of(conn, blocker_id)
+        if kind is None:
+            # Not found (say its project was forgotten): brd can't tell a
+            # missing blocker from an unfinished one, so it blocks.
+            return "blocked"
+        if kind == "issue":
             # Issues block while open, whatever reason they are later closed with.
             issue = conn.execute(
                 "SELECT status FROM issues WHERE id = ?", (blocker_id,)
             ).fetchone()
-            if issue is not None and issue["status"] == "open":
+            if issue["status"] == "open":
                 return "blocked"
             continue
-        if resolve_status(conn, blocker, seen) not in _RELEASING_STATUSES:
+        if kind == "card" and not _is_released(conn, db.get_card(conn, blocker_id), seen):
             return "blocked"
+        # A document never blocks; no command can store one as a blocker.
 
     if card.parent_id is not None:
         parent = db.get_card(conn, card.parent_id)
@@ -51,6 +56,64 @@ def resolve_status(conn: sqlite3.Connection, card: Card, _seen: set[str] | None 
             return "blocked"
 
     return "todo"
+
+
+def _is_released(conn: sqlite3.Connection, card: Card, seen: set[str]) -> bool:
+    # A card stops holding its dependents once it resolves to a releasing
+    # status, or once it has children and every one of them is released.
+    # Its own status is left alone either way.
+    if resolve_status(conn, card, seen) in _RELEASING_STATUSES:
+        return True
+    if card.id in seen:
+        # Already on this resolution path (a loop through blocked_by or
+        # containment): fail closed rather than recurse forever.
+        return False
+    children = db.list_children(conn, card.id)
+    seen = seen | {card.id}
+    return bool(children) and all(_is_released(conn, child, seen) for child in children)
+
+
+def blockers_of(conn: sqlite3.Connection, card_id: str) -> list[dict]:
+    # Each blocker in blocked_by order, with what a reader needs to judge it
+    # without another query. `released` is the rule resolve_status applies,
+    # so a container can show `todo` and still be released.
+    return [_blocker_entry(conn, blocker_id) for blocker_id in db.list_blockers_of(conn, card_id)]
+
+
+def _blocker_entry(conn: sqlite3.Connection, blocker_id: str) -> dict:
+    kind = entities.kind_of(conn, blocker_id)
+    if kind is None:
+        # Not found: it blocks, and there is nothing else to say about it.
+        return {
+            "id": blocker_id,
+            "kind": None,
+            "project": None,
+            "title": None,
+            "status": "not-found",
+            "released": False,
+        }
+    if kind == "card":
+        card = db.get_card(conn, blocker_id)
+        status: str | None = resolve_status(conn, card)
+        # A fresh seen set: each entry is computed on its own.
+        released = _is_released(conn, card, set())
+    elif kind == "issue":
+        status = conn.execute(
+            "SELECT status FROM issues WHERE id = ?", (blocker_id,)
+        ).fetchone()["status"]
+        released = status != "open"
+    else:
+        # A document never blocks; only an imported snapshot can store one.
+        status, released = None, True
+    owner = db.owner_of(conn, blocker_id)
+    return {
+        "id": blocker_id,
+        "kind": kind,
+        "project": {"id": owner.id, "name": owner.name},
+        "title": entities.title_of(conn, blocker_id),
+        "status": status,
+        "released": released,
+    }
 
 
 def would_create_parent_cycle(conn: sqlite3.Connection, card_id: str, new_parent_id: str) -> bool:
@@ -84,14 +147,32 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _require_card(conn: sqlite3.Connection, card_id: str) -> Card:
+def _require_in_project(
+    conn: sqlite3.Connection, project_id: str, entity_id: str, what: str
+) -> None:
+    # Commands act on the current project only. Name the owner, so an id
+    # copied from another project's board says where it lives.
+    owner = db.owner_of(conn, entity_id)
+    if owner is not None and owner.id != project_id:
+        raise CardNotFoundError(entities.foreign_message(what, entity_id, owner))
+
+
+def require_any_card(conn: sqlite3.Connection, card_id: str) -> Card:
+    # Whichever project owns it: for edge targets, which may be any project's.
     card = db.get_card(conn, card_id)
     if card is None:
         raise CardNotFoundError(f"no card with id {card_id}")
     return card
 
 
+def require_card(conn: sqlite3.Connection, project_id: str, card_id: str) -> Card:
+    card = require_any_card(conn, card_id)
+    _require_in_project(conn, project_id, card_id, "card")
+    return card
+
+
 def _require_blocker(conn: sqlite3.Connection, blocker_id: str) -> None:
+    # A blocker may belong to any project; only the blocked card is scoped.
     kind = entities.kind_of(conn, blocker_id)
     if kind is None:
         raise CardNotFoundError(f"no card or issue with id {blocker_id}")
@@ -99,15 +180,27 @@ def _require_blocker(conn: sqlite3.Connection, blocker_id: str) -> None:
         raise InvalidBlockerError(f"a {kind} can't block a card; only cards and issues can")
 
 
+def _require_import_target(
+    conn: sqlite3.Connection, snapshot_ids: set[str], target_id: str, what: str
+) -> None:
+    # Edge targets carry no foreign key, so an import checks them itself:
+    # each must be in the snapshot or already on this board.
+    if target_id not in snapshot_ids and entities.kind_of(conn, target_id) is None:
+        raise ImportFormatError(
+            f"snapshot {what} {target_id} is neither in the snapshot nor on this board"
+        )
+
+
 def create_card(
     conn: sqlite3.Connection,
+    project_id: str,
     title: str,
     description: str | None = None,
     parent_id: str | None = None,
     blocked_by: list[str] | None = None,
 ) -> Card:
     if parent_id is not None:
-        _require_card(conn, parent_id)
+        require_card(conn, project_id, parent_id)
 
     blocked_by = blocked_by or []
     for blocker_id in blocked_by:
@@ -123,7 +216,7 @@ def create_card(
         created_at=now,
         updated_at=now,
     )
-    db.insert_card(conn, card)
+    db.insert_card(conn, project_id, card)
 
     for blocker_id in blocked_by:
         if would_create_block_cycle(conn, card.id, blocker_id):
@@ -138,13 +231,14 @@ def create_card(
 
 def update_card(
     conn: sqlite3.Connection,
+    project_id: str,
     card_id: str,
     title: str | None = None,
     description: str | None = None,
     status: str | None = None,
     parent_id: str | object | None = None,
 ) -> Card:
-    _require_card(conn, card_id)
+    require_card(conn, project_id, card_id)
 
     if status == "blocked":
         raise InvalidStatusError("status cannot be set to 'blocked' directly; it is derived")
@@ -164,7 +258,7 @@ def update_card(
     if parent_id is CLEAR_PARENT:
         fields["parent_id"] = None
     elif parent_id is not None:
-        _require_card(conn, parent_id)
+        require_card(conn, project_id, parent_id)
         if would_create_parent_cycle(conn, card_id, parent_id):
             raise CycleError(f"setting {card_id}'s parent to {parent_id} would create a cycle")
         fields["parent_id"] = parent_id
@@ -175,24 +269,36 @@ def update_card(
         if description is not None:
             refs.reindex(conn, card_id)
 
-    return _require_card(conn, card_id)
+    return require_card(conn, project_id, card_id)
 
 
-def block_card(conn: sqlite3.Connection, card_id: str, blocker_id: str) -> None:
-    _require_card(conn, card_id)
+def add_block_edge(conn: sqlite3.Connection, card_id: str, blocker_id: str) -> None:
+    # No ownership check on either side: `issue open --blocks` blocks another
+    # project's card. Callers that act on the card itself check it first.
     _require_blocker(conn, blocker_id)
     if would_create_block_cycle(conn, card_id, blocker_id):
         raise CycleError(f"blocking {card_id} on {blocker_id} would create a cycle")
     db.add_blocked_by_edge(conn, card_id, blocker_id)
 
 
-def unblock_card(conn: sqlite3.Connection, card_id: str, blocker_id: str) -> None:
-    _require_card(conn, card_id)
+def block_card(
+    conn: sqlite3.Connection, project_id: str, card_id: str, blocker_id: str
+) -> None:
+    require_card(conn, project_id, card_id)
+    add_block_edge(conn, card_id, blocker_id)
+
+
+def unblock_card(
+    conn: sqlite3.Connection, project_id: str, card_id: str, blocker_id: str
+) -> None:
+    require_card(conn, project_id, card_id)
     db.remove_blocked_by_edge(conn, card_id, blocker_id)
 
 
-def delete_card(conn: sqlite3.Connection, card_id: str, cascade: bool = False) -> list[str]:
-    _require_card(conn, card_id)
+def delete_card(
+    conn: sqlite3.Connection, project_id: str, card_id: str, cascade: bool = False
+) -> list[str]:
+    require_card(conn, project_id, card_id)
 
     children = db.list_children(conn, card_id)
     if children and not cascade:
@@ -202,7 +308,7 @@ def delete_card(conn: sqlite3.Connection, card_id: str, cascade: bool = False) -
 
     deleted: list[str] = []
     for child in children:
-        deleted.extend(delete_card(conn, child.id, cascade=True))
+        deleted.extend(delete_card(conn, project_id, child.id, cascade=True))
 
     db.delete_card(conn, card_id)
     deleted.append(card_id)
@@ -210,14 +316,17 @@ def delete_card(conn: sqlite3.Connection, card_id: str, cascade: bool = False) -
 
 
 def next_cards(
-    conn: sqlite3.Connection, limit: int | None = None, parent_id: str | None = None
+    conn: sqlite3.Connection,
+    project_id: str,
+    limit: int | None = None,
+    parent_id: str | None = None,
 ) -> list[Card]:
     if parent_id is not None:
-        _require_card(conn, parent_id)
+        require_card(conn, project_id, parent_id)
         candidates = db.list_children(conn, parent_id)
         ready = [card for card in candidates if resolve_status(conn, card) == "todo"]
     else:
-        todo_cards = db.list_cards(conn, status="todo")
+        todo_cards = db.list_cards(conn, project_id, status="todo")
         ready = [
             card
             for card in todo_cards
@@ -227,28 +336,45 @@ def next_cards(
     return ready[:limit] if limit is not None else ready
 
 
-def _build_node(conn: sqlite3.Connection, card: Card) -> dict:
-    return {
+def _build_node(conn: sqlite3.Connection, card: Card, with_blockers: bool) -> dict:
+    node = {
         "id": card.id,
         "title": card.title,
         "description": card.description,
         "status": resolve_status(conn, card),
-        "blocked_by": db.list_blockers_of(conn, card.id),
+    }
+    if with_blockers:
+        # One read, so blocked_by and blockers keep the same order.
+        blockers = blockers_of(conn, card.id)
+        node["blocked_by"] = [blocker["id"] for blocker in blockers]
+        node["blockers"] = blockers
+    else:
+        node["blocked_by"] = db.list_blockers_of(conn, card.id)
+    return {
+        **node,
         "created_at": card.created_at,
         "updated_at": card.updated_at,
         "children": [
-            _build_node(conn, child) for child in db.list_children(conn, card.id)
+            _build_node(conn, child, with_blockers)
+            for child in db.list_children(conn, card.id)
         ],
     }
 
 
-def build_tree(conn: sqlite3.Connection, root_id: str | None = None) -> list[dict]:
+def build_tree(
+    conn: sqlite3.Connection,
+    project_id: str,
+    root_id: str | None = None,
+    with_blockers: bool = True,
+) -> list[dict]:
+    # Export turns with_blockers off: `blockers` is derived, never stored,
+    # and export card nodes keep the v1 shape.
     if root_id is not None:
-        card = _require_card(conn, root_id)
-        return [_build_node(conn, card)]
+        card = require_card(conn, project_id, root_id)
+        return [_build_node(conn, card, with_blockers)]
 
-    top_level = db.list_cards(conn, parent_id=None)
-    return [_build_node(conn, card) for card in top_level]
+    top_level = db.list_cards(conn, project_id, parent_id=None)
+    return [_build_node(conn, card, with_blockers) for card in top_level]
 
 
 def _flatten_tree(
@@ -261,7 +387,7 @@ def _flatten_tree(
     return flattened
 
 
-def import_tree(conn: sqlite3.Connection, nodes: list[dict]) -> int:
+def import_tree(conn: sqlite3.Connection, project_id: str, nodes: list[dict]) -> int:
     """Restore cards from a brd tree JSON snapshot (build_tree's own output
     shape). Preserves original ids, descriptions, and timestamps. Fails
     before creating anything if any id already exists in this board."""
@@ -273,10 +399,16 @@ def import_tree(conn: sqlite3.Connection, nodes: list[dict]) -> int:
                 f"card {node['id']} already exists in this board"
             )
 
+    snapshot_ids = {node["id"] for node, _ in flattened}
+    for node, _ in flattened:
+        for blocker_id in node.get("blocked_by", []):
+            _require_import_target(conn, snapshot_ids, blocker_id, "blocker")
+
     try:
         with conn:  # one transaction: all cards and edges, or nothing
             for node, parent_id in flattened:
                 status = "todo" if node["status"] == "blocked" else node["status"]
+                db.insert_entity(conn, project_id, node["id"], "card")
                 conn.execute(
                     "INSERT INTO cards (id, title, description, status, parent_id, "
                     "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",

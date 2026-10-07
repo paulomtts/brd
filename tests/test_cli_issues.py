@@ -58,5 +58,16 @@ def test_delete_issue(project):
     assert ok("issue", "list") == []
 
 
+def test_delete_issue_unblocks_card(project):
+    card = ok("add", "--title", "Work")
+    issue = ok("issue", "open", "--title", "Q", "--blocks", card["id"])
+    assert ok("show", card["id"])["status"] == "blocked"
+
+    ok("delete", issue["id"])
+
+    shown = ok("show", card["id"])
+    assert (shown["blocked_by"], shown["status"]) == ([], "todo")
+
+
 def test_issue_list_rejects_unknown_status(project):
     assert err("issue", "list", "--status", "opne") == "InvalidStatusError"

@@ -1,11 +1,11 @@
 import sqlite3
 
-from brd import entities, links, refs
+from brd import db, entities, links, refs
 
 
-def text(conn: sqlite3.Connection, value: str | None) -> str:
+def text(conn: sqlite3.Connection, project_id: str | None, value: str | None) -> str:
     def display(token: links.LinkToken) -> str | None:
-        dst = refs.resolve(conn, token.target)
+        dst = refs.resolve(conn, project_id, token.target)
         return entities.title_of(conn, dst) if dst else None
 
     return links.render(value, display)
@@ -15,29 +15,45 @@ def _stamp(iso: str) -> str:
     return iso[:16].replace("T", " ")
 
 
+def _ref_item(item: dict) -> str:
+    if item["kind"] is None:
+        return f"not-found {item['id']}"
+    return f"{item['title']} ({item['kind']})"
+
+
 def _ref_line(label: str, items: list[dict]) -> str | None:
     seen: dict[str, dict] = {}
     for item in items:
         seen.setdefault(item["id"], item)
     if not seen:
         return None
-    return f"{label}: " + ", ".join(f"{i['title']} ({i['kind']})" for i in seen.values())
+    return f"{label}: " + ", ".join(_ref_item(i) for i in seen.values())
 
 
-def _blocker(conn: sqlite3.Connection, blocker_id: str) -> str:
-    kind = entities.kind_of(conn, blocker_id)
-    title = entities.title_of(conn, blocker_id)
-    if kind == "issue":
-        status = conn.execute("SELECT status FROM issues WHERE id = ?", (blocker_id,)).fetchone()
-        return f"[[{title}]] (issue, {status['status']})"
-    return f"[[{title}]] (card)"
+def _blocker(blocker: dict, project_id: str) -> str:
+    # Local means owned by the shown card's project, compared by id: names
+    # may repeat, and `show` of another project's card is local to that one.
+    if blocker["kind"] is None:
+        return f"not-found {blocker['id']}"
+    if blocker["project"]["id"] != project_id:
+        return f"{blocker['project']['name']}: {blocker['title']}"
+    if blocker["kind"] == "issue":
+        return f"[[{blocker['title']}]] (issue, {blocker['status']})"
+    return f"[[{blocker['title']}]] (card)"
+
+
+def _owner_id(conn: sqlite3.Connection, entity_id: str) -> str | None:
+    # Render stems against the project owning the text, as reindex resolves them.
+    owner = db.owner_of(conn, entity_id)
+    return owner.id if owner else None
 
 
 def _comment_lines(conn: sqlite3.Connection, items: list[dict]) -> list[str]:
     lines = []
     for comment in items:
         lines.append(f"{comment['author']} · {_stamp(comment['created_at'])}")
-        lines.extend(f"  {line}" for line in text(conn, comment["body"]).splitlines())
+        body = text(conn, _owner_id(conn, comment["entity_id"]), comment["body"])
+        lines.extend(f"  {line}" for line in body.splitlines())
     return lines
 
 
@@ -46,8 +62,11 @@ def render_detail(conn: sqlite3.Connection, data: dict) -> str:
     extra: list[str | None] = []
     if kind == "card":
         header = f"{data['title']}  [{data['status']}]  ({data['id']})"
-        if data["blocked_by"]:
-            extra.append("blocked by: " + ", ".join(_blocker(conn, b) for b in data["blocked_by"]))
+        if data["blockers"]:
+            project_id = data["project"]["id"]
+            extra.append(
+                "blocked by: " + ", ".join(_blocker(b, project_id) for b in data["blockers"])
+            )
         body = data["description"]
     elif kind == "issue":
         status = data["status"] + (f": {data['close_reason']}" if data["close_reason"] else "")
@@ -64,7 +83,7 @@ def render_detail(conn: sqlite3.Connection, data: dict) -> str:
 
     parts = [header, *[line for line in extra if line]]
     if body:
-        parts += ["", text(conn, body)]
+        parts += ["", text(conn, _owner_id(conn, data["id"]), body)]
     ref_lines = [
         line
         for line in (

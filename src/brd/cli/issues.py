@@ -19,7 +19,9 @@ def open_cmd(
     """Open an issue."""
 
     def action(ctx):
-        issue = issues.open_issue(ctx.conn, title, body=body, ref_ids=list(ref), blocks=list(blocks))
+        issue = issues.open_issue(
+            ctx.conn, ctx.project.id, title, body=body, ref_ids=list(ref), blocks=list(blocks)
+        )
         return views.issue_detail(ctx.conn, issue)
 
     run(pretty, action)
@@ -33,7 +35,10 @@ def list_cmd(
     """List issues, oldest first."""
     run(
         pretty,
-        lambda ctx: [views.issue_detail(ctx.conn, i) for i in issues.list_issues(ctx.conn, status)],
+        lambda ctx: [
+            views.issue_detail(ctx.conn, i)
+            for i in issues.list_issues(ctx.conn, ctx.project.id, status)
+        ],
         render=lambda ctx, data: pretty_render.render_list(ctx.conn, data),
     )
 
@@ -48,7 +53,10 @@ def update(
     """Edit an issue's title or body."""
     run(
         pretty,
-        lambda ctx: views.issue_detail(ctx.conn, issues.update(ctx.conn, issue_id, title=title, body=body)),
+        lambda ctx: views.issue_detail(
+            ctx.conn,
+            issues.update(ctx.conn, ctx.project.id, issue_id, title=title, body=body),
+        ),
     )
 
 
@@ -59,7 +67,12 @@ def close(
     pretty: bool = pretty_option(),
 ) -> None:
     """Close an issue (unblocks any cards it blocks)."""
-    run(pretty, lambda ctx: views.issue_detail(ctx.conn, issues.close(ctx.conn, issue_id, reason)))
+    run(
+        pretty,
+        lambda ctx: views.issue_detail(
+            ctx.conn, issues.close(ctx.conn, ctx.project.id, issue_id, reason)
+        ),
+    )
 
 
 @issue_app.command("reopen")
@@ -68,4 +81,7 @@ def reopen(
     pretty: bool = pretty_option(),
 ) -> None:
     """Reopen a closed issue."""
-    run(pretty, lambda ctx: views.issue_detail(ctx.conn, issues.reopen(ctx.conn, issue_id)))
+    run(
+        pretty,
+        lambda ctx: views.issue_detail(ctx.conn, issues.reopen(ctx.conn, ctx.project.id, issue_id)),
+    )

@@ -83,15 +83,20 @@ def get(conn: sqlite3.Connection, doc_id: str) -> Document | None:
     return _row(row) if row else None
 
 
-def require(conn: sqlite3.Connection, doc_id: str) -> Document:
+def require(conn: sqlite3.Connection, project_id: str, doc_id: str) -> Document:
     doc = get(conn, doc_id)
     if doc is None:
         raise DocumentNotFoundError(f"no document with id {doc_id}")
+    entities.require_in_project(conn, project_id, doc_id)
     return doc
 
 
-def list_all(conn: sqlite3.Connection) -> list[Document]:
-    rows = conn.execute("SELECT * FROM documents ORDER BY created_at, source_path").fetchall()
+def list_all(conn: sqlite3.Connection, project_id: str) -> list[Document]:
+    rows = conn.execute(
+        f"SELECT documents.* FROM documents {db.in_project('documents.id')} "
+        "ORDER BY documents.created_at, documents.source_path",
+        (project_id,),
+    ).fetchall()
     return [_row(row) for row in rows]
 
 
@@ -109,15 +114,23 @@ def _validate_path(root: Path, path: Path) -> tuple[str, str]:
 
 
 def _check_unique(
-    conn: sqlite3.Connection, rel: str, stem: str, exclude_id: str | None = None
+    conn: sqlite3.Connection,
+    project_id: str,
+    rel: str,
+    stem: str,
+    exclude_id: str | None = None,
 ) -> None:
+    # Per project, like the schema's UNIQUE (project_id, ...) constraints.
+    scoped = f"FROM documents {db.in_project('documents.id')} WHERE documents.id IS NOT ?"
     row = conn.execute(
-        "SELECT id FROM documents WHERE source_path = ? AND id IS NOT ?", (rel, exclude_id)
+        f"SELECT documents.id {scoped} AND documents.source_path = ?",
+        (project_id, exclude_id, rel),
     ).fetchone()
     if row:
         raise DuplicatePathError(f"{rel} is already registered as document {row['id']}")
     row = conn.execute(
-        "SELECT source_path FROM documents WHERE stem = ? AND id IS NOT ?", (stem, exclude_id)
+        f"SELECT documents.source_path {scoped} AND documents.stem = ?",  # stem is NOCASE
+        (project_id, exclude_id, stem),
     ).fetchone()
     if row:
         raise DuplicateStemError(
@@ -128,28 +141,31 @@ def _check_unique(
 
 def add(
     conn: sqlite3.Connection,
+    project_id: str,
     root: Path,
     path: Path,
     title: str | None = None,
     tag_list: list[str] | None = None,
 ) -> Document:
     rel, stem = _validate_path(root, path)
-    _check_unique(conn, rel, stem)
+    _check_unique(conn, project_id, rel, stem)
     normalized_tags = [tags.normalize(tag) for tag in tag_list or []]
     data = (root.resolve() / rel).read_bytes()
     now = _now()
     doc = Document(str(uuid.uuid4()), title or stem, rel, stem, _hash(data), now, now)
     _write_backup(conn, doc.id, data)
-    conn.execute(
-        "INSERT INTO documents (id, title, source_path, stem, content_hash, created_at, "
-        "updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (doc.id, doc.title, doc.source_path, doc.stem, doc.content_hash, doc.created_at, doc.updated_at),
-    )
-    conn.commit()
+    with conn:
+        db.insert_entity(conn, project_id, doc.id, "document")
+        conn.execute(
+            "INSERT INTO documents (id, project_id, title, source_path, stem, content_hash, "
+            "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (doc.id, project_id, doc.title, doc.source_path, doc.stem, doc.content_hash,
+             doc.created_at, doc.updated_at),
+        )
     if normalized_tags:
-        tags.add(conn, doc.id, normalized_tags)
+        tags.add(conn, project_id, doc.id, normalized_tags)
     refs.reindex(conn, doc.id)
-    refs.reindex_mentions(conn, stem)
+    refs.reindex_mentions(conn, project_id, stem)
     return doc
 
 
@@ -191,22 +207,23 @@ def sync(conn: sqlite3.Connection, root: Path, doc: Document) -> SyncResult:
     return SyncResult(_decode(data), "updated")
 
 
-def sync_all(conn: sqlite3.Connection, root: Path) -> dict[str, SyncResult]:
-    return {doc.id: sync(conn, root, doc) for doc in list_all(conn)}
+def sync_all(conn: sqlite3.Connection, project_id: str, root: Path) -> dict[str, SyncResult]:
+    return {doc.id: sync(conn, root, doc) for doc in list_all(conn, project_id)}
 
 
 def update(
     conn: sqlite3.Connection,
+    project_id: str,
     root: Path,
     doc_id: str,
     new_path: Path | None = None,
     title: str | None = None,
 ) -> tuple[Document, SyncResult]:
-    doc = require(conn, doc_id)
+    doc = require(conn, project_id, doc_id)
     old_stem = doc.stem
     if new_path is not None:
         rel, stem = _validate_path(root, new_path)
-        _check_unique(conn, rel, stem, exclude_id=doc.id)
+        _check_unique(conn, project_id, rel, stem, exclude_id=doc.id)
         conn.execute(
             "UPDATE documents SET source_path = ?, stem = ?, updated_at = ? WHERE id = ?",
             (rel, stem, _now(), doc.id),
@@ -217,16 +234,18 @@ def update(
             (title, _now(), doc.id),
         )
     conn.commit()
-    doc = require(conn, doc_id)
+    doc = require(conn, project_id, doc_id)
     result = sync(conn, root, doc)
     if doc.stem.lower() != old_stem.lower():
-        refs.reindex_mentions(conn, old_stem)
-        refs.reindex_mentions(conn, doc.stem)
-    return require(conn, doc_id), result
+        refs.reindex_mentions(conn, project_id, old_stem)
+        refs.reindex_mentions(conn, project_id, doc.stem)
+    return require(conn, project_id, doc_id), result
 
 
-def restore(conn: sqlite3.Connection, root: Path, doc_id: str, force: bool = False) -> Document:
-    doc = require(conn, doc_id)
+def restore(
+    conn: sqlite3.Connection, project_id: str, root: Path, doc_id: str, force: bool = False
+) -> Document:
+    doc = require(conn, project_id, doc_id)
     backup = backup_path(conn, doc.id)
     if not backup.is_file():
         raise DocumentContentLostError(f"no backup exists for document {doc_id}")
@@ -244,7 +263,7 @@ def restore(conn: sqlite3.Connection, root: Path, doc_id: str, force: bool = Fal
     return doc
 
 
-def delete(conn: sqlite3.Connection, doc_id: str) -> None:
-    require(conn, doc_id)
+def delete(conn: sqlite3.Connection, project_id: str, doc_id: str) -> None:
+    require(conn, project_id, doc_id)
     entities.delete(conn, doc_id)
     backup_path(conn, doc_id).unlink(missing_ok=True)

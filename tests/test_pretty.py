@@ -46,3 +46,9 @@ def test_lists(project):
     assert human("list").strip() == f"{card['id']}  [todo]  C"
     ok("comment", "add", card["id"], "hi", "--author", "me")
     assert human("comment", "list", card["id"]).splitlines()[1] == "  hi"
+
+
+def test_show_card_blocked_by_local_card(project):
+    a = ok("add", "--title", "A")
+    b = ok("add", "--title", "B", "--blocked-by", a["id"])
+    assert "blocked by: [[A]] (card)" in human("show", b["id"]).splitlines()

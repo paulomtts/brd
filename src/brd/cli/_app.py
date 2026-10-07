@@ -6,8 +6,9 @@ from typing import Any, NoReturn
 
 import typer
 
-from brd import db, master, output, paths
+from brd import master, output
 from brd.errors import BrdError
+from brd.models import Project
 
 GUIDE = """\
 Cards are units of work. There are no Epic/Story/Task types: a card with children \
@@ -15,6 +16,16 @@ Cards are units of work. There are no Epic/Story/Task types: a card with childre
 
 Issues are bugs, questions, and findings that aren't work yet. An open issue can block a card \
 (`brd block <card> --by <issue>`); closing it, for any reason, unblocks the card.
+
+Blocking: `status` is authoritative. `blocked` already accounts for blockers in other projects, \
+not-found blockers, container release and a blocked parent, and `brd next` lists only cards \
+that can start now.
+
+`blocked_by` is a list of ids that may belong to other projects or be not-found (the blocker's \
+project was forgotten or not imported here); a not-found blocker blocks until its id returns. \
+`blockers` gives each one's id, kind, project, title, status and `released`, in the same order. \
+A card blocker releases its dependents once it is done, merged, canceled or archived; blocking \
+a story or milestone waits for all of its children, even while its own status still reads todo.
 
 Documents are registered `.md` files that brd backs up. Whenever you edit a registered document, \
 run `brd doc update <id>` right after; after moving or renaming one, run \
@@ -52,7 +63,7 @@ def pretty_option():
 @dataclass
 class Ctx:
     conn: sqlite3.Connection
-    root: Path
+    project: Project
 
 
 def fail(exc: BrdError, pretty: bool) -> NoReturn:
@@ -61,14 +72,15 @@ def fail(exc: BrdError, pretty: bool) -> NoReturn:
 
 
 def open_project() -> Ctx:
-    root = master.resolve_project_root(Path.cwd())
-    conn = db.connect(paths.project_db_path(root))
+    # Connect (and so migrate) first: any data command on an unmigrated
+    # install migrates, even one run outside a project.
+    conn = master.connect()
     try:
-        db.migrate_project(conn)
+        project = master.resolve_project(conn, Path.cwd())
     except BaseException:
         conn.close()
         raise
-    return Ctx(conn=conn, root=root)
+    return Ctx(conn=conn, project=project)
 
 
 def run(

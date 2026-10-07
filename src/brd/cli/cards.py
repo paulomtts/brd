@@ -2,18 +2,10 @@ import sqlite3
 
 import typer
 
-from brd import core, db, documents, entities, output, views
+from brd import core, db, documents, entities, issues, output, views
 from brd import pretty as pretty_render
 from brd.cli._app import app, pretty_option, run
 from brd.errors import CardNotFoundError
-from brd.models import Card
-
-
-def _require_card(conn: sqlite3.Connection, card_id: str) -> Card:
-    card = db.get_card(conn, card_id)
-    if card is None:
-        raise CardNotFoundError(f"no card with id {card_id}")
-    return card
 
 
 @app.command()
@@ -33,6 +25,7 @@ def add(
     def action(ctx):
         card = core.create_card(
             ctx.conn,
+            ctx.project.id,
             title=title,
             description=description,
             parent_id=parent,
@@ -51,7 +44,7 @@ def show(
     """Show a card, issue, or document in full."""
     run(
         pretty,
-        lambda ctx: views.detail(ctx.conn, ctx.root, entity_id),
+        lambda ctx: views.detail(ctx.conn, entity_id),
         render=lambda ctx, data: pretty_render.render_detail(ctx.conn, data),
     )
 
@@ -72,7 +65,10 @@ def list_cards_cmd(
         kwargs: dict = {"status": status}
         if parent is not None:
             kwargs["parent_id"] = parent
-        return [views.card_detail(ctx.conn, card) for card in db.list_cards(ctx.conn, **kwargs)]
+        return [
+            views.card_detail(ctx.conn, card)
+            for card in db.list_cards(ctx.conn, ctx.project.id, **kwargs)
+        ]
 
     run(pretty, action, render=lambda ctx, data: pretty_render.render_list(ctx.conn, data))
 
@@ -102,6 +98,7 @@ def update(
         parent_arg = core.CLEAR_PARENT if clear_parent else parent
         card = core.update_card(
             ctx.conn,
+            ctx.project.id,
             card_id,
             title=title,
             description=description,
@@ -113,15 +110,18 @@ def update(
     run(pretty, action)
 
 
-def delete_entity(conn: sqlite3.Connection, entity_id: str, cascade: bool) -> list[str]:
+def delete_entity(
+    conn: sqlite3.Connection, project_id: str, entity_id: str, cascade: bool
+) -> list[str]:
     kind = entities.kind_of(conn, entity_id)
     if kind is None:
         raise CardNotFoundError(f"no card, issue, or document with id {entity_id}")
     if kind == "card":
-        return core.delete_card(conn, entity_id, cascade=cascade)
+        return core.delete_card(conn, project_id, entity_id, cascade=cascade)
     if kind == "document":
-        documents.delete(conn, entity_id)
+        documents.delete(conn, project_id, entity_id)
         return [entity_id]
+    issues.require(conn, project_id, entity_id)
     entities.delete(conn, entity_id)
     return [entity_id]
 
@@ -135,20 +135,25 @@ def delete(
     pretty: bool = pretty_option(),
 ) -> None:
     """Delete a card, issue, or document (a document's source file is kept)."""
-    run(pretty, lambda ctx: {"deleted": delete_entity(ctx.conn, entity_id, cascade)})
+    run(
+        pretty,
+        lambda ctx: {"deleted": delete_entity(ctx.conn, ctx.project.id, entity_id, cascade)},
+    )
 
 
 @app.command()
 def block(
     card_id: str = typer.Argument(..., help="Id of the card to block."),
-    by: str = typer.Option(..., "--by", help="Id of the card or issue blocking it."),
+    by: str = typer.Option(
+        ..., "--by", help="Id of the card or issue blocking it; it may belong to another project."
+    ),
     pretty: bool = pretty_option(),
 ) -> None:
     """Mark a card as blocked by another card or an open issue."""
 
     def action(ctx):
-        core.block_card(ctx.conn, card_id, by)
-        return views.card_detail(ctx.conn, _require_card(ctx.conn, card_id))
+        core.block_card(ctx.conn, ctx.project.id, card_id, by)
+        return views.card_detail(ctx.conn, core.require_card(ctx.conn, ctx.project.id, card_id))
 
     run(pretty, action)
 
@@ -162,8 +167,8 @@ def unblock(
     """Remove a blocked-by relationship."""
 
     def action(ctx):
-        core.unblock_card(ctx.conn, card_id, by)
-        return views.card_detail(ctx.conn, _require_card(ctx.conn, card_id))
+        core.unblock_card(ctx.conn, ctx.project.id, card_id, by)
+        return views.card_detail(ctx.conn, core.require_card(ctx.conn, ctx.project.id, card_id))
 
     run(pretty, action)
 
@@ -178,7 +183,7 @@ def tree(
     """Print the hierarchy and dependency tree."""
     run(
         pretty,
-        lambda ctx: core.build_tree(ctx.conn, root_id=card_id),
+        lambda ctx: core.build_tree(ctx.conn, ctx.project.id, root_id=card_id),
         render=lambda ctx, data: output.render_tree_text(data),
     )
 
@@ -199,7 +204,7 @@ def next_cmd(
     """List unblocked todo cards, oldest first."""
 
     def action(ctx):
-        cards = core.next_cards(ctx.conn, limit=limit, parent_id=parent)
+        cards = core.next_cards(ctx.conn, ctx.project.id, limit=limit, parent_id=parent)
         return [views.card_detail(ctx.conn, card) for card in cards]
 
     run(pretty, action, render=lambda ctx, data: pretty_render.render_list(ctx.conn, data))

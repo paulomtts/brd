@@ -1,10 +1,22 @@
 import json
+import shutil
+import uuid
 
 import pytest
 from typer.testing import CliRunner
 
-from brd import paths
+from brd import db, paths, prompt
 from brd.cli import app
+from brd.models import Project
+from tests.cli_helpers import err, human, invoke, ok
+from tests.factories import (
+    NOW,
+    OTHER_PROJECT,
+    add_project,
+    make_card,
+    make_document,
+    make_issue,
+)
 
 runner = CliRunner()
 
@@ -33,6 +45,7 @@ def test_prompt_prints_plain_markdown_not_json():
     assert result.exit_code == 0
     assert "## Task tracking with brd" in result.output
     assert "brd --help" in result.output
+    assert result.output == prompt.render()
     with pytest.raises(json.JSONDecodeError):
         json.loads(result.output)
 
@@ -52,8 +65,15 @@ def test_init_registers_project(isolated_env):
     payload = json.loads(result.stdout)
     assert payload["ok"] is True
     assert payload["data"]["name"] == "myrepo"
-    assert (isolated_env / ".brd").is_file()
-    assert paths.project_db_path(isolated_env).is_file()
+    assert set(payload["data"]) == {"id", "name", "root_path", "created_at"}
+    assert payload["data"]["root_path"] == str(isolated_env)
+    assert list(isolated_env.iterdir()) == []
+    conn = db.connect(paths.brd_db_path())
+    try:
+        stored = conn.execute("SELECT name, root_path FROM projects").fetchall()
+    finally:
+        conn.close()
+    assert [tuple(r) for r in stored] == [("myrepo", str(isolated_env))]
 
 
 def test_init_twice_succeeds_and_preserves_cards(isolated_env):
@@ -84,6 +104,80 @@ def test_init_pretty_flag_switches_off_json(isolated_env, flag):
     with pytest.raises(json.JSONDecodeError):
         json.loads(result.stdout)
     assert "myrepo" in result.stdout
+
+
+def _moved(tmp_path, monkeypatch):
+    """init + one card in old/, then old/ renamed to new/ and the cwd moved there."""
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    old = tmp_path / "old"
+    new = tmp_path / "new"
+    old.mkdir()
+    monkeypatch.chdir(old)
+    project = ok("init")
+    ok("add", "--title", "Moved card")
+    old.rename(new)
+    monkeypatch.chdir(new)
+    return project, old, new
+
+
+def test_init_relink_by_old_root_brings_the_board_along(tmp_path, monkeypatch):
+    project, old, new = _moved(tmp_path, monkeypatch)
+    assert err("list") == "ProjectNotFoundError"
+
+    relinked = ok("init", "--relink", old)
+
+    assert relinked == {**project, "root_path": str(new)}
+    assert [card["title"] for card in ok("list")] == ["Moved card"]
+
+
+def test_init_relink_by_id_brings_the_board_along(tmp_path, monkeypatch):
+    project, old, new = _moved(tmp_path, monkeypatch)
+
+    relinked = ok("init", "--relink", project["id"], "--name", "renamed")
+
+    assert relinked == {**project, "root_path": str(new), "name": "renamed"}
+    assert [card["title"] for card in ok("list")] == ["Moved card"]
+    assert ok("projects") == [relinked]
+
+
+def test_init_relink_with_an_unknown_id_is_not_found(tmp_path, monkeypatch):
+    project, old, new = _moved(tmp_path, monkeypatch)
+
+    assert err("init", "--relink", str(uuid.uuid4())) == "ProjectNotFoundError"
+    assert ok("projects") == [project]
+
+
+def test_init_relink_onto_another_projects_root_is_refused(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    a = tmp_path / "a"
+    b = tmp_path / "b"
+    a.mkdir()
+    b.mkdir()
+    monkeypatch.chdir(a)
+    project_a = ok("init")
+    monkeypatch.chdir(b)
+    ok("init")
+    before = ok("projects")
+
+    assert err("init", "--relink", project_a["id"]) == "ProjectAlreadyExistsError"
+    assert ok("projects") == before
+
+
+def test_init_relink_pretty_flag_switches_off_json(tmp_path, monkeypatch):
+    project, old, new = _moved(tmp_path, monkeypatch)
+
+    result = invoke("init", "--relink", old, "--pretty")
+
+    assert result.exit_code == 0, result.output
+    with pytest.raises(json.JSONDecodeError):
+        json.loads(result.stdout)
+    assert str(new) in result.stdout
+
+
+def test_init_help_mentions_relink():
+    result = invoke("init", "--help")
+    assert result.exit_code == 0
+    assert "--relink" in result.output
 
 
 def test_projects_lists_registered_projects(isolated_env):
@@ -121,7 +215,11 @@ def test_forget_removes_current_project(isolated_env):
     assert payload["ok"] is True
     assert payload["data"]["name"] == "myrepo"
     assert not (isolated_env / ".brd").exists()
-    assert not paths.project_db_path(isolated_env).is_file()
+    conn = db.connect(paths.brd_db_path())
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM projects").fetchone()[0] == 0
+    finally:
+        conn.close()
 
     projects_result = runner.invoke(app, ["projects"])
     assert json.loads(projects_result.stdout)["data"] == []
@@ -154,6 +252,49 @@ def test_forget_pretty_flag_switches_off_json(isolated_env, flag):
     with pytest.raises(json.JSONDecodeError):
         json.loads(result.stdout)
     assert "myrepo" in result.stdout
+
+
+def test_forget_project_option_works_after_the_repo_is_deleted(
+    isolated_env, tmp_path, monkeypatch
+):
+    project = ok("init")
+    monkeypatch.chdir(tmp_path)
+    shutil.rmtree(isolated_env)
+
+    assert ok("forget", "--project", project["id"]) == project
+    assert ok("projects") == []
+
+
+def test_forget_project_option_with_an_unknown_id_is_not_found(isolated_env):
+    project = ok("init")
+
+    assert err("forget", "--project", str(uuid.uuid4())) == "ProjectNotFoundError"
+    assert ok("projects") == [project]
+
+
+def test_forget_from_a_subdirectory_forgets_the_enclosing_project(
+    isolated_env, monkeypatch
+):
+    project = ok("init")
+    sub = isolated_env / "sub"
+    sub.mkdir()
+    monkeypatch.chdir(sub)
+
+    assert ok("forget") == project
+    assert ok("projects") == []
+
+
+def test_forget_refuses_both_a_path_and_project(isolated_env):
+    project = ok("init")
+
+    assert err("forget", isolated_env, "--project", project["id"]) == "UsageError"
+    assert ok("projects") == [project]
+
+
+def test_forget_help_mentions_project_option():
+    result = invoke("forget", "--help")
+    assert result.exit_code == 0
+    assert "--project" in result.output
 
 
 def _last_json_line(output: str) -> dict:
@@ -550,6 +691,8 @@ def test_import_round_trips_a_board_into_a_fresh_project(isolated_env, monkeypat
     snapshot_file = isolated_env.parent / "snapshot.json"
     snapshot_file.write_text(tree_result.stdout)
 
+    # A second install: one install's projects share brd.db, where these ids exist.
+    monkeypatch.setenv("XDG_DATA_HOME", str(isolated_env.parent / "other-data"))
     other_repo = isolated_env.parent / "other-repo"
     other_repo.mkdir()
     monkeypatch.chdir(other_repo)
@@ -575,7 +718,7 @@ def test_import_rejects_colliding_ids(isolated_env):
     result = runner.invoke(app, ["import", str(snapshot_file)])
     assert result.exit_code != 0
     payload = json.loads(result.stdout)
-    assert payload["error"]["type"] == "CardAlreadyExistsError"
+    assert payload["error"]["type"] == "ProjectNotEmptyError"
 
 
 def test_import_missing_file_errors(isolated_env):
@@ -706,3 +849,488 @@ def test_end_to_end_workflow(isolated_env):
 
     projects_payload = json.loads(runner.invoke(app, ["projects"]).stdout)
     assert projects_payload["data"][0]["name"] == "myrepo"
+
+
+def _is_uuid4(value):
+    return uuid.UUID(value).version == 4 and str(uuid.UUID(value)) == value
+
+
+def test_init_reports_project_with_id_first(isolated_env):
+    result = runner.invoke(app, ["init"])
+    assert result.exit_code == 0
+    data = json.loads(result.stdout)["data"]
+    assert list(data) == ["id", "name", "root_path", "created_at"]
+    assert _is_uuid4(data["id"])
+    assert data["root_path"] == str(isolated_env)
+
+
+def test_projects_reports_the_id_init_assigned_and_rerun_keeps_it(isolated_env):
+    first = json.loads(runner.invoke(app, ["init"]).stdout)["data"]
+    second = json.loads(runner.invoke(app, ["init", "--name", "renamed"]).stdout)["data"]
+
+    listed = json.loads(runner.invoke(app, ["projects"]).stdout)["data"]
+
+    assert second["id"] == first["id"]
+    assert second["created_at"] == first["created_at"]
+    assert listed == [second]
+    assert list(listed[0]) == ["id", "name", "root_path", "created_at"]
+
+
+def test_projects_pretty_includes_the_id(isolated_env):
+    project_id = json.loads(runner.invoke(app, ["init"]).stdout)["data"]["id"]
+    result = runner.invoke(app, ["projects", "--pretty"])
+    assert result.exit_code == 0
+    assert project_id in result.stdout
+
+
+def test_forget_reports_the_forgotten_project_id(isolated_env):
+    project_id = json.loads(runner.invoke(app, ["init"]).stdout)["data"]["id"]
+    result = runner.invoke(app, ["forget"])
+    assert result.exit_code == 0
+    assert json.loads(result.stdout)["data"]["id"] == project_id
+
+
+FOREIGN = "f0f0f0f0-0000-4000-8000-000000000000"
+
+
+@pytest.fixture
+def foreign(project):
+    """Seed another project and its card FOREIGN into the current board file.
+    No command can do this until every project shares one database."""
+    conn = db.connect(paths.brd_db_path())
+    try:
+        add_project(conn, OTHER_PROJECT)
+        make_card(conn, FOREIGN, title="Foreign", project_id=OTHER_PROJECT.id)
+    finally:
+        conn.close()
+    return FOREIGN
+
+
+FOREIGN_ISSUE = "f1f1f1f1-0000-4000-8000-000000000000"
+FOREIGN_DOC = "f2f2f2f2-0000-4000-8000-000000000000"
+
+
+@pytest.fixture
+def foreign_entities(project, foreign):
+    """Besides card FOREIGN, the other project owns the open issue
+    FOREIGN_ISSUE and the document FOREIGN_DOC (stem `notes`, tag `t`)."""
+    conn = db.connect(paths.brd_db_path())
+    try:
+        make_issue(conn, FOREIGN_ISSUE, title="Foreign issue", project_id=OTHER_PROJECT.id)
+        make_document(
+            conn, FOREIGN_DOC, "notes", content="foreign body", project_id=OTHER_PROJECT.id
+        )
+        conn.execute("INSERT INTO tags (entity_id, tag) VALUES (?, 't')", (FOREIGN_DOC,))
+        conn.commit()
+    finally:
+        conn.close()
+    return {"card": foreign, "issue": FOREIGN_ISSUE, "document": FOREIGN_DOC}
+
+
+def _refused(*args, error_type: str = "CardNotFoundError") -> None:
+    result = invoke(*args)
+    assert result.exit_code == 1, result.output
+    error = json.loads(result.stdout)["error"]
+    assert error["type"] == error_type
+    assert f"belongs to project {OTHER_PROJECT.name} ({OTHER_PROJECT.id})" in error["message"]
+
+
+def test_update_refuses_a_foreign_card(foreign):
+    _refused("update", foreign, "--title", "x")
+    assert ok("show", foreign)["title"] == "Foreign"
+
+
+def test_add_and_update_refuse_a_foreign_parent(foreign):
+    _refused("add", "--title", "t", "--parent", foreign)
+    mine = ok("add", "--title", "mine")["id"]
+    _refused("update", mine, "--parent", foreign)
+    assert ok("show", mine)["parent_id"] is None
+
+
+def test_delete_refuses_a_foreign_card(foreign):
+    _refused("delete", foreign)
+    _refused("delete", foreign, "--cascade")
+    assert ok("show", foreign)["id"] == foreign
+
+
+def test_block_and_unblock_refuse_a_foreign_card(foreign):
+    mine = ok("add", "--title", "mine")["id"]
+    _refused("block", foreign, "--by", mine)
+    _refused("unblock", foreign, "--by", mine)
+    assert ok("show", foreign)["blocked_by"] == []
+
+
+def test_blocker_targets_may_live_in_another_project(foreign_entities):
+    mine = ok("add", "--title", "mine")["id"]
+    ok("block", mine, "--by", FOREIGN)
+    blocked = ok("block", mine, "--by", FOREIGN_ISSUE)
+    assert sorted(blocked["blocked_by"]) == sorted([FOREIGN, FOREIGN_ISSUE])
+    assert blocked["status"] == "blocked"
+    added = ok("add", "--title", "t", "--blocked-by", FOREIGN)
+    assert (added["blocked_by"], added["status"]) == ([FOREIGN], "blocked")
+    assert err("block", mine, "--by", FOREIGN_DOC) == "InvalidBlockerError"
+    next_ids = [c["id"] for c in ok("next")]
+    assert mine not in next_ids and added["id"] not in next_ids
+    ok("unblock", mine, "--by", FOREIGN)
+    unblocked = ok("unblock", mine, "--by", FOREIGN_ISSUE)
+    assert (unblocked["blocked_by"], unblocked["status"]) == ([], "todo")
+    assert mine in [c["id"] for c in ok("next")]
+
+
+def test_show_pretty_renders_a_foreign_blocker(foreign):
+    mine = ok("add", "--title", "mine")["id"]
+    ok("block", mine, "--by", foreign)
+    assert "blocked by: other: Foreign" in human("show", mine).splitlines()
+
+
+def _seed_edges(card_id, *blocker_ids):
+    """blocked_by rows no command would write (a missing or document target,
+    or one from another project's card)."""
+    conn = db.connect(paths.brd_db_path())
+    try:
+        for blocker_id in blocker_ids:
+            db.add_blocked_by_edge(conn, card_id, blocker_id)
+    finally:
+        conn.close()
+
+
+def test_show_pretty_renders_a_foreign_issue_blocker(foreign_entities):
+    mine = ok("add", "--title", "mine", "--blocked-by", FOREIGN_ISSUE)["id"]
+    assert "blocked by: other: Foreign issue" in human("show", mine).splitlines()
+
+
+def test_a_foreign_document_blocker_renders_and_never_blocks(foreign_entities):
+    mine = ok("add", "--title", "mine")["id"]
+    _seed_edges(mine, FOREIGN_DOC)
+    shown = ok("show", mine)
+    assert shown["status"] == "todo"
+    assert shown["blockers"] == [
+        {
+            "id": FOREIGN_DOC,
+            "kind": "document",
+            "project": {"id": OTHER_PROJECT.id, "name": OTHER_PROJECT.name},
+            "title": "notes",
+            "status": None,
+            "released": True,
+        }
+    ]
+    assert "blocked by: other: notes" in human("show", mine).splitlines()
+
+
+def test_show_pretty_mixed_blockers_keep_order(foreign):
+    lexer = ok("add", "--title", "Lexer")["id"]
+    mine = ok("add", "--title", "mine", "--blocked-by", lexer, "--blocked-by", foreign)["id"]
+    _seed_edges(mine, "ghost")
+    rendered = {lexer: "[[Lexer]] (card)", foreign: "other: Foreign", "ghost": "not-found ghost"}
+    blocked_by = ok("show", mine)["blocked_by"]
+    assert sorted(blocked_by) == sorted(rendered)
+    expected = "blocked by: " + ", ".join(rendered[b] for b in blocked_by)
+    assert expected in human("show", mine).splitlines()
+
+
+def test_show_pretty_of_a_foreign_card_treats_its_own_project_as_local(foreign):
+    here = ok("add", "--title", "Here")
+    conn = db.connect(paths.brd_db_path())
+    try:
+        make_card(conn, "F2", title="F2", project_id=OTHER_PROJECT.id)
+    finally:
+        conn.close()
+    _seed_edges("F2", foreign, here["id"])
+    # Shown from this project's cwd, but F2 belongs to `other`: its sibling
+    # card is local and this project's card is the foreign one.
+    here_name = ok("show", here["id"])["project"]["name"]
+    rendered = {foreign: "[[Foreign]] (card)", here["id"]: f"{here_name}: Here"}
+    blocked_by = ok("show", "F2")["blocked_by"]
+    expected = "blocked by: " + ", ".join(rendered[b] for b in blocked_by)
+    assert expected in human("show", "F2").splitlines()
+
+
+def test_show_pretty_tells_a_same_named_project_apart_by_id(project):
+    mine = ok("add", "--title", "mine")["id"]
+    twin = Project(
+        id="33333333-3333-4333-8333-333333333333",
+        name=ok("show", mine)["project"]["name"],  # the cwd project's own name
+        root_path="/twin",
+        created_at=NOW,
+    )
+    conn = db.connect(paths.brd_db_path())
+    try:
+        add_project(conn, twin)
+        make_card(conn, "twin-card", title="Twin", project_id=twin.id)
+    finally:
+        conn.close()
+    ok("block", mine, "--by", "twin-card")
+    assert f"blocked by: {twin.name}: Twin" in human("show", mine).splitlines()
+
+
+def _blocker_entry(id_, kind, title, status, released, project=OTHER_PROJECT):
+    return {
+        "id": id_,
+        "kind": kind,
+        "project": {"id": project.id, "name": project.name},
+        "title": title,
+        "status": status,
+        "released": released,
+    }
+
+
+def test_card_outputs_carry_foreign_blockers(foreign_entities):
+    expected = {
+        FOREIGN: _blocker_entry(FOREIGN, "card", "Foreign", "todo", False),
+        FOREIGN_ISSUE: _blocker_entry(FOREIGN_ISSUE, "issue", "Foreign issue", "open", False),
+    }
+    mine = ok("add", "--title", "mine")["id"]
+    ok("block", mine, "--by", FOREIGN)
+    blocked = ok("block", mine, "--by", FOREIGN_ISSUE)
+    (listed,) = [c for c in ok("list") if c["id"] == mine]
+    (node,) = [n for n in ok("tree") if n["id"] == mine]
+    for card in (blocked, ok("show", mine), listed, node):
+        # blocked_by is still the plain list of ids; blockers follows its order.
+        assert sorted(card["blocked_by"]) == sorted([FOREIGN, FOREIGN_ISSUE])
+        assert card["blockers"] == [expected[b] for b in card["blocked_by"]]
+
+    added = ok("add", "--title", "t", "--blocked-by", FOREIGN)
+    assert (added["blocked_by"], added["blockers"]) == ([FOREIGN], [expected[FOREIGN]])
+    assert ok("update", added["id"], "--title", "t2")["blockers"] == [expected[FOREIGN]]
+    unblocked = ok("unblock", mine, "--by", FOREIGN)
+    assert (unblocked["blocked_by"], unblocked["blockers"]) == (
+        [FOREIGN_ISSUE],
+        [expected[FOREIGN_ISSUE]],
+    )
+    free = ok("add", "--title", "free")["id"]
+    assert [c["blockers"] for c in ok("next") if c["id"] == free] == [[]]
+
+
+def test_a_finished_foreign_blocker_is_released(foreign):
+    mine = ok("add", "--title", "mine", "--blocked-by", foreign)["id"]
+    conn = db.connect(paths.brd_db_path())
+    try:
+        conn.execute("UPDATE cards SET status = 'done' WHERE id = ?", (foreign,))
+        conn.commit()
+    finally:
+        conn.close()
+
+    shown = ok("show", mine)
+    assert shown["status"] == "todo"
+    assert shown["blockers"] == [_blocker_entry(foreign, "card", "Foreign", "done", True)]
+    assert mine in [c["id"] for c in ok("next")]
+
+
+def test_issue_open_can_block_a_foreign_card(foreign):
+    issue = ok("issue", "open", "--title", "q", "--blocks", foreign)
+    assert issue["blocks"] == [foreign]
+    shown = ok("show", foreign)
+    assert (shown["blocked_by"], shown["status"]) == ([issue["id"]], "blocked")
+    ok("issue", "close", issue["id"])
+    assert ok("show", foreign)["status"] == "todo"
+
+
+def test_forget_leaves_a_foreign_card_blocked_until_unblocked(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    for name in ("a", "b"):
+        (tmp_path / name).mkdir()
+    monkeypatch.chdir(tmp_path / "a")
+    project_a = ok("init")
+    theirs = ok("add", "--title", "theirs")["id"]
+    monkeypatch.chdir(tmp_path / "b")
+    ok("init")
+    mine = ok("add", "--title", "mine")["id"]
+    ok("block", mine, "--by", theirs)
+    ok("ref", "add", mine, theirs)
+
+    ok("forget", "--project", project_a["id"])
+
+    shown = ok("show", mine)
+    assert (shown["status"], shown["blocked_by"]) == ("blocked", [theirs])
+    assert shown["refs"] == [
+        {"id": theirs, "kind": None, "title": None, "origin": "explicit"}
+    ]
+    assert mine not in [c["id"] for c in ok("next")]
+    assert [(c["id"], c["status"]) for c in ok("list")] == [(mine, "blocked")]
+    assert [(n["id"], n["status"]) for n in ok("tree")] == [(mine, "blocked")]
+    gone = [
+        {
+            "id": theirs,
+            "kind": None,
+            "project": None,
+            "title": None,
+            "status": "not-found",
+            "released": False,
+        }
+    ]
+    assert shown["blockers"] == gone
+    assert [c["blockers"] for c in ok("list")] == [gone]
+    assert [n["blockers"] for n in ok("tree")] == [gone]
+    assert f"blocked by: not-found {theirs}" in human("show", mine).splitlines()
+    # list, next and tree --pretty print no blockers, and still none.
+    assert "blocked by" not in human("list") + human("tree")
+
+    unblocked = ok("unblock", mine, "--by", theirs)
+    assert (unblocked["blocked_by"], unblocked["status"]) == ([], "todo")
+    assert mine in [c["id"] for c in ok("next")]
+    assert ok("ref", "remove", mine, theirs)["refs"] == []
+
+    # Commands still refuse to add an edge to a missing id.
+    assert err("block", mine, "--by", theirs) == "CardNotFoundError"
+    assert err("ref", "add", mine, theirs) == "EntityNotFoundError"
+
+
+def test_comment_add_refuses_a_foreign_card(foreign):
+    _refused("comment", "add", foreign, "hi")
+    assert ok("show", foreign)["comments"] == []
+
+
+def test_listings_exclude_a_foreign_card(foreign):
+    mine = ok("add", "--title", "mine")["id"]
+    assert [c["id"] for c in ok("list")] == [mine]
+    assert [c["id"] for c in ok("list", "--status", "todo")] == [mine]
+    assert ok("list", "--parent", foreign) == []
+    assert [c["id"] for c in ok("next")] == [mine]
+    assert [node["id"] for node in ok("tree")] == [mine]
+    assert [node["id"] for node in ok("export")["projects"][0]["cards"]] == [mine]
+
+
+def test_next_and_tree_refuse_a_foreign_root(foreign):
+    _refused("next", "--parent", foreign)
+    _refused("tree", foreign)
+
+
+def test_show_is_global_and_names_the_owner(foreign):
+    mine = ok("add", "--title", "mine")["id"]
+    assert ok("show", foreign)["project"] == {
+        "id": OTHER_PROJECT.id,
+        "name": OTHER_PROJECT.name,
+    }
+    registered = next(p for p in ok("projects") if p["id"] != OTHER_PROJECT.id)
+    assert ok("show", mine)["project"] == {"id": registered["id"], "name": registered["name"]}
+    assert "project" not in ok("list")[0]
+    assert err("show", "nope") == "CardNotFoundError"
+
+
+def test_issue_commands_are_scoped_to_this_project(foreign_entities):
+    issue = foreign_entities["issue"]
+    mine = ok("issue", "open", "--title", "mine")["id"]
+    assert [i["id"] for i in ok("issue", "list")] == [mine]
+    assert [i["id"] for i in ok("issue", "list", "--status", "open")] == [mine]
+    _refused("issue", "update", issue, "--title", "x", error_type="IssueNotFoundError")
+    _refused("issue", "close", issue, error_type="IssueNotFoundError")
+    _refused("issue", "reopen", issue, error_type="IssueNotFoundError")
+    _refused("delete", issue, error_type="IssueNotFoundError")
+    shown = ok("show", issue)
+    assert (shown["title"], shown["status"]) == ("Foreign issue", "open")
+    assert [i["id"] for i in ok("issue", "list")] == [mine]
+
+
+def test_document_commands_are_scoped_to_this_project(project, foreign_entities):
+    doc = foreign_entities["document"]
+    (project / "docs").mkdir()
+    (project / "docs" / "notes.md").write_text("mine")
+    mine = ok("doc", "add", "docs/notes.md")["id"]  # the other project also has `notes`
+    assert [d["id"] for d in ok("doc", "list")] == [mine]
+    _refused("doc", "update", doc, "--title", "x", error_type="DocumentNotFoundError")
+    _refused("doc", "restore", doc, error_type="DocumentNotFoundError")
+    _refused("delete", doc, error_type="DocumentNotFoundError")
+    assert ok("show", doc)["title"] == "notes"
+    assert (project / "docs" / "notes.md").read_text() == "mine"
+    assert [d["id"] for d in ok("export")["projects"][0]["documents"]] == [mine]
+
+
+def test_ref_commands_are_scoped_to_this_project(foreign_entities):
+    mine = ok("add", "--title", "mine")["id"]
+    _refused("ref", "add", foreign_entities["card"], mine)
+    _refused("ref", "remove", foreign_entities["card"], mine)
+    assert ok("show", mine)["refs"] == []
+    assert ok("show", foreign_entities["card"])["refs"] == []
+
+
+def test_ref_targets_may_live_in_another_project(foreign_entities):
+    mine = ok("add", "--title", "mine")["id"]
+    added = ok("ref", "add", mine, FOREIGN_ISSUE)
+    assert added == {
+        "id": mine,
+        "refs": [
+            {"id": FOREIGN_ISSUE, "kind": "issue", "title": "Foreign issue", "origin": "explicit"}
+        ],
+    }
+    assert [r["id"] for r in ok("show", mine)["refs"]] == [FOREIGN_ISSUE]
+    assert [r["id"] for r in ok("show", FOREIGN_ISSUE)["referenced_by"]] == [mine]
+    issue = ok("issue", "open", "--title", "q", "--ref", FOREIGN)
+    assert [r["id"] for r in ok("show", issue["id"])["refs"]] == [FOREIGN]
+
+
+def test_tag_commands_are_scoped_to_this_project(foreign_entities):
+    doc = foreign_entities["document"]
+    assert ok("tag", "list") == []
+    _refused("tag", "add", doc, "x", error_type="DocumentNotFoundError")
+    _refused("tag", "remove", doc, "t", error_type="DocumentNotFoundError")
+    _refused("tag", "list", doc, error_type="DocumentNotFoundError")
+    assert ok("show", doc)["tags"] == ["t"]
+
+
+def test_comment_commands_are_scoped_to_this_project(project, foreign_entities):
+    conn = db.connect(paths.brd_db_path())
+    try:
+        conn.execute(
+            "INSERT INTO comments (id, entity_id, author, body, created_at) "
+            "VALUES ('k-foreign', ?, 'them', 'theirs', '2026-09-24T00:00:00+00:00')",
+            (foreign_entities["card"],),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    _refused("comment", "list", foreign_entities["card"])
+    _refused("comment", "add", foreign_entities["issue"], "hi", error_type="IssueNotFoundError")
+    _refused(
+        "comment", "add", foreign_entities["document"], "hi", error_type="DocumentNotFoundError"
+    )
+    _refused("comment", "delete", "k-foreign", error_type="CommentNotFoundError")
+    assert ok("show", foreign_entities["issue"])["comments"] == []
+    assert [c["id"] for c in ok("show", foreign_entities["card"])["comments"]] == ["k-foreign"]
+
+
+def test_forget_removes_only_the_current_projects_rows_and_backups(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    ids = {}
+    for name in ("keep", "gone"):
+        root = tmp_path / name
+        root.mkdir()
+        monkeypatch.chdir(root)
+        ok("init")
+        (root / "notes.md").write_text(f"{name} notes")
+        parent = ok("add", "--title", "Parent")
+        child = ok("add", "--title", "Child", "--parent", parent["id"])
+        issue = ok("issue", "open", "--title", "Q", "--blocks", child["id"])
+        ok("comment", "add", child["id"], "progress")
+        doc = ok("doc", "add", "notes.md", "--tag", "design")
+        ids[name] = {"parent": parent["id"], "child": child["id"], "issue": issue["id"], "doc": doc["id"]}
+
+    monkeypatch.chdir(tmp_path / "gone")
+    assert ok("forget")["name"] == "gone"
+
+    assert not (paths.docs_dir() / f"{ids['gone']['doc']}.md").exists()
+    assert (paths.docs_dir() / f"{ids['keep']['doc']}.md").read_text() == "keep notes"
+    gone = list(ids["gone"].values())
+    marks = ", ".join("?" for _ in gone)
+    conn = db.connect(paths.brd_db_path())
+    try:
+        assert [r[0] for r in conn.execute("SELECT root_path FROM projects")] == [
+            str(tmp_path / "keep")
+        ]
+        for table, column in (
+            ("entities", "id"),
+            ("comments", "entity_id"),
+            ("tags", "entity_id"),
+            ("blocked_by", "card_id"),
+            ("blocked_by", "blocks_on_id"),
+            ("refs", "src_id"),
+        ):
+            count = conn.execute(
+                f"SELECT COUNT(*) FROM {table} WHERE {column} IN ({marks})", gone
+            ).fetchone()[0]
+            assert count == 0, (table, column)
+    finally:
+        conn.close()
+    monkeypatch.chdir(tmp_path / "keep")
+    assert {c["id"] for c in ok("list")} == {ids["keep"]["parent"], ids["keep"]["child"]}
+    assert ok("show", ids["keep"]["doc"])["tags"] == ["design"]
+    assert len(ok("show", ids["keep"]["child"])["comments"]) == 1

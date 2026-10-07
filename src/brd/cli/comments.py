@@ -24,7 +24,9 @@ def add(
     run(
         pretty,
         lambda ctx: views.comment_dict(
-            comments.add(ctx.conn, entity_id, text, comments.resolve_author(author))
+            comments.add(
+                ctx.conn, ctx.project.id, entity_id, text, comments.resolve_author(author)
+            )
         ),
     )
 
@@ -37,7 +39,9 @@ def list_cmd(
     """List comments, oldest first."""
     run(
         pretty,
-        lambda ctx: [views.comment_dict(c) for c in comments.list_for(ctx.conn, entity_id)],
+        lambda ctx: [
+            views.comment_dict(c) for c in comments.list_for(ctx.conn, ctx.project.id, entity_id)
+        ],
         render=lambda ctx, data: pretty_render.render_comments(ctx.conn, data),
     )
 
@@ -48,4 +52,7 @@ def delete(
     pretty: bool = pretty_option(),
 ) -> None:
     """Delete a comment."""
-    run(pretty, lambda ctx: views.comment_dict(comments.delete(ctx.conn, comment_id)))
+    run(
+        pretty,
+        lambda ctx: views.comment_dict(comments.delete(ctx.conn, ctx.project.id, comment_id)),
+    )

@@ -14,7 +14,13 @@ def add(
     pretty: bool = pretty_option(),
 ) -> None:
     """Add tags."""
-    run(pretty, lambda ctx: {"id": entity_id, "tags": tags.add(ctx.conn, entity_id, tag_list)})
+    run(
+        pretty,
+        lambda ctx: {
+            "id": entity_id,
+            "tags": tags.add(ctx.conn, ctx.project.id, entity_id, tag_list),
+        },
+    )
 
 
 @tag_app.command("remove")
@@ -24,7 +30,13 @@ def remove(
     pretty: bool = pretty_option(),
 ) -> None:
     """Remove tags."""
-    run(pretty, lambda ctx: {"id": entity_id, "tags": tags.remove(ctx.conn, entity_id, tag_list)})
+    run(
+        pretty,
+        lambda ctx: {
+            "id": entity_id,
+            "tags": tags.remove(ctx.conn, ctx.project.id, entity_id, tag_list),
+        },
+    )
 
 
 @tag_app.command("list")
@@ -36,7 +48,7 @@ def list_cmd(
 
     def action(ctx):
         if entity_id is None:
-            return tags.counts(ctx.conn)
-        return {"id": entity_id, "tags": tags.list_for(ctx.conn, entity_id)}
+            return tags.counts(ctx.conn, ctx.project.id)
+        return {"id": entity_id, "tags": tags.list_for(ctx.conn, ctx.project.id, entity_id)}
 
     run(pretty, action)
