@@ -1,7 +1,14 @@
+import os
+
 import pytest
 
 from brd import db
 from tests.factories import PROJECT
+
+# GitHub Actions makes typer colour its help even when nobody is looking, and
+# the codes split the text the help tests look for. typer reads this when it is
+# first imported, so it is set before any test module loads the CLI.
+os.environ["_TYPER_FORCE_DISABLE_TERMINAL"] = "1"
 
 
 @pytest.fixture
