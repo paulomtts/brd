@@ -51,8 +51,14 @@ def _set_up(conn: sqlite3.Connection) -> consolidate.Report | None:
         # IMMEDIATE takes the write lock up front: a concurrent first run
         # waits here on the busy timeout, then finds the work already done.
         conn.execute("BEGIN IMMEDIATE")
-        if _version(conn) >= db.SCHEMA_VERSION:
+        version = _version(conn)
+        if version >= db.SCHEMA_VERSION:
             conn.rollback()
+            return None
+        if version >= db.SINGLE_DB_VERSION:
+            db.upgrade_brd_schema(conn, version)
+            conn.execute(f"PRAGMA user_version = {db.SCHEMA_VERSION}")
+            conn.commit()
             return None
         if paths.master_db_path().is_file():
             return consolidate.migrate(conn)
@@ -223,7 +229,7 @@ def registry_count() -> int:
     way out when a migration aborts. brd.db once migrated, else master.db,
     else 0."""
     if paths.brd_db_path().is_file():
-        count = _count_projects(paths.brd_db_path(), db.SCHEMA_VERSION)
+        count = _count_projects(paths.brd_db_path(), db.SINGLE_DB_VERSION)
         if count is not None:
             return count
     if paths.master_db_path().is_file():

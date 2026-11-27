@@ -114,8 +114,8 @@ DOC_COLUMNS = "id, title, source_path, stem, content_hash, created_at, updated_a
 def test_fresh_db_gets_current_schema(tmp_path):
     conn = db.connect(tmp_path / "p.db")
     db.migrate_project(conn, PROJECT)
-    assert db.SCHEMA_VERSION == 4
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
+    assert db.SCHEMA_VERSION == 5
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 5
     assert _tables(conn) == {
         "projects", "entities", "cards", "blocked_by", "issues", "documents",
         "comments", "tags", "refs",
@@ -176,7 +176,7 @@ def test_dangling_legacy_rows_are_dropped_not_fatal(tmp_path):
     db.migrate_project(conn, PROJECT)
     assert db.get_card(conn, "a").parent_id is None
     assert conn.execute("SELECT COUNT(*) FROM blocked_by").fetchone()[0] == 0
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION
     assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
     assert _rows(conn, "entities", "id, project_id") == [("a", PROJECT.id)]
 
@@ -293,7 +293,7 @@ def test_v3_board_migrates_to_v4_with_project_id(tmp_path):
     conn = db.connect(path)
     db.migrate_project(conn, PROJECT)
 
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION
     assert {table: _rows(conn, table) for table in V3_UNCHANGED_TABLES} == before
     assert _rows(conn, "documents", DOC_COLUMNS) == before_documents
     assert _rows(conn, "entities", "id, kind") == before_entities
@@ -379,3 +379,35 @@ def test_brd_schema_matches_a_fresh_board_without_its_project(tmp_path):
     assert brd.execute("PRAGMA user_version").fetchone()[0] == 0
     board.close()
     brd.close()
+
+
+CHILDREN_QUERY = "SELECT * FROM cards WHERE parent_id = ? ORDER BY created_at"
+
+
+def _plan(conn, query):
+    return " ".join(row[3] for row in conn.execute(f"EXPLAIN QUERY PLAN {query}", ("p",)))
+
+
+def test_listing_children_uses_an_index(tmp_path):
+    conn = db.connect(tmp_path / "p.db")
+    db.migrate_project(conn, PROJECT)
+    assert _plan(conn, CHILDREN_QUERY) == "SEARCH cards USING INDEX cards_parent (parent_id=?)"
+
+
+def test_v4_board_gains_the_children_index_and_keeps_its_rows(tmp_path):
+    path = tmp_path / "v4.db"
+    _make_v3(path)
+    conn = sqlite3.connect(path)
+    db._migrate_to_v4(conn, PROJECT)
+    conn.execute("PRAGMA user_version = 4")
+    conn.commit()
+    cards = _rows(conn, "cards")
+    conn.close()
+
+    conn = db.connect(path)
+    db.migrate_project(conn, PROJECT)
+
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 5
+    assert "cards_parent" in _names(conn, "index")
+    assert _rows(conn, "cards") == cards
+    assert _rows(conn, "projects") == [PROJECT_ROW]

@@ -882,3 +882,42 @@ def test_forget_current_project_outside_any_project_is_not_found(tmp_path, monke
         master.forget_current_project(nowhere)
 
     assert str(excinfo.value) == _not_found(nowhere)
+
+
+def _make_v4_brd_db(tmp_path):
+    """brd.db as the previous release left it: v4, one project, no index."""
+    root = tmp_path / "repo"
+    root.mkdir()
+    project = master.init_project(root)
+    conn = _brd()
+    conn.execute("DROP INDEX IF EXISTS cards_parent")
+    conn.execute("PRAGMA user_version = 4")
+    conn.commit()
+    conn.close()
+    return project
+
+
+def test_connect_upgrades_a_v4_brd_db_in_place(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    project = _make_v4_brd_db(tmp_path)
+    notices = []
+
+    conn = master.connect(notices.append)
+
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 5
+    indexes = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'index'")}
+    assert "cards_parent" in indexes
+    assert [p.id for p in db.list_projects(conn)] == [project.id]
+    assert notices == []
+    conn.close()
+
+
+def test_registry_count_reads_a_v4_brd_db_without_upgrading_it(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    _make_v4_brd_db(tmp_path)
+
+    assert master.registry_count() == 1
+
+    conn = _brd()
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
+    conn.close()

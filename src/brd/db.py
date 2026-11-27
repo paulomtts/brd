@@ -97,7 +97,11 @@ def init_master_schema(conn: sqlite3.Connection) -> None:
         raise
 
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
+
+# The version that made brd.db and gave it a projects table. A brd.db at or
+# above it is migrated; one below it has not been set up yet.
+SINGLE_DB_VERSION = 4
 
 # Stored card statuses ('blocked' is derived, never stored).
 CARD_STATUSES = ("todo", "in_progress", "done", "merged", "canceled", "archived")
@@ -392,10 +396,24 @@ def _migrate_to_v4(conn: sqlite3.Connection, project: Project | None) -> None:
         conn.execute(statement)
 
 
+def _migrate_to_v5(conn: sqlite3.Connection) -> None:
+    # Listing a card's children runs once per card in `tree` and `export`;
+    # without this each of those scans every card of every project.
+    conn.execute("CREATE INDEX cards_parent ON cards(parent_id, created_at)")
+
+
+def upgrade_brd_schema(conn: sqlite3.Connection, version: int) -> None:
+    """Bring a brd.db at `version` (SINGLE_DB_VERSION or later) up to date.
+    Runs inside the caller's transaction; the caller sets user_version and
+    commits."""
+    if version < 5:
+        _migrate_to_v5(conn)
+
+
 def board_projects(conn: sqlite3.Connection) -> list[Project]:
     """The projects rows a board records; [] below v4, where a projects
     table, if any, is a legacy leftover."""
-    if conn.execute("PRAGMA user_version").fetchone()[0] < 4:
+    if conn.execute("PRAGMA user_version").fetchone()[0] < SINGLE_DB_VERSION:
         return []
     rows = conn.execute("SELECT * FROM projects ORDER BY created_at").fetchall()
     return [_row_to_project(row) for row in rows]
@@ -440,6 +458,7 @@ def migrate_project(conn: sqlite3.Connection, project: Project) -> None:
             _migrate_to_v3(conn)
         if version < 4:
             _migrate_to_v4(conn, project)
+        upgrade_brd_schema(conn, max(version, SINGLE_DB_VERSION))
         violations = conn.execute("PRAGMA foreign_key_check").fetchall()
         if violations:
             raise MigrationError(
@@ -459,7 +478,7 @@ def init_project_schema(conn: sqlite3.Connection, project: Project) -> None:
 
 
 def init_brd_schema(conn: sqlite3.Connection) -> None:
-    """Build brd.db's empty v4 schema: the migrations a fresh board runs, so
+    """Build brd.db's empty current schema: the migrations a fresh board runs, so
     the two cannot drift, but with no projects row. Runs inside the caller's
     transaction with foreign keys off, as migrate_project runs them; the
     caller sets user_version and commits."""
@@ -467,6 +486,7 @@ def init_brd_schema(conn: sqlite3.Connection) -> None:
     _migrate_to_v2(conn)
     _migrate_to_v3(conn)
     _migrate_to_v4(conn, None)
+    upgrade_brd_schema(conn, SINGLE_DB_VERSION)
 
 
 def docs_dir(conn: sqlite3.Connection) -> Path:
